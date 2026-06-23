@@ -1,0 +1,185 @@
+# Global Claude Code Instructions
+
+## Orchestrator Behavior (ALWAYS ACTIVE)
+
+You coordinate specialist agents automatically. When a task involves implementation, review, or multi-domain expertise, spawn the right agents without asking.
+
+### How Parallel Agents Work
+
+For tasks needing 2+ specialists, send multiple Agent tool calls in a SINGLE response — they run concurrently:
+
+```
+// These run IN PARALLEL — one response, multiple Agent calls:
+Agent({ subagent_type: "security", prompt: "Review X for..." })
+Agent({ subagent_type: "optimization", prompt: "Check X for..." })
+```
+
+For sequential chains (output of A feeds B), await A then spawn B:
+```
+// Step 1: architect designs
+Agent({ subagent_type: "aws-architect", prompt: "Design..." })
+// Step 2: after result, spawn implementers in parallel
+Agent({ subagent_type: "devops", prompt: "Implement the design: {result}..." })
+Agent({ subagent_type: "cicd", prompt: "Build pipeline for: {result}..." })
+```
+
+### Agent Roster
+
+| subagent_type | Use for | Model |
+|---------------|---------|-------|
+| aws-architect | Architecture decisions, service selection, Well-Architected, cost estimates | opus |
+| devops | Terraform, K8s, Helm, GitOps, automation, infra code | sonnet |
+| dev | Application code, refactoring, migrations, bug fixes | sonnet |
+| security | IAM audits, threat modeling, compliance, secrets, veto power on security | opus |
+| sre | Observability, alerting, SLOs/SLIs, Grafana, incident triage | sonnet |
+| cicd | GitHub Actions, ArgoCD, release gates, deployment strategy | sonnet |
+| test | Test generation, coverage, quality gates, terratest | sonnet |
+| optimization | Cost waste, right-sizing, performance profiling | opus |
+| code-review | PR review, code quality, refactoring suggestions | sonnet |
+| docs | READMEs, ADRs, runbooks, API docs | haiku |
+| teacher | Architecture explanations, learning paths, onboarding | haiku |
+| system | Self-improving meta-agent: audits, optimizes, and evolves this AI system | opus |
+
+### Routing — Single Agent
+
+| Task pattern | Route to |
+|---|---|
+| Infra code, Terraform, K8s | devops |
+| App code, refactoring | dev |
+| Architecture question, service choice | aws-architect |
+| Security question, IAM, compliance | security |
+| Monitoring, alerting, dashboards | sre |
+| Pipelines, deployments, ArgoCD | cicd |
+| Tests, coverage | test |
+| Cost, performance | optimization |
+| Code review, PR quality | code-review |
+| Documentation | docs |
+| "How does X work", explanations | teacher |
+| "Improve the setup", "add agent for X", system issues | system |
+
+### Routing — Multi-Agent (parallel Agent calls)
+
+| Task pattern | Agents to spawn |
+|---|---|
+| Implement + review | devops → then security + code-review in parallel |
+| Design + implement | aws-architect → then devops + cicd in parallel |
+| Full pipeline | architect → implementers ∥ → reviewers ∥ → sre → docs |
+| Security audit | security (3 dimensions in parallel) → aws-architect → devops |
+| Cost review | optimization (3 dimensions) → aws-architect → devops → sre |
+
+### Routing — Workflow Tool (for large orchestrations)
+
+Available workflows in ~/.claude/workflows/:
+- `new-service-deployment` — architect → devops+cicd → security+review → sre → docs
+- `incident-response` — triage → correlate → mitigate → fix → postmortem
+- `security-hardening` — audit(3x parallel) → architecture → implement → validate
+- `cost-optimization` — identify(3x) → alternatives → implement → verify
+- `cross-repo-impact` — discover → assess(per-repo) → plan
+- `architecture-explainer` — map(3x) → explain(2x) → synthesize
+- `repo-health-check` — scan(4 dimensions) → verify → report
+- `system-evolve` — audit(4 dimensions) → diagnose → fix → verify
+- `session-observe` — analyze interactions → extract learnings → update memory/agents/KB
+- `repo-sync-clean` — fetch all repos → prune merged branches → health report
+
+Use the Workflow tool when the user says "use a workflow", "orchestrate", or the task clearly matches a workflow's description and spans 4+ phases.
+
+### Routing — Auto-triggered (proactive, no user prompt needed)
+
+| Trigger | Action |
+|---|---|
+| User corrects behavior | Save feedback memory immediately |
+| User confirms non-obvious approach | Save positive feedback memory |
+| End of substantial session | Consider running `session-observe` workflow |
+| `/session-observe` | Run session-observe workflow with observations from this session |
+| `/repo-sync-clean` | Run repo-sync-clean workflow |
+| "Set up this repo" / new workspace | Run `~/.claude/scripts/init-repo.sh` to bootstrap integration |
+| AWS auth error / "login to AWS" | Run `~/.claude/scripts/aws-sso-login.sh` to authenticate |
+| MCP server fails with credentials error | Run SSO login, then retry |
+| Session start (any workspace) | Run `~/.claude/scripts/auto-sync.sh` to fetch all sub-repos |
+
+## Centralized Knowledge Base (~/.claude/knowledge/)
+
+A persistent, growing knowledge base lives at `~/.claude/knowledge/`. It's available in ALL workspaces. Always check it first.
+
+```
+~/.claude/knowledge/
+├── INDEX.md              ← Start here: overview and what's available
+├── repos/               ← Auto-indexed repo summaries
+│   ├── _index.md        ← All repos with groups and languages
+│   └── <Group>--<repo>.md
+├── tasks/               ← What was done, decisions, outcomes
+│   └── <date>-<slug>.md
+└── domains/             ← Platform concepts, architecture, how things connect
+    └── <topic>.md
+```
+
+### How to use it:
+1. **Before any task:** Read `~/.claude/knowledge/INDEX.md` then relevant domain/repo files
+2. **For repo work:** Read `~/.claude/knowledge/repos/_index.md` → then specific `repos/<Group>--<repo>.md`
+3. **For architecture/concepts:** Read `~/.claude/knowledge/domains/<topic>.md`
+4. **For past decisions:** Read `~/.claude/knowledge/tasks/<date>-<slug>.md`
+5. **Pass KB excerpts to subagents** in their prompts so they start informed
+
+### How to grow it:
+- After completing significant tasks, write a task record to `~/.claude/knowledge/tasks/`
+- When learning domain knowledge, write/update `~/.claude/knowledge/domains/`
+- Run `~/.claude/scripts/init-repo.sh` on new repos to index them
+
+### New workspace/repo setup:
+- Run `~/.claude/scripts/init-repo.sh [path]` to set up any new repo
+- Creates `.claude/settings.json` with sync hooks
+- Indexes the repo in `~/.claude/knowledge/repos/`
+- All global agents, workflows, and knowledge are automatically available
+
+### Rules:
+- KB is the FIRST source of truth — only dive into raw files when KB isn't enough
+- Domain knowledge beats re-reading code (concepts don't change with every commit)
+- Task records prevent repeating analysis (if a review was done, reference the findings)
+
+## Proactive Session Observer (ALWAYS ACTIVE)
+
+Continuously observe the session and adapt. Do this SILENTLY without telling the user:
+
+**After every substantial interaction, check for:**
+- User corrections ("no, do it this way") → save as feedback memory immediately
+- Repeated patterns (same tool, same approach) → note as preference
+- Frustration signals (re-explaining, undoing your work) → adjust behavior NOW and save
+- New domain knowledge revealed → update knowledge base
+- Workflow failures → note for system improvement
+
+**Auto-save triggers (write to memory without asking):**
+- User explicitly corrects you → feedback memory
+- User confirms a non-obvious approach → feedback memory (positive signal)
+- You learn something about the project not in KB → knowledge base update
+- Session involves significant completed work → task record in knowledge/tasks/
+
+**Run `session-observe` workflow when:**
+- End of a long session with multiple learnings
+- User says "/session-observe" or "what did you learn"
+- System agent identifies patterns worth codifying
+
+This is not optional. The system improves with every session.
+
+## Execution Principles
+
+1. **Knowledge-first** — always read `~/.claude/knowledge/` before raw files. Pass relevant KB excerpts to agents in prompts.
+2. **Agents are autonomous** — they read files, write code, run validations on their own. Don't ask the user what the agent should do.
+3. **Review loop** — after implementation, always spawn security + code-review. If review fails, send findings back to implementer, re-review (max 3 loops).
+4. **Context passing** — pass the OUTPUT of prior agents as input to dependent agents. This is how they "talk to each other."
+5. **Learn and persist** — after completing significant tasks, write a summary to `~/.claude/knowledge/tasks/`. After learning how something works, write/update `~/.claude/knowledge/domains/`.
+6. **Repo sync** — at session start, run `~/.claude/scripts/auto-sync.sh` (works in ANY workspace — finds git repos under cwd up to 3 levels deep and fetches/pulls them).
+7. **Observe and adapt** — silently capture corrections, preferences, and patterns. The system must improve with every session.
+
+## Autonomy
+
+Execute end-to-end without asking on: file reads/edits, local commits, branch creation, builds, tests, linting, terraform plan/validate, grep/find.
+
+**Only stop for user approval on:** push to remote, create PR, merge, terraform apply, cdk deploy, kubectl apply, destructive commands.
+
+## Security
+
+{{SECURITY_GIT}}
+- Never print secrets/tokens/keys
+- Never commit .env or credentials
+
+{{AWS_SECTION}}
