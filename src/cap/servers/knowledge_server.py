@@ -88,7 +88,7 @@ async def list_tools():
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query"},
-                    "workspace": {"type": "string", "description": "Workspace path (required for scoped search)"},
+                    "workspace": {"type": "string", "description": "Workspace path to scope search. If omitted or set to 'all', searches across all indexed workspaces."},
                     "scope": {
                         "type": "string",
                         "enum": ["all", "code", "config", "doc", "decision", "convention", "glossary", "incident"],
@@ -101,7 +101,7 @@ async def list_tools():
                         "default": "hybrid",
                     },
                 },
-                "required": ["query", "workspace"],
+                "required": ["query"],
             },
         ),
         Tool(
@@ -163,9 +163,9 @@ async def list_tools():
                     "entity": {"type": "string", "description": "Entity name to start from"},
                     "relation_type": {"type": "string", "description": "Filter by relation type"},
                     "depth": {"type": "integer", "default": 2, "minimum": 1, "maximum": 4},
-                    "workspace": {"type": "string"},
+                    "workspace": {"type": "string", "description": "Workspace path to scope traversal. If omitted or set to 'all', traverses across all indexed workspaces."},
                 },
-                "required": ["entity", "workspace"],
+                "required": ["entity"],
             },
         ),
         Tool(
@@ -241,7 +241,9 @@ async def call_tool(name: str, arguments: dict):
 
 async def _handle_search(args: dict):
     query = args["query"]
-    workspace = args["workspace"]
+    workspace = args.get("workspace")
+    if workspace == "all":
+        workspace = None
     top_k = args.get("top_k", 10)
     strategy = args.get("strategy", "hybrid")
     scope = args.get("scope", "all")
@@ -366,7 +368,9 @@ async def _handle_record(args: dict):
 
 async def _handle_graph_query(args: dict):
     entity = args["entity"]
-    workspace = args["workspace"]
+    workspace = args.get("workspace")
+    if workspace == "all":
+        workspace = None
     depth = args.get("depth", 2)
 
     node_ids = find_entities(db, entity, workspace)

@@ -64,10 +64,15 @@ def _sanitize_fts5_query(query: str) -> str:
     return query
 
 
+def _is_global(workspace: str | None) -> bool:
+    """Return True if workspace is unset or signals a cross-workspace search."""
+    return workspace is None or workspace == "" or workspace == "all"
+
+
 def keyword_search(
     conn: sqlite3.Connection,
     query: str,
-    workspace: str,
+    workspace: str | None = None,
     top_k: int = 20,
     scope: str | None = None,
 ) -> list[tuple[int, float]]:
@@ -76,7 +81,8 @@ def keyword_search(
     Args:
         conn:      Active SQLite connection.
         query:     Full-text search query string.
-        workspace: Workspace to scope results.
+        workspace: Workspace to scope results.  When None, empty, or "all",
+                   results from ALL workspaces are returned (global search).
         top_k:     Maximum number of results to return.
         scope:     Optional content_type filter.
 
@@ -86,26 +92,37 @@ def keyword_search(
         we return them as-is so callers can rank by ascending order or negate.
     """
     query = _sanitize_fts5_query(query)
+    global_mode = _is_global(workspace)
     try:
         if scope:
+            ws_clause = "" if global_mode else "AND  ke.workspace = ?"
+            params: list[Any] = [query]
+            if not global_mode:
+                params.append(workspace)
+            params.extend([scope, top_k])
             rows = conn.execute(
-                """
+                f"""
                 SELECT ke.id,
                        bm25(knowledge_fts) AS score
                 FROM   knowledge_fts
                 JOIN   knowledge_entries ke ON ke.id = knowledge_fts.rowid
                 WHERE  knowledge_fts MATCH ?
-                  AND  ke.workspace = ?
+                  {ws_clause}
                   AND  ke.content_type = ?
                 ORDER  BY score
                 LIMIT  ?
                 """,
-                (query, workspace, scope, top_k),
+                params,
             ).fetchall()
         else:
+            ws_clause = "" if global_mode else "AND  ke.workspace = ?"
+            params = [query]
+            if not global_mode:
+                params.append(workspace)
+            params.append(top_k)
             # Boost repo_summary entries (3x score) so they rank above raw files
             rows = conn.execute(
-                """
+                f"""
                 SELECT ke.id,
                        CASE WHEN ke.content_type = 'repo_summary'
                             THEN bm25(knowledge_fts) * 3.0
@@ -114,11 +131,11 @@ def keyword_search(
                 FROM   knowledge_fts
                 JOIN   knowledge_entries ke ON ke.id = knowledge_fts.rowid
                 WHERE  knowledge_fts MATCH ?
-                  AND  ke.workspace = ?
+                  {ws_clause}
                 ORDER  BY score
                 LIMIT  ?
                 """,
-                (query, workspace, top_k),
+                params,
             ).fetchall()
         return [(int(r[0]), float(r[1])) for r in rows]
     except sqlite3.OperationalError as exc:
@@ -129,7 +146,7 @@ def keyword_search(
 def semantic_search(
     vectors_table: Any,
     query_vector: list[float],
-    workspace: str,
+    workspace: str | None = None,
     top_k: int = 20,
 ) -> list[tuple[str, float]]:
     """LanceDB cosine similarity search.
@@ -137,23 +154,25 @@ def semantic_search(
     Args:
         vectors_table:  LanceDB table object (already opened by the caller).
         query_vector:   Embedding vector for the query.
-        workspace:      Workspace to scope results.
+        workspace:      Workspace to scope results.  When None, empty, or "all",
+                        results from ALL workspaces are returned (global search).
         top_k:          Maximum number of results to return.
 
     Returns:
         List of (uuid, cosine_similarity) sorted by similarity descending.
     """
     try:
-        from cap.lib.security import validate_workspace
-
-        validate_workspace(workspace)
-        results = (
+        search_builder = (
             vectors_table.search(query_vector)
             .metric("cosine")
-            .where(f"workspace = '{workspace}'")
-            .limit(top_k)
-            .to_list()
         )
+        if not _is_global(workspace):
+            from cap.lib.security import validate_workspace
+
+            validate_workspace(workspace)
+            search_builder = search_builder.where(f"workspace = '{workspace}'")
+
+        results = search_builder.limit(top_k).to_list()
         # LanceDB returns _distance (lower = closer for cosine distance).
         # Convert to similarity: similarity = 1 - distance.
         return [(str(r["uuid"]), 1.0 - float(r.get("_distance", 0.0))) for r in results]
@@ -165,7 +184,7 @@ def semantic_search(
 def graph_search(
     conn: sqlite3.Connection,
     query_entities: list[str],
-    workspace: str,
+    workspace: str | None = None,
     depth: int = 2,
     top_k: int = 20,
 ) -> list[tuple[int, float]]:
@@ -174,26 +193,30 @@ def graph_search(
     Args:
         conn:            Active SQLite connection.
         query_entities:  Entity name fragments to seed the traversal.
-        workspace:       Workspace to scope nodes and edges.
+        workspace:       Workspace to scope nodes and edges.  When None, empty,
+                         or "all", traverses across ALL workspaces (global search).
         depth:           Maximum BFS hop depth.
         top_k:           Maximum number of (entry_id, score) pairs to return.
 
     Returns:
         List of (entry_id, score) where score = 1/(hop_distance+1), capped at *top_k*.
     """
+    global_mode = _is_global(workspace)
+    ws_arg = None if global_mode else workspace
+
     # Collect seed node IDs from entity name fragments
     seed_ids: list[str] = []
     for fragment in query_entities:
-        seed_ids.extend(find_entities(conn, fragment, workspace))
+        seed_ids.extend(find_entities(conn, fragment, ws_arg))
 
     if not seed_ids:
         return []
 
-    nodes_with_depth = bfs_traverse(conn, seed_ids, max_depth=depth, workspace=workspace)
+    nodes_with_depth = bfs_traverse(conn, seed_ids, max_depth=depth, workspace=ws_arg)
     if not nodes_with_depth:
         return []
 
-    entry_scores = get_related_entries_with_depth(conn, nodes_with_depth, workspace)
+    entry_scores = get_related_entries_with_depth(conn, nodes_with_depth, ws_arg)
 
     # Sort by score descending and cap at top_k
     entry_scores.sort(key=lambda x: x[1], reverse=True)
@@ -272,7 +295,7 @@ def hybrid_search(
     vectors_table: Any,
     query: str,
     query_vector: list[float] | None,
-    workspace: str,
+    workspace: str | None = None,
     strategy: str = "hybrid",
     top_k: int = 10,
     scope: str | None = None,
@@ -284,7 +307,8 @@ def hybrid_search(
         vectors_table: LanceDB table object, or None if vector search disabled.
         query:         Raw search query string.
         query_vector:  Pre-computed embedding vector, or None (Bedrock unavailable).
-        workspace:     Workspace to scope all searches.
+        workspace:     Workspace to scope all searches.  When None, empty, or
+                       "all", searches across ALL workspaces (global search).
         strategy:      Reserved for future routing (currently all paths run hybrid).
         top_k:         Number of SearchResult objects to return.
         scope:         Optional content_type filter (e.g., "code", "config", "doc").
@@ -347,6 +371,7 @@ def hybrid_search(
     # ------------------------------------------------------------------
     # 4. Resolve UUIDs and hydrate SearchResult objects
     # ------------------------------------------------------------------
+    global_mode = _is_global(workspace)
     # Build a uuid -> entry_id map for semantic hits
     uuid_to_entry = _resolve_uuids(conn, [doc_id for doc_id, _ in merged if isinstance(doc_id, str)], workspace)
 
@@ -384,15 +409,25 @@ def hybrid_search(
     # 5. Fetch entry metadata from knowledge_entries
     # ------------------------------------------------------------------
     placeholders = ",".join("?" * len(entry_scores))
-    rows = conn.execute(
-        f"""
-        SELECT id, uuid, title, content, source_path, content_type, workspace
-        FROM   knowledge_entries
-        WHERE  id IN ({placeholders})
-          AND  workspace = ?
-        """,
-        list(entry_scores.keys()) + [workspace],
-    ).fetchall()
+    if global_mode:
+        rows = conn.execute(
+            f"""
+            SELECT id, uuid, title, content, source_path, content_type, workspace
+            FROM   knowledge_entries
+            WHERE  id IN ({placeholders})
+            """,
+            list(entry_scores.keys()),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT id, uuid, title, content, source_path, content_type, workspace
+            FROM   knowledge_entries
+            WHERE  id IN ({placeholders})
+              AND  workspace = ?
+            """,
+            list(entry_scores.keys()) + [workspace],
+        ).fetchall()
 
     results: list[SearchResult] = []
     for row in rows:
@@ -473,16 +508,22 @@ def _compute_weights(
 def _resolve_uuids(
     conn: sqlite3.Connection,
     uuids: list[str],
-    workspace: str,
+    workspace: str | None = None,
 ) -> dict[str, int]:
     """Map uuid -> entry_id for all provided UUIDs."""
     if not uuids:
         return {}
     ph = ",".join("?" * len(uuids))
-    rows = conn.execute(
-        f"SELECT uuid, id FROM knowledge_entries WHERE uuid IN ({ph}) AND workspace = ?",
-        uuids + [workspace],
-    ).fetchall()
+    if _is_global(workspace):
+        rows = conn.execute(
+            f"SELECT uuid, id FROM knowledge_entries WHERE uuid IN ({ph})",
+            uuids,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"SELECT uuid, id FROM knowledge_entries WHERE uuid IN ({ph}) AND workspace = ?",
+            uuids + [workspace],
+        ).fetchall()
     return {str(r[0]): int(r[1]) for r in rows}
 
 

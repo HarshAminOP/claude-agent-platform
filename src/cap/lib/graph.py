@@ -38,27 +38,37 @@ def _now() -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def find_entities(conn: sqlite3.Connection, query: str, workspace: str) -> list[str]:
+def find_entities(conn: sqlite3.Connection, query: str, workspace: str | None = None) -> list[str]:
     """Return node IDs whose entity_name matches *query* (case-insensitive LIKE).
 
     Args:
         conn:       Active SQLite connection.
         query:      Text fragment to search for.  Wildcards are added automatically.
-        workspace:  Workspace to scope the search.
+        workspace:  Workspace to scope the search.  When None, searches all workspaces.
 
     Returns:
         List of node ID strings (may be empty).
     """
     pattern = f"%{query}%"
-    rows = conn.execute(
-        """
-        SELECT id
-        FROM   knowledge_graph_nodes
-        WHERE  entity_name LIKE ?
-          AND  workspace   = ?
-        """,
-        (pattern, workspace),
-    ).fetchall()
+    if workspace is None:
+        rows = conn.execute(
+            """
+            SELECT id
+            FROM   knowledge_graph_nodes
+            WHERE  entity_name LIKE ?
+            """,
+            (pattern,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT id
+            FROM   knowledge_graph_nodes
+            WHERE  entity_name LIKE ?
+              AND  workspace   = ?
+            """,
+            (pattern, workspace),
+        ).fetchall()
     return [r[0] for r in rows]
 
 
@@ -235,14 +245,14 @@ def get_related_entries(
 def get_related_entries_with_depth(
     conn: sqlite3.Connection,
     nodes_with_depth: list[tuple[str, int]],
-    workspace: str,
+    workspace: str | None = None,
 ) -> list[tuple[int, float]]:
     """Like ``get_related_entries`` but scores by 1/(hop_distance+1).
 
     Args:
         conn:              Active SQLite connection.
         nodes_with_depth:  (node_id, hop_distance) pairs from BFS.
-        workspace:         Workspace filter.
+        workspace:         Workspace filter.  When None, returns entries from all workspaces.
 
     Returns:
         List of (entry_id, score) pairs, deduplicated (highest score wins).
@@ -254,15 +264,25 @@ def get_related_entries_with_depth(
     node_ids = list(depth_map.keys())
     placeholders = ",".join("?" * len(node_ids))
 
-    rows = conn.execute(
-        f"""
-        SELECT n.id, n.metadata
-        FROM   knowledge_graph_nodes n
-        WHERE  n.id IN ({placeholders})
-          AND  n.workspace = ?
-        """,
-        node_ids + [workspace],
-    ).fetchall()
+    if workspace is None:
+        rows = conn.execute(
+            f"""
+            SELECT n.id, n.metadata
+            FROM   knowledge_graph_nodes n
+            WHERE  n.id IN ({placeholders})
+            """,
+            node_ids,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT n.id, n.metadata
+            FROM   knowledge_graph_nodes n
+            WHERE  n.id IN ({placeholders})
+              AND  n.workspace = ?
+            """,
+            node_ids + [workspace],
+        ).fetchall()
 
     best: dict[int, float] = {}
     for node_id, raw_meta in rows:
