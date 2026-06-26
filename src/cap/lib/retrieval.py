@@ -52,6 +52,7 @@ def keyword_search(
     query: str,
     workspace: str,
     top_k: int = 20,
+    scope: str | None = None,
 ) -> list[tuple[int, float]]:
     """FTS5 BM25 keyword search on the ``knowledge_fts`` virtual table.
 
@@ -60,6 +61,7 @@ def keyword_search(
         query:     Full-text search query string.
         workspace: Workspace to scope results.
         top_k:     Maximum number of results to return.
+        scope:     Optional content_type filter.
 
     Returns:
         List of (entry_id, bm25_score) sorted by score descending.
@@ -67,19 +69,35 @@ def keyword_search(
         we return them as-is so callers can rank by ascending order or negate.
     """
     try:
-        rows = conn.execute(
-            """
-            SELECT ke.id,
-                   bm25(knowledge_fts) AS score
-            FROM   knowledge_fts
-            JOIN   knowledge_entries ke ON ke.id = knowledge_fts.rowid
-            WHERE  knowledge_fts MATCH ?
-              AND  ke.workspace = ?
-            ORDER  BY score
-            LIMIT  ?
-            """,
-            (query, workspace, top_k),
-        ).fetchall()
+        if scope:
+            rows = conn.execute(
+                """
+                SELECT ke.id,
+                       bm25(knowledge_fts) AS score
+                FROM   knowledge_fts
+                JOIN   knowledge_entries ke ON ke.id = knowledge_fts.rowid
+                WHERE  knowledge_fts MATCH ?
+                  AND  ke.workspace = ?
+                  AND  ke.content_type = ?
+                ORDER  BY score
+                LIMIT  ?
+                """,
+                (query, workspace, scope, top_k),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT ke.id,
+                       bm25(knowledge_fts) AS score
+                FROM   knowledge_fts
+                JOIN   knowledge_entries ke ON ke.id = knowledge_fts.rowid
+                WHERE  knowledge_fts MATCH ?
+                  AND  ke.workspace = ?
+                ORDER  BY score
+                LIMIT  ?
+                """,
+                (query, workspace, top_k),
+            ).fetchall()
         return [(int(r[0]), float(r[1])) for r in rows]
     except sqlite3.OperationalError as exc:
         logger.warning("keyword_search failed (FTS5 unavailable?): %s", exc)
@@ -235,6 +253,7 @@ def hybrid_search(
     workspace: str,
     strategy: str = "hybrid",
     top_k: int = 10,
+    scope: str | None = None,
 ) -> list[SearchResult]:
     """Full hybrid retrieval pipeline with graceful degradation.
 
@@ -246,6 +265,7 @@ def hybrid_search(
         workspace:     Workspace to scope all searches.
         strategy:      Reserved for future routing (currently all paths run hybrid).
         top_k:         Number of SearchResult objects to return.
+        scope:         Optional content_type filter (e.g., "code", "config", "doc").
 
     Returns:
         List of SearchResult objects, sorted by RRF score descending.
@@ -253,7 +273,7 @@ def hybrid_search(
     # ------------------------------------------------------------------
     # 1. Run all channels
     # ------------------------------------------------------------------
-    kw_results: list[tuple[int, float]] = keyword_search(conn, query, workspace, top_k=20)
+    kw_results: list[tuple[int, float]] = keyword_search(conn, query, workspace, top_k=20, scope=scope)
     logger.debug("keyword_search: %d results", len(kw_results))
 
     sem_results: list[tuple[str, float]] = []
