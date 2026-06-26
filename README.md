@@ -205,17 +205,28 @@ If you uninstall, `cap uninstall` removes only what it added and restores your o
 </details>
 
 <details>
+<summary><strong>How does Claude Code connect to LLMs?</strong></summary>
+
+<br>
+
+CAP works with however you've already set up Claude Code:
+
+- **Anthropic API** (default) — just `claude auth login`
+- **AWS Bedrock** — set `CLAUDE_CODE_USE_BEDROCK=1` + your AWS SSO profile
+- **Google Vertex AI** — set `CLAUDE_CODE_USE_VERTEX=1` + GCP config
+
+CAP doesn't make its own LLM calls — it orchestrates Claude Code sessions that use whichever provider you configured. No extra LLM setup needed.
+
+</details>
+
+<details>
 <summary><strong>Do I need AWS credentials?</strong></summary>
 
 <br>
 
-**For semantic search — yes, currently.** CAP uses **Amazon Titan Text Embeddings V2** (via Bedrock) to generate vector embeddings that power semantic search. This requires an AWS account with SSO and Bedrock model access enabled in your region.
+**Only for semantic search (optional).** CAP uses Amazon Titan Text Embeddings V2 to generate vectors for semantic search. Without it, CAP uses keyword search + knowledge graph — which covers most use cases well.
 
-**Without AWS credentials**, CAP still works — it falls back to keyword search + knowledge graph traversal, which covers most use cases well. Semantic search adds the ability to find conceptually related content even when exact keywords don't match.
-
-**For the LLM agents themselves**, CAP coordinates specialist agents that run through Claude Code's own model access (your existing Anthropic API key or Bedrock-backed Claude). CAP doesn't make its own LLM calls — it orchestrates Claude Code sessions that already have model access.
-
-Support for alternative embedding providers (OpenAI, local models like `nomic-embed`) is planned. See the [Installation Guide](docs/INSTALL.md) for Bedrock credential setup.
+You can install and use CAP fully without AWS credentials. If you later want semantic search, configure Bedrock access and run `cap sync --full`. Alternative embedding providers (OpenAI, local models) are planned.
 
 </details>
 
@@ -230,7 +241,7 @@ Yes. Build a wheel with `uv build` and share the `.whl` file, or install directl
 uv tool install git+ssh://git@github.com/your-org/claude-agent-platform.git
 ```
 
-See the [Distribution Guide](docs/DISTRIBUTION.md) for all options including private PyPI, CodeArtifact, and S3.
+See the [Distribution Guide](docs/DISTRIBUTION.md) for all options.
 
 </details>
 

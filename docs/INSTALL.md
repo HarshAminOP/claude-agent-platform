@@ -55,15 +55,27 @@ CAP registers MCP servers with Claude Code. Install it first:
 - **Install:** [https://docs.anthropic.com/en/docs/claude-code/overview](https://docs.anthropic.com/en/docs/claude-code/overview)
 - Verify: `claude --version`
 
-### AWS Credentials (for Bedrock Embeddings)
+Claude Code supports multiple model providers. Choose whichever matches your setup:
 
-CAP uses **Amazon Titan Text Embeddings V2** to generate vector embeddings for the knowledge graph. You need:
+| Provider | Setup | Who uses this |
+|:---------|:------|:--------------|
+| **Anthropic API** (default) | `claude auth login` — uses your Anthropic API key | Individual developers, most users |
+| **AWS Bedrock** | Set `CLAUDE_CODE_USE_BEDROCK=1` + AWS SSO profile in `~/.claude/settings.json` | Enterprise teams with AWS accounts |
+| **Google Vertex AI** | Set `CLAUDE_CODE_USE_VERTEX=1` + GCP project config | Teams on Google Cloud |
+
+CAP works with all of these — it orchestrates Claude Code sessions that use whichever provider you configured. CAP doesn't make its own LLM calls.
+
+### AWS Credentials (Optional — for Semantic Search)
+
+CAP uses **Amazon Titan Text Embeddings V2** to generate vector embeddings that power semantic search. This is **optional** — without it, CAP uses keyword search + knowledge graph traversal, which covers most use cases well.
+
+If you want semantic search, you need:
 
 - An AWS account with **Amazon Bedrock** access enabled
 - The **Titan Text Embeddings V2** model enabled in your region (default: `us-east-1`)
 - An AWS profile configured with credentials (SSO or static keys)
 
-> **Why embeddings?** CAP indexes knowledge entries (repo summaries, architecture docs, task records) as vectors. This powers semantic search — finding relevant context even when exact keywords don't match. Without embeddings, CAP gracefully degrades to keyword + graph-based search.
+> **Note:** The embedding provider is independent of your Claude Code LLM provider. You can use Anthropic API for Claude and Bedrock for embeddings, or skip embeddings entirely. Support for alternative embedding providers (OpenAI, local models) is planned.
 
 ---
 
