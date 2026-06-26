@@ -282,20 +282,25 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
         console.print("\n[bold]7. Registering MCP servers[/bold]")
 
         python_bin = sys.executable
-        cap_env = f"CAP_HOME={cap_home},PYTHONPATH={cap_home}"
         servers_dir = Path(__file__).parent.parent / "servers"
 
         mcp_servers = [
-            ("cap-knowledge", str(servers_dir / "knowledge_server.py"), cap_env),
-            ("cap-session", str(servers_dir / "session_server.py"), cap_env),
-            ("cap-fleet", str(servers_dir / "fleet_server.py"), cap_env),
+            ("cap-knowledge", str(servers_dir / "knowledge_server.py"),
+             [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"]),
+            ("cap-session", str(servers_dir / "session_server.py"),
+             [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"]),
+            ("cap-fleet", str(servers_dir / "fleet_server.py"),
+             [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"]),
             ("workflow-engine", str(servers_dir / "workflow_server.py"),
-             f"PLATFORM_DATA_DIR={data_dir},PYTHONPATH={cap_home}"),
+             [f"PLATFORM_DATA_DIR={data_dir}", f"PYTHONPATH={cap_home}"]),
         ]
 
         registered = []
-        for name, script, env in mcp_servers:
-            ok = _run_claude_mcp(["add", "--scope", "user", "-e", env, name, "--", python_bin, script])
+        for name, script, env_vars in mcp_servers:
+            env_args = []
+            for var in env_vars:
+                env_args.extend(["-e", var])
+            ok = _run_claude_mcp(["add", name, "--scope", "user"] + env_args + ["--", python_bin, script])
             if ok:
                 console.print(f"  [green]✓[/green] {name}")
                 registered.append(name)

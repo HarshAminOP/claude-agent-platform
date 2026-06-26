@@ -75,13 +75,16 @@ CAP uses **Amazon Titan Text Embeddings V2** to generate vector embeddings for t
 # 1. Install the package
 uv tool install claude-agent-platform
 
-# 2. Initialize (creates databases, agents, workflows, registers MCP servers)
+# 2. Ensure uv tools are on your PATH (one-time, if not already done)
+uv tool update-shell && source ~/.zshrc   # or ~/.bashrc
+
+# 3. Initialize (creates databases, agents, workflows, registers MCP servers)
 cap init
 
-# 3. Index your workspace (populates the knowledge base)
+# 4. Index your workspace (populates the knowledge base)
 cap sync --workspace /path/to/your/project
 
-# 4. Verify everything is healthy
+# 5. Verify everything is healthy
 cap status
 ```
 

@@ -176,10 +176,11 @@ If something fails, it fixes itself. If something can't be fixed, it tells you w
 
 ## Get Started
 
-Three commands. Under 60 seconds.
+Four commands. Under 60 seconds.
 
 ```bash
 uv tool install claude-agent-platform    # Install the package
+uv tool update-shell && source ~/.zshrc  # Add cap to your PATH (one-time)
 cap init                                  # Set up databases, agents, servers
 cap status                                # Verify everything is running
 ```
