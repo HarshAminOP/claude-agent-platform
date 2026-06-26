@@ -1326,49 +1326,57 @@ def budget_status():
     default="manual",
     show_default=True,
 )
-@click.option("--full", is_flag=True, help="Force full re-sync")
+@click.option("--full", is_flag=True, help="Force full re-sync (ignore change detection)")
 def sync(workspace: str, trigger: str, full: bool):
-    """Trigger knowledge sync."""
+    """Index workspace files into the knowledge base."""
     from cap.lib.config import load_config
     from cap.lib.db_init import init_knowledge_db
+    from cap.lib.sync_engine import sync_workspace
 
     workspace = _resolve_workspace(workspace)
     config = load_config()
     data_dir = config.data_dir
 
-    with console.status(f"[cyan]Syncing workspace ({trigger})…[/cyan]"):
-        try:
-            db = init_knowledge_db(data_dir)
+    console.print(f"[bold]Syncing:[/bold] {workspace}")
+    console.print(f"[dim]Mode: {'full re-index' if full else 'incremental'}  Trigger: {trigger}[/dim]\n")
 
-            # Update or create sync_state entry
-            now = datetime.now(timezone.utc).isoformat()
-            existing = db.execute(
-                "SELECT id FROM sync_state WHERE workspace = ? AND source_type = 'filesystem'",
-                (workspace,),
-            ).fetchone()
+    try:
+        db = init_knowledge_db(data_dir)
+    except Exception as exc:
+        console.print(f"[red]Database init failed: {exc}[/red]")
+        raise SystemExit(1)
 
-            if existing:
-                db.execute(
-                    "UPDATE sync_state SET last_sync_at = ?, status = 'syncing' WHERE workspace = ? AND source_type = 'filesystem'",
-                    (now, workspace),
-                )
-            else:
-                import uuid as _uuid
-                db.execute(
-                    "INSERT INTO sync_state (id, workspace, source_type, last_sync_at, status) VALUES (?, ?, 'filesystem', ?, 'syncing')",
-                    (str(_uuid.uuid4()), workspace, now),
-                )
+    with console.status("[cyan]Scanning and indexing files…[/cyan]"):
+        stats = sync_workspace(db, workspace, full=full)
 
-            db.commit()
-        except Exception as exc:
-            console.print(f"[red]Sync init failed: {exc}[/red]")
-            raise SystemExit(1)
+    # Results table
+    table = Table(box=box.SIMPLE)
+    table.add_column("Metric", style="bold")
+    table.add_column("Count", justify="right")
 
-    console.print(
-        f"[yellow]Note:[/yellow] Full sync engine is not yet implemented.\n"
-        f"Sync state recorded for workspace [bold]{workspace}[/bold].\n"
-        f"Trigger: [cyan]{trigger}[/cyan]  Full: [cyan]{full}[/cyan]"
-    )
+    table.add_row("Files scanned", str(stats.files_scanned))
+    table.add_row("Files indexed (new)", str(stats.files_indexed))
+    table.add_row("Files updated", str(stats.files_updated))
+    table.add_row("Files unchanged", str(stats.files_unchanged))
+    table.add_row("Files skipped", str(stats.files_skipped))
+    table.add_row("Graph edges created", str(stats.graph_edges_created))
+    table.add_row("Embeddings queued", str(stats.embeddings_queued))
+    console.print(table)
+
+    if stats.errors:
+        console.print(f"\n[yellow]Warnings ({len(stats.errors)}):[/yellow]")
+        for err in stats.errors[:5]:
+            console.print(f"  [dim]• {err}[/dim]")
+        if len(stats.errors) > 5:
+            console.print(f"  [dim]… and {len(stats.errors) - 5} more[/dim]")
+
+    total = stats.files_indexed + stats.files_updated
+    if total > 0:
+        console.print(f"\n[green]✓[/green] Knowledge base updated ({total} entries)")
+    elif stats.files_unchanged > 0:
+        console.print(f"\n[green]✓[/green] Already up to date ({stats.files_unchanged} files unchanged)")
+    else:
+        console.print("\n[yellow]No indexable files found in workspace[/yellow]")
 
 
 # ── cap eval ──────────────────────────────────────────────────────────────────

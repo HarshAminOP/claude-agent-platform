@@ -405,13 +405,22 @@ async def _handle_sync(args: dict):
     trigger = args.get("trigger", "manual")
     full = args.get("full", False)
 
-    # Placeholder — full sync engine is in lib/sync.py (Phase 2 P1)
+    from cap.lib.sync_engine import sync_workspace
+
+    stats = sync_workspace(db, workspace, full=full)
+
     return [TextContent(type="text", text=json.dumps({
-        "status": "sync_queued",
+        "status": "complete" if not stats.errors else "complete_with_errors",
         "workspace": workspace,
         "trigger": trigger,
         "full": full,
-        "message": "Sync engine not yet implemented — queued for next iteration",
+        "files_scanned": stats.files_scanned,
+        "files_indexed": stats.files_indexed,
+        "files_updated": stats.files_updated,
+        "files_unchanged": stats.files_unchanged,
+        "graph_edges": stats.graph_edges_created,
+        "embeddings_queued": stats.embeddings_queued,
+        "errors": stats.errors[:5] if stats.errors else [],
     }))]
 
 
