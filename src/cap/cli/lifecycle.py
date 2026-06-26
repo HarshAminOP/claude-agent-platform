@@ -152,6 +152,95 @@ def _restore_user_configs() -> dict[str, bool]:
     return results
 
 
+# ── CLAUDE.md Instructions ────────────────────────────────────────────────────
+
+_CAP_INSTRUCTIONS_START = "<!-- CAP:START — Auto-managed by Claude Agent Platform. Do not edit this block. -->"
+_CAP_INSTRUCTIONS_END = "<!-- CAP:END -->"
+
+_CAP_INSTRUCTIONS_BODY = """
+## CAP — Claude Agent Platform (MCP Tools)
+
+You have access to CAP MCP servers that provide persistent knowledge, session memory, and workflow coordination.
+
+### Information Retrieval Priority
+
+When answering questions about the codebase, repos, architecture, or past decisions:
+
+1. **Use `knowledge_search` FIRST** — it searches the indexed knowledge base (FTS5 + graph). Faster and more complete than grep.
+2. **Use `knowledge_graph_query`** — to traverse relationships between services, modules, and resources.
+3. **Use `session_recall`** — to find past decisions, learnings, and corrections.
+4. **Use bash/grep ONLY** — when you need exact file contents not yet indexed, or to read/modify specific files.
+
+### Session Memory
+
+At the start of complex work:
+- Use `session_start` to begin a tracked session
+- Use `session_record` to save decisions, learnings, or corrections during work
+- Use `session_feedback` when the user corrects you — this persists across sessions
+
+### Workflow Coordination
+
+For multi-specialist tasks, use the workflow engine:
+- `workflow_start` — kick off a multi-agent workflow
+- `workflow_status` — check progress
+- `workflow_kill` — abort a runaway workflow
+
+### Budget Awareness
+
+Workflows are budget-constrained. The workflow engine tracks token usage and kills workflows that exceed limits. Check budget with `workflow_estimate` before starting expensive operations.
+
+### What NOT to do
+
+- Do NOT use bash grep/find to search for information when `knowledge_search` can answer it
+- Do NOT re-discover repo structure manually — the knowledge graph already has it indexed
+- Do NOT ignore session corrections — they persist specifically so you won't repeat mistakes
+"""
+
+
+def _install_claude_instructions(claude_dir: Path, force: bool = False) -> bool:
+    """Append CAP instructions to ~/.claude/CLAUDE.md. Returns True if modified."""
+    claude_md = claude_dir / "CLAUDE.md"
+
+    if claude_md.exists():
+        content = claude_md.read_text()
+        if _CAP_INSTRUCTIONS_START in content:
+            if not force:
+                return False
+            content = _remove_cap_instructions(content)
+    else:
+        claude_dir.mkdir(parents=True, exist_ok=True)
+        content = ""
+
+    block = f"\n{_CAP_INSTRUCTIONS_START}\n{_CAP_INSTRUCTIONS_BODY}\n{_CAP_INSTRUCTIONS_END}\n"
+    content = content.rstrip() + "\n" + block
+    claude_md.write_text(content)
+    return True
+
+
+def _remove_cap_instructions(content: str) -> str:
+    """Remove the CAP instructions block from CLAUDE.md content."""
+    start_idx = content.find(_CAP_INSTRUCTIONS_START)
+    end_idx = content.find(_CAP_INSTRUCTIONS_END)
+    if start_idx == -1 or end_idx == -1:
+        return content
+    return content[:start_idx].rstrip() + content[end_idx + len(_CAP_INSTRUCTIONS_END):]
+
+
+def _uninstall_claude_instructions(claude_dir: Path) -> bool:
+    """Remove CAP instructions from ~/.claude/CLAUDE.md. Returns True if modified."""
+    claude_md = claude_dir / "CLAUDE.md"
+    if not claude_md.exists():
+        return False
+
+    content = claude_md.read_text()
+    if _CAP_INSTRUCTIONS_START not in content:
+        return False
+
+    new_content = _remove_cap_instructions(content)
+    claude_md.write_text(new_content)
+    return True
+
+
 # ── Manifest ──────────────────────────────────────────────────────────────────
 
 MANIFEST_FILE = "cap-manifest.json"
@@ -316,7 +405,15 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
     else:
         console.print("\n[bold]7. MCP servers[/bold] — skipped (--skip-mcp)")
 
-    # ── 8. Save manifest ──────────────────────────────────────────────────
+    # ── 8. Install CLAUDE.md instructions ────────────────────────────────
+    console.print("\n[bold]8. Installing Claude instructions[/bold]")
+    instructions_installed = _install_claude_instructions(claude_dir, force)
+    if instructions_installed:
+        console.print(f"  [green]✓[/green] CAP instructions → ~/.claude/CLAUDE.md")
+    else:
+        console.print(f"  [dim]─[/dim] CAP instructions already present")
+
+    # ── 9. Save manifest ──────────────────────────────────────────────────
     manifest["version"] = "0.3.0"
     manifest["cap_home"] = str(cap_home)
     manifest["python"] = sys.executable
@@ -445,10 +542,16 @@ def uninstall(keep_data: bool, yes: bool):
         else:
             console.print(f"  [dim]─[/dim] {label} — no backup found (was not modified by CAP)")
 
-    # ── 5. Remove platform data ───────────────────────────────────────────
+    # ── 5. Remove Claude instructions ────────────────────────────────────
+    console.print("\n[bold]5. Removing Claude instructions[/bold]")
+    if _uninstall_claude_instructions(claude_dir):
+        console.print(f"  [green]✓[/green] CAP instructions removed from CLAUDE.md")
+    else:
+        console.print(f"  [dim]─[/dim] No CAP instructions found in CLAUDE.md")
+
+    # ── 6. Remove platform data ───────────────────────────────────────────
     if keep_data:
-        console.print("\n[bold]5. Keeping databases[/bold] (--keep-data)")
-        # Remove everything except data/ and backups/
+        console.print("\n[bold]6. Keeping databases[/bold] (--keep-data)")
         for item in cap_home.iterdir():
             if item.name in ("data", "backups"):
                 continue
@@ -458,7 +561,7 @@ def uninstall(keep_data: bool, yes: bool):
                 item.unlink()
         console.print(f"  [green]✓[/green] Config removed, data preserved at {cap_home / 'data'}")
     else:
-        console.print("\n[bold]5. Removing platform directory[/bold]")
+        console.print("\n[bold]6. Removing platform directory[/bold]")
         shutil.rmtree(cap_home)
         console.print(f"  [green]✓[/green] {cap_home} removed")
 
