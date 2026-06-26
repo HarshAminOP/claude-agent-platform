@@ -47,6 +47,23 @@ class SearchResult:
 # Individual channel implementations
 # ---------------------------------------------------------------------------
 
+def _sanitize_fts5_query(query: str) -> str:
+    """Sanitize a user query for FTS5 MATCH.
+
+    FTS5 treats hyphens as NOT operators and special chars as syntax.
+    Multi-word queries use OR (implicit AND requires ALL terms, too strict for recall).
+    """
+    import re as _re
+    sanitized = _re.sub(r'(\w)-(\w)', r'\1 \2', query)
+    sanitized = _re.sub(r'[{}()\[\]^~*]', ' ', sanitized)
+    terms = [t for t in sanitized.split() if t]
+    if len(terms) > 1:
+        return ' OR '.join(terms)
+    elif terms:
+        return terms[0]
+    return query
+
+
 def keyword_search(
     conn: sqlite3.Connection,
     query: str,
@@ -68,6 +85,7 @@ def keyword_search(
         BM25 scores from SQLite FTS5 are negative (more negative = better match);
         we return them as-is so callers can rank by ascending order or negate.
     """
+    query = _sanitize_fts5_query(query)
     try:
         if scope:
             rows = conn.execute(
@@ -85,10 +103,14 @@ def keyword_search(
                 (query, workspace, scope, top_k),
             ).fetchall()
         else:
+            # Boost repo_summary entries (3x score) so they rank above raw files
             rows = conn.execute(
                 """
                 SELECT ke.id,
-                       bm25(knowledge_fts) AS score
+                       CASE WHEN ke.content_type = 'repo_summary'
+                            THEN bm25(knowledge_fts) * 3.0
+                            ELSE bm25(knowledge_fts)
+                       END AS score
                 FROM   knowledge_fts
                 JOIN   knowledge_entries ke ON ke.id = knowledge_fts.rowid
                 WHERE  knowledge_fts MATCH ?
@@ -282,7 +304,8 @@ def hybrid_search(
     logger.debug("semantic_search: %d results", len(sem_results))
 
     # Extract entity tokens from the query for graph traversal
-    graph_tokens = [t.strip() for t in query.split() if len(t.strip()) >= 3]
+    # Keep hyphenated terms intact (they may be entity names like "dod-bot")
+    graph_tokens = [t.strip() for t in query.replace(",", " ").split() if len(t.strip()) >= 3]
     gr_results: list[tuple[int, float]] = graph_search(
         conn, graph_tokens, workspace, depth=2, top_k=20
     )

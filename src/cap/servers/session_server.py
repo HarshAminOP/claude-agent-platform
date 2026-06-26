@@ -43,6 +43,36 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _get_or_create_session(workspace: str) -> str:
+    """Return the active session id for workspace (last 4 hours), or create one.
+
+    This is the core of auto-session: any tool that needs a session but wasn't
+    given one will call this instead of failing.
+    """
+    row = db.execute(
+        """SELECT id FROM sessions
+           WHERE workspace = ?
+             AND status != 'ended'
+             AND started_at >= datetime('now', '-4 hours')
+           ORDER BY started_at DESC LIMIT 1""",
+        (workspace,)
+    ).fetchone()
+
+    if row:
+        logger.debug("Auto-session: reusing existing session %s for workspace=%s", row[0], workspace)
+        return row[0]
+
+    session_id = str(uuid.uuid4())
+    now = _now()
+    db.execute(
+        "INSERT INTO sessions (id, workspace, started_at) VALUES (?, ?, ?)",
+        (session_id, workspace, now)
+    )
+    db.commit()
+    logger.info("Auto-session: created new session %s for workspace=%s", session_id, workspace)
+    return session_id
+
+
 @server.list_tools()
 async def list_tools():
     return [
@@ -95,11 +125,16 @@ async def list_tools():
         ),
         Tool(
             name="session_record",
-            description="Record a session event (correction, preference, discovery, decision, error).",
+            description=(
+                "Record a session event (correction, preference, discovery, decision, error). "
+                "session_id is optional — if omitted, an active session for the workspace is "
+                "reused or a new one is auto-created."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string"},
+                    "session_id": {"type": "string", "description": "Optional — auto-created if absent"},
+                    "workspace": {"type": "string", "description": "Required when session_id is not provided"},
                     "event_type": {
                         "type": "string",
                         "enum": ["decision", "correction", "preference", "discovery", "error", "milestone"],
@@ -108,7 +143,7 @@ async def list_tools():
                     "content": {"type": "string", "description": "Human-readable description"},
                     "data": {"type": "object", "description": "Structured data"},
                 },
-                "required": ["session_id", "event_type", "content"],
+                "required": ["event_type", "content"],
             },
         ),
         Tool(
@@ -150,17 +185,21 @@ async def list_tools():
         ),
         Tool(
             name="session_feedback",
-            description="Record a user correction or preference (highest-priority learning).",
+            description=(
+                "Record a user correction or preference (highest-priority learning). "
+                "session_id is optional — if omitted, an active session for the workspace is "
+                "reused or a new one is auto-created."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string"},
+                    "session_id": {"type": "string", "description": "Optional — auto-created if absent"},
                     "category": {"type": "string", "enum": ["factual", "style", "process", "technical"]},
                     "what_was_wrong": {"type": "string"},
                     "what_is_correct": {"type": "string"},
-                    "workspace": {"type": "string"},
+                    "workspace": {"type": "string", "description": "Used for auto-session when session_id is absent"},
                 },
-                "required": ["session_id", "what_was_wrong", "what_is_correct"],
+                "required": ["what_was_wrong", "what_is_correct"],
             },
         ),
         Tool(
@@ -204,8 +243,31 @@ async def call_tool(name: str, arguments: dict):
 async def _handle_start(args: dict):
     workspace = args["workspace"]
     context = args.get("context")
-    session_id = str(uuid.uuid4())
     now = _now()
+
+    # Idempotent: if an active session exists within the last 4 hours, reuse it
+    existing = db.execute(
+        """SELECT id FROM sessions
+           WHERE workspace = ?
+             AND status != 'ended'
+             AND started_at >= datetime('now', '-4 hours')
+           ORDER BY started_at DESC LIMIT 1""",
+        (workspace,)
+    ).fetchone()
+
+    if existing:
+        session_id = existing[0]
+        is_new = False
+        logger.info("Session start (reused existing): %s workspace=%s", session_id, workspace)
+    else:
+        session_id = str(uuid.uuid4())
+        is_new = True
+        db.execute(
+            "INSERT INTO sessions (id, workspace, started_at, context) VALUES (?, ?, ?, ?)",
+            (session_id, workspace, now, json.dumps(context) if context else None)
+        )
+        db.commit()
+        logger.info("Session started (new): %s workspace=%s", session_id, workspace)
 
     corrections = db.execute(
         """SELECT what_was_wrong, what_is_correct, category
@@ -229,16 +291,9 @@ async def _handle_start(args: dict):
         (workspace, config.session.max_decisions_loaded)
     ).fetchall()
 
-    db.execute(
-        "INSERT INTO sessions (id, workspace, started_at, context) VALUES (?, ?, ?, ?)",
-        (session_id, workspace, now, json.dumps(context) if context else None)
-    )
-    db.commit()
-
-    logger.info("Session started: %s workspace=%s", session_id, workspace)
-
     return [TextContent(type="text", text=json.dumps({
         "session_id": session_id,
+        "is_new": is_new,
         "corrections": [{"what_was_wrong": c[0], "what_is_correct": c[1], "category": c[2]} for c in corrections],
         "learnings": [{"category": l[0], "key": l[1], "value": l[2]} for l in learnings],
         "active_decisions": [{"domain": d[0], "decision": d[1], "rationale": d[2]} for d in decisions],
@@ -289,11 +344,16 @@ async def _handle_checkpoint(args: dict):
 
 
 async def _handle_record(args: dict):
-    session_id = args["session_id"]
+    session_id = args.get("session_id")
     event_type = args["event_type"]
     content = sanitize_content(args["content"])
     category = args.get("category")
     data = args.get("data")
+
+    # Auto-session: if no session_id provided, find or create one for the workspace
+    if not session_id:
+        workspace = args.get("workspace", "default")
+        session_id = _get_or_create_session(workspace)
 
     db.execute(
         """INSERT INTO session_events (session_id, event_type, category, content, data)
@@ -302,12 +362,25 @@ async def _handle_record(args: dict):
     )
     db.commit()
 
-    return [TextContent(type="text", text=json.dumps({"status": "recorded", "event_type": event_type}))]
+    return [TextContent(type="text", text=json.dumps({"status": "recorded", "session_id": session_id, "event_type": event_type}))]
 
 
 async def _handle_recall(args: dict):
     query = args["query"]
     workspace = args["workspace"]
+
+    # Sanitize for FTS5 — hyphens between words become spaces, remove special chars,
+    # then join with OR for broader recall (implicit AND requires ALL terms present)
+    import re
+    fts_query = re.sub(r'(\w)-(\w)', r'\1 \2', query)
+    fts_query = re.sub(r'[{}()\[\]^~*]', ' ', fts_query)
+    terms = [t for t in fts_query.split() if t]
+    if len(terms) > 1:
+        fts_query = ' OR '.join(terms)
+    elif terms:
+        fts_query = terms[0]
+    else:
+        fts_query = query
 
     escaped_query = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     like_pattern = f"%{escaped_query}%"
@@ -320,7 +393,7 @@ async def _handle_recall(args: dict):
                JOIN decisions_fts df ON d.rowid = df.rowid
                WHERE decisions_fts MATCH ? AND d.workspace = ?
                ORDER BY rank LIMIT 10""",
-            (query, workspace)
+            (fts_query, workspace)
         ).fetchall()
     except Exception:
         fts_results = db.execute(
@@ -398,15 +471,23 @@ async def _handle_end(args: dict):
 
 
 async def _handle_feedback(args: dict):
-    session_id = args["session_id"]
+    session_id = args.get("session_id")
     what_was_wrong = sanitize_content(args["what_was_wrong"])
     what_is_correct = sanitize_content(args["what_is_correct"])
     category = args.get("category")
     workspace = args.get("workspace")
 
-    if not workspace:
+    # Resolve workspace: explicit arg > session lookup > auto-create
+    if not workspace and session_id:
         row = db.execute("SELECT workspace FROM sessions WHERE id = ?", (session_id,)).fetchone()
         workspace = row[0] if row else None
+
+    if not session_id:
+        # Auto-session: resolve workspace first (fall back to "default"), then get/create session
+        effective_workspace = workspace or "default"
+        session_id = _get_or_create_session(effective_workspace)
+        if not workspace:
+            workspace = effective_workspace
 
     db.execute(
         """INSERT INTO corrections (session_id, workspace, what_was_wrong, what_is_correct, category)
@@ -416,7 +497,7 @@ async def _handle_feedback(args: dict):
     db.commit()
 
     logger.info("Correction recorded: session=%s category=%s", session_id, category)
-    return [TextContent(type="text", text=json.dumps({"status": "correction_recorded", "category": category}))]
+    return [TextContent(type="text", text=json.dumps({"status": "correction_recorded", "session_id": session_id, "category": category}))]
 
 
 async def _handle_history(args: dict):

@@ -266,3 +266,85 @@ class TestGetNodeContext:
         related_names = {n["entity_name"] for n in ctx["related_nodes"]}
         assert "ServiceB" in related_names
         assert "ServiceD" in related_names
+
+
+# ---------------------------------------------------------------------------
+# bfs_traverse — fan-out cap and max_nodes safety cap
+# ---------------------------------------------------------------------------
+
+def _build_hub_graph(conn: sqlite3.Connection, hub: str, spoke_count: int, workspace: str = "ws1"):
+    """Create a star graph: hub -> spoke_0 .. spoke_{n-1}.
+
+    Edge weights are set so that spoke_0 has weight 1, spoke_1 weight 2, …
+    so that the highest-weight spokes are the highest-indexed ones.
+    """
+    for i in range(spoke_count):
+        add_edge(conn, hub, "tech", f"file_{i}", "file", "uses", workspace)
+        # Bump weight to i+1 by calling add_edge i more times (each call +1 weight).
+        for _ in range(i):
+            add_edge(conn, hub, "tech", f"file_{i}", "file", "uses", workspace)
+
+
+class TestBfsMaxFanout:
+    def test_fanout_cap_limits_neighbours(self, conn):
+        """A hub with 100 spokes and max_fanout=10 should yield at most 11 nodes (hub + 10)."""
+        _build_hub_graph(conn, "Hub", spoke_count=100)
+        seed = [_node_id("Hub", "ws1")]
+        result = bfs_traverse(conn, seed, max_depth=1, workspace="ws1", max_fanout=10, max_nodes=1000)
+        # hub (depth 0) + 10 spokes (depth 1)
+        assert len(result) == 11
+
+    def test_fanout_cap_prefers_highest_weight(self, conn):
+        """With max_fanout=5 the 5 highest-weight spokes (file_95..file_99) must be kept."""
+        _build_hub_graph(conn, "Hub", spoke_count=100)
+        seed = [_node_id("Hub", "ws1")]
+        result = bfs_traverse(conn, seed, max_depth=1, workspace="ws1", max_fanout=5, max_nodes=1000)
+        visited_ids = {nid for nid, _ in result}
+        # file_95..file_99 have the 5 highest weights (96..100)
+        for i in range(95, 100):
+            assert _node_id(f"file_{i}", "ws1") in visited_ids
+
+    def test_fanout_no_cap_when_below_limit(self, populated_conn):
+        """Nodes with fewer neighbours than max_fanout must not be trimmed."""
+        seed = [_node_id("ServiceA", "ws1")]
+        # ServiceA has 2 neighbours — well under default max_fanout=50
+        result = dict(bfs_traverse(populated_conn, seed, max_depth=1, workspace="ws1"))
+        assert _node_id("ServiceB", "ws1") in result
+        assert _node_id("ServiceD", "ws1") in result
+
+    def test_fanout_zero_yields_only_seeds(self, conn):
+        """max_fanout=0 means no neighbours are ever followed."""
+        _build_hub_graph(conn, "Hub", spoke_count=5)
+        seed = [_node_id("Hub", "ws1")]
+        result = bfs_traverse(conn, seed, max_depth=2, workspace="ws1", max_fanout=0, max_nodes=1000)
+        assert len(result) == 1
+        assert result[0][0] == _node_id("Hub", "ws1")
+
+
+class TestBfsMaxNodes:
+    def test_max_nodes_hard_cap(self, conn):
+        """Total visited nodes must never exceed max_nodes."""
+        _build_hub_graph(conn, "Hub", spoke_count=100)
+        seed = [_node_id("Hub", "ws1")]
+        result = bfs_traverse(
+            conn, seed, max_depth=1, workspace="ws1", max_fanout=1000, max_nodes=20
+        )
+        assert len(result) <= 20
+
+    def test_max_nodes_one_returns_seed_only(self, conn):
+        """max_nodes=1 means only the seed node is returned."""
+        _build_hub_graph(conn, "Hub", spoke_count=5)
+        seed = [_node_id("Hub", "ws1")]
+        result = bfs_traverse(
+            conn, seed, max_depth=2, workspace="ws1", max_fanout=50, max_nodes=1
+        )
+        assert len(result) == 1
+        assert result[0] == (_node_id("Hub", "ws1"), 0)
+
+    def test_max_nodes_default_prevents_explosion(self, conn):
+        """Default max_nodes=200 must cap a 500-spoke star at 200 nodes."""
+        _build_hub_graph(conn, "Hub", spoke_count=500)
+        seed = [_node_id("Hub", "ws1")]
+        # Use default max_fanout and max_nodes
+        result = bfs_traverse(conn, seed, max_depth=1, workspace="ws1")
+        assert len(result) <= 200

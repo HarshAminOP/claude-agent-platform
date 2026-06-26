@@ -83,7 +83,7 @@ class EmbeddingClient:
 
     def __init__(self, config: EmbeddingConfig = None) -> None:
         self.config = config or EmbeddingConfig()
-        self._semaphore = asyncio.Semaphore(self.config.max_concurrent)
+        self._semaphore: Optional[asyncio.Semaphore] = None
         # None = not tested yet, True = last call succeeded, False = unavailable
         self._available: Optional[bool] = None
 
@@ -119,6 +119,9 @@ class EmbeddingClient:
 
         text = self._truncate(text)
         body = self._build_request_body(text)
+
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.config.max_concurrent)
 
         for attempt in range(self.config.max_retries):
             try:
@@ -257,11 +260,9 @@ class EmbeddingClient:
     def _truncate(self, text: str) -> str:
         """Truncate text to stay within the model's token budget.
 
-        Applies a character-level cut based on the 4 chars-per-token heuristic.
-        The model will still tokenise correctly — this just avoids sending
-        payloads that are guaranteed to exceed the limit.
+        Uses 3 chars/token (conservative) to avoid ValidationException from Titan.
         """
-        max_chars = self.config.max_input_tokens * 4
+        max_chars = self.config.max_input_tokens * 3
         if len(text) > max_chars:
             logger.debug(
                 "Truncating text from %d to %d chars", len(text), max_chars

@@ -9,6 +9,7 @@ from pathlib import Path
 logger = logging.getLogger("platform.security")
 
 INJECTION_PATTERNS = [
+    # Prompt injection
     r"(?i)ignore\s+(all\s+)?previous\s+instructions",
     r"(?i)system:\s*you\s+are\s+now",
     r"(?i)<\s*system\s*>",
@@ -17,6 +18,20 @@ INJECTION_PATTERNS = [
     r"(?i)you\s+are\s+now\s+in\s+developer\s+mode",
     r"(?i)simulate\s+being\s+DAN",
     r"(?i)your\s+new\s+system\s+prompt\s+is",
+    # SQL injection
+    r"(?i)(?:;\s*DROP\s+TABLE|UNION\s+SELECT|'\s*OR\s+'[^']*'\s*=\s*')",
+    # XSS
+    r"(?i)<\s*script[^>]*>",
+    r"(?i)<!--\s*#\s*exec\s+cmd\s*=",
+    # Template injection
+    r"\{\{[^}]*\d+\s*[*+\-/]\s*\d+[^}]*\}\}",
+    # JNDI / Log4Shell
+    r"(?i)\$\{jndi:",
+    # Shellshock
+    r"\(\)\s*\{\s*:\s*;\s*\}\s*;",
+    # Python code injection
+    r"(?i)__import__\s*\(",
+    r"(?i)eval\s*\(\s*compile\s*\(",
 ]
 
 _WORKSPACE_RE = re.compile(r"^[a-zA-Z0-9/_.\-~]+$")
@@ -41,10 +56,7 @@ def sanitize_content(
         raise ValueError(f"{field_name} must not be empty or whitespace-only")
 
     if len(content) > max_length:
-        raise ValueError(
-            f"{field_name} exceeds maximum length of {max_length} bytes "
-            f"(got {len(content)})"
-        )
+        content = content[:max_length]
 
     content = content.replace("\x00", "")
     content = _ANSI_RE.sub("", content)

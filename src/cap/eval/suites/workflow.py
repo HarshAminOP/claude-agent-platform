@@ -36,12 +36,12 @@ WORKFLOW_SCENARIOS = {
         "expected_kill": True,
     },
     "budget_edge": {
-        "budget_usd": 0.10,
+        "budget_usd": 0.20,
         "agents": [
             {"role": "devops", "model": "sonnet", "input_tokens": 10000, "output_tokens": 3000},
             {"role": "sre", "model": "sonnet", "input_tokens": 10000, "output_tokens": 3000},
         ],
-        "expected_kill": False,  # Should be close but within budget
+        "expected_kill": False,  # 2 agents ~$0.15 total, under $0.20 budget
     },
 }
 

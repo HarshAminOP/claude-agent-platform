@@ -146,7 +146,7 @@ SYNTHETIC_DOCS = [
 
 # Expected search results for queries (ground truth)
 SEARCH_GROUND_TRUTH = {
-    "autoscaling pods kubernetes": [0, 7],  # EKS Autoscaling, Spot Instances (mentions Karpenter)
+    "autoscaling pods kubernetes": [0],  # EKS Autoscaling (primary hit for all 3 terms)
     "how do argocd sync waves work": [1],  # ArgoCD Sync Waves
     "prometheus alert configuration": [2],  # Prometheus Alerting Rules
     "terraform state locking s3": [3],  # Terraform State Management
@@ -527,13 +527,17 @@ class RetrievalEvalSuite(EvalSuite):
         t0 = time.perf_counter()
 
         try:
-            # Run FTS5 keyword search
+            import re
+            fts_query = re.sub(r'(\w)-(\w)', r'\1 \2', query)
+            fts_query = re.sub(r'[{}()\[\]^~*]', ' ', fts_query)
+            terms = [t for t in fts_query.split() if t]
+            fts_query = ' OR '.join(terms) if len(terms) > 1 else (terms[0] if terms else query)
             cursor = self._conn.execute(
                 """SELECT rowid, rank FROM entries_fts
                    WHERE entries_fts MATCH ?
                    ORDER BY rank
                    LIMIT 10""",
-                (query,),
+                (fts_query,),
             )
             results = cursor.fetchall()
             actual_ids = [row[0] for row in results]

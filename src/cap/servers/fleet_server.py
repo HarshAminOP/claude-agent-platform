@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
-"""Fleet Manager MCP Server — manages external MCP server lifecycle.
+"""Fleet Manager MCP Server — health monitoring for registered MCP servers.
 
-Owner of fleet.db. Monitors health, auto-restarts, discovers servers.
+Owner of fleet.db. Reports health status and discovers servers.
+
+NOTE: This server cannot restart MCP servers. Claude Code owns all stdio
+connections to MCP servers; spawning a subprocess creates an orphan process
+that is not connected to Claude Code. Restarts require Claude Code to
+reconnect (close/reopen or `claude mcp remove` + `cap init`).
 
 CRITICAL: stdout is reserved for MCP JSON-RPC. All logging goes to stderr.
 """
@@ -11,7 +16,6 @@ import json
 import logging
 import os
 import signal
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -94,7 +98,12 @@ async def list_tools():
         ),
         Tool(
             name="fleet_restart",
-            description="Restart a managed server.",
+            description=(
+                "Flag a server for restart. NOTE: MCP servers are managed by Claude Code's "
+                "stdio lifecycle — this tool marks the server as needing restart and logs the "
+                "event, but the actual restart requires Claude Code to reconnect. Returns "
+                "instructions for the user."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -106,7 +115,10 @@ async def list_tools():
         ),
         Tool(
             name="fleet_health_check",
-            description="Run immediate health check on all servers.",
+            description=(
+                "Check health of registered MCP servers by verifying their PIDs are alive. "
+                "Reports status only — cannot restart servers (Claude Code owns stdio connections)."
+            ),
             inputSchema={"type": "object", "properties": {}},
         ),
         Tool(
@@ -252,53 +264,34 @@ async def _handle_restart(args: dict):
     name = args["name"]
     reason = args.get("reason", "Manual restart")
 
-    row = db.execute("SELECT command, args, env, pid, restart_count, max_restarts FROM fleet_servers WHERE name = ?", (name,)).fetchone()
+    row = db.execute("SELECT name FROM fleet_servers WHERE name = ?", (name,)).fetchone()
     if not row:
         return [TextContent(type="text", text=json.dumps({"error": f"Server '{name}' not found"}))]
 
-    command, cmd_args, env_json, pid, restart_count, max_restarts = row
-
-    if restart_count >= max_restarts:
-        return [TextContent(type="text", text=json.dumps({"error": f"Server '{name}' exceeded max restarts ({max_restarts})"}))]
-
-    if pid and _pid_alive(pid):
-        try:
-            os.kill(pid, signal.SIGTERM)
-            await asyncio.sleep(2)
-            if _pid_alive(pid):
-                os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-
-    env = json.loads(env_json) if env_json else {}
-    full_env = {**os.environ, **env}
-    args_list = json.loads(cmd_args) if cmd_args else []
-
-    from cap.lib.security import validate_fleet_command
-
-    if not validate_fleet_command([command] + args_list):
-        return [TextContent(type="text", text=json.dumps({"error": "restart blocked — command not in allowlist", "command": command}))]
-
-    proc = subprocess.Popen(
-        [command] + args_list,
-        env=full_env,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
     db.execute(
-        "UPDATE fleet_servers SET pid = ?, status = 'running', restart_count = restart_count + 1, last_health_check = ? WHERE name = ?",
-        (proc.pid, _now(), name)
+        "UPDATE fleet_servers SET status = 'needs_restart', last_health_check = ? WHERE name = ?",
+        (_now(), name)
     )
     db.execute(
-        "INSERT INTO fleet_events (server_name, event_type, message) VALUES (?, 'restarted', ?)",
+        "INSERT INTO fleet_events (server_name, event_type, message) VALUES (?, 'restart_requested', ?)",
         (name, reason)
     )
     db.commit()
 
-    logger.info("Server restarted: %s (pid=%d) reason=%s", name, proc.pid, reason)
-    return [TextContent(type="text", text=json.dumps({"status": "restarted", "name": name, "pid": proc.pid}))]
+    logger.info("Server %s flagged for restart. Reason: %s", name, reason)
+    return [TextContent(type="text", text=json.dumps({
+        "status": "needs_restart",
+        "name": name,
+        "message": (
+            f"Server '{name}' flagged for restart. "
+            "To restart: close and reopen Claude Code, or run "
+            f"`claude mcp remove {name}` then `cap init`."
+        ),
+        "note": (
+            "MCP servers are managed by Claude Code's stdio lifecycle. "
+            "This fleet server cannot spawn a replacement process that Claude Code will connect to."
+        ),
+    }))]
 
 
 async def _handle_health_check(args: dict):
@@ -383,28 +376,31 @@ async def _handle_logs(args: dict):
 
 
 async def _health_monitor_loop():
-    """Background health monitoring loop."""
+    """Background health status reporting loop.
+
+    Checks whether registered server PIDs are still alive and updates DB status.
+    Does NOT attempt to restart servers — Claude Code owns all stdio connections
+    and a subprocess.Popen restart would create an orphan process.
+    """
     interval = config.fleet.health_check_interval_seconds
     while True:
         try:
             rows = db.execute(
-                "SELECT name, pid, restart_count, max_restarts FROM fleet_servers WHERE status = 'running'"
+                "SELECT name, pid FROM fleet_servers WHERE status = 'running'"
             ).fetchall()
 
-            for name, pid, restart_count, max_restarts in rows:
+            now = _now()
+            for name, pid in rows:
                 if not pid or not _pid_alive(pid):
-                    logger.warning("Server %s (pid=%s) is dead", name, pid)
-                    db.execute("UPDATE fleet_servers SET status = 'stopped' WHERE name = ?", (name,))
+                    logger.warning("Server %s (pid=%s) is dead — marking stopped", name, pid)
                     db.execute(
-                        "INSERT INTO fleet_events (server_name, event_type, message) VALUES (?, 'health_failed', 'Process dead')",
-                        (name,)
+                        "UPDATE fleet_servers SET status = 'stopped', last_health_check = ? WHERE name = ?",
+                        (now, name)
                     )
-
-                    if config.fleet.auto_restart_enabled and restart_count < max_restarts:
-                        logger.info("Auto-restarting %s (attempt %d/%d)", name, restart_count + 1, max_restarts)
-                        backoff = config.fleet.restart_backoff_base ** restart_count
-                        await asyncio.sleep(min(backoff, 60))
-                        await _handle_restart({"name": name, "reason": "Auto-restart: health check failed"})
+                    db.execute(
+                        "INSERT INTO fleet_events (server_name, event_type, message) VALUES (?, 'health_failed', ?)",
+                        (name, f"Process {pid} no longer alive")
+                    )
 
             db.commit()
         except Exception as e:

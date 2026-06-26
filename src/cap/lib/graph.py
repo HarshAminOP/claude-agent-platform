@@ -67,16 +67,26 @@ def bfs_traverse(
     start_ids: list[str],
     max_depth: int = 2,
     workspace: str | None = None,
+    max_fanout: int = 50,
+    max_nodes: int = 200,
 ) -> list[tuple[str, int]]:
     """BFS from *start_ids*, up to *max_depth* hops.
 
     Iterative BFS with a visited set — safe against cycles in the graph.
 
     Args:
-        conn:       Active SQLite connection.
-        start_ids:  Seed node IDs for the traversal.
-        max_depth:  Maximum number of hops from any seed node.
-        workspace:  If given, only cross edges that belong to this workspace.
+        conn:        Active SQLite connection.
+        start_ids:   Seed node IDs for the traversal.
+        max_depth:   Maximum number of hops from any seed node.
+        workspace:   If given, only cross edges that belong to this workspace.
+        max_fanout:  Maximum neighbours to follow per node.  When a node has
+                     more neighbours than this, only the top *max_fanout* by
+                     edge weight (descending) are enqueued.  This prevents
+                     high-degree hub nodes (e.g. technology tags connected to
+                     thousands of files) from causing graph explosion.
+        max_nodes:   Hard cap on the total number of visited nodes.  BFS stops
+                     immediately once this many nodes have been recorded,
+                     regardless of depth or queue length.
 
     Returns:
         List of (node_id, hop_distance) pairs, sorted by hop_distance ascending.
@@ -94,6 +104,10 @@ def bfs_traverse(
             queue.append((sid, 0))
 
     while queue:
+        # Hard safety cap: stop as soon as we have recorded enough nodes.
+        if len(visited) >= max_nodes:
+            break
+
         current_id, depth = queue.popleft()
 
         if depth >= max_depth:
@@ -103,7 +117,13 @@ def bfs_traverse(
 
         rows = _neighbours(conn, current_id, workspace)
 
-        for (neighbour_id,) in rows:
+        # Apply fan-out cap: keep only the highest-weight neighbours.
+        if len(rows) > max_fanout:
+            rows = sorted(rows, key=lambda r: r[1], reverse=True)[:max_fanout]
+
+        for neighbour_id, _weight in rows:
+            if len(visited) >= max_nodes:
+                break
             if neighbour_id not in visited:
                 visited[neighbour_id] = next_depth
                 queue.append((neighbour_id, next_depth))
@@ -115,27 +135,40 @@ def _neighbours(
     conn: sqlite3.Connection,
     node_id: str,
     workspace: str | None,
-) -> list[tuple[str]]:
-    """Return all direct neighbours of *node_id* (undirected view of the graph)."""
+) -> list[tuple[str, float]]:
+    """Return all direct neighbours of *node_id* with their edge weight.
+
+    Returns (neighbour_id, weight) pairs for an undirected view of the graph.
+    When a node appears on both sides of different edges the maximum weight is
+    kept (MAX aggregation in the UNION-based CTE).
+    """
     if workspace:
         return conn.execute(
             """
-            SELECT target_id AS neighbour FROM knowledge_graph_edges
-            WHERE  source_id = ? AND workspace = ?
-            UNION
-            SELECT source_id AS neighbour FROM knowledge_graph_edges
-            WHERE  target_id = ? AND workspace = ?
+            SELECT neighbour, MAX(weight) AS weight
+            FROM (
+                SELECT target_id AS neighbour, weight FROM knowledge_graph_edges
+                WHERE  source_id = ? AND workspace = ?
+                UNION ALL
+                SELECT source_id AS neighbour, weight FROM knowledge_graph_edges
+                WHERE  target_id = ? AND workspace = ?
+            )
+            GROUP BY neighbour
             """,
             (node_id, workspace, node_id, workspace),
         ).fetchall()
     else:
         return conn.execute(
             """
-            SELECT target_id AS neighbour FROM knowledge_graph_edges
-            WHERE  source_id = ?
-            UNION
-            SELECT source_id AS neighbour FROM knowledge_graph_edges
-            WHERE  target_id = ?
+            SELECT neighbour, MAX(weight) AS weight
+            FROM (
+                SELECT target_id AS neighbour, weight FROM knowledge_graph_edges
+                WHERE  source_id = ?
+                UNION ALL
+                SELECT source_id AS neighbour, weight FROM knowledge_graph_edges
+                WHERE  target_id = ?
+            )
+            GROUP BY neighbour
             """,
             (node_id, node_id),
         ).fetchall()

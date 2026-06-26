@@ -56,6 +56,13 @@ def _backups_dir() -> Path:
     return _cap_home() / "backups"
 
 
+def _get_bundled_data_path() -> Path:
+    """Get path to bundled data within the package."""
+    return Path(str(pkg_files("cap.data")))
+
+
+# ── MCP registration helpers ─────────────────────────────────────────────────
+
 def _run_claude_mcp(args: list[str]) -> bool:
     """Run `claude mcp ...` command. Returns True on success or already-exists."""
     try:
@@ -65,16 +72,24 @@ def _run_claude_mcp(args: list[str]) -> bool:
         )
         if result.returncode == 0:
             return True
-        if "already exists" in result.stderr.lower() or "already exists" in result.stdout.lower():
+        combined = (result.stderr + result.stdout).lower()
+        if "already exists" in combined:
             return True
         return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
 
-def _get_bundled_data_path() -> Path:
-    """Get path to bundled data within the package."""
-    return Path(str(pkg_files("cap.data")))
+def _mcp_server_exists(name: str) -> bool:
+    """Check if an MCP server is already registered."""
+    claude_json = _claude_json_path()
+    if not claude_json.exists():
+        return False
+    try:
+        data = json.loads(claude_json.read_text())
+        return name in data.get("mcpServers", {})
+    except (json.JSONDecodeError, KeyError):
+        return False
 
 
 # ── Config Backup/Restore ─────────────────────────────────────────────────────
@@ -121,15 +136,23 @@ def _restore_file(label: str, target_path: Path) -> bool:
 
 
 def _backup_user_configs() -> dict[str, str]:
-    """Backup all user config files that CAP might modify. Returns {label: backup_path}."""
+    """Backup all user config files that CAP might modify. Returns {label: backup_path}.
+
+    Only backs up on FIRST init — if a backup already exists for a label, skip it
+    to avoid polluting the backup chain with CAP-modified configs.
+    """
     backups_made = {}
 
     configs_to_backup = [
         (_claude_json_path(), "claude-json"),
         (_settings_json_path(), "settings-json"),
+        (_claude_dir() / "CLAUDE.md", "claude-md"),
     ]
 
     for file_path, label in configs_to_backup:
+        # Skip if a pristine backup already exists
+        if _get_latest_backup(label) is not None:
+            continue
         backup_path = _backup_file(file_path, label)
         if backup_path:
             backups_made[label] = str(backup_path)
@@ -144,6 +167,7 @@ def _restore_user_configs() -> dict[str, bool]:
     restores = [
         ("claude-json", _claude_json_path()),
         ("settings-json", _settings_json_path()),
+        ("claude-md", _claude_dir() / "CLAUDE.md"),
     ]
 
     for label, target in restores:
@@ -152,124 +176,167 @@ def _restore_user_configs() -> dict[str, bool]:
     return results
 
 
-# ── CLAUDE.md Instructions ────────────────────────────────────────────────────
+# ── CLAUDE.md ────────────────────────────────────────────────────────────────
 
-_CAP_INSTRUCTIONS_START = "<!-- CAP:START — Auto-managed by Claude Agent Platform. Do not edit this block. -->"
-_CAP_INSTRUCTIONS_END = "<!-- CAP:END -->"
+_CLAUDE_MD_CONTENT = """\
+# Claude Code — Global Instructions
 
-_CAP_INSTRUCTIONS_BODY = """
-## CAP — Claude Agent Platform (MCP Tools)
+## Security
 
-You have access to CAP MCP servers that provide persistent knowledge, session memory, and workflow coordination.
+- Use SSH-only repository URLs for clone and fetch operations.
+- Never store or print secrets, tokens, private keys, or credentials.
+- Never commit `.env` files, credentials, or AWS keys.
 
-### Information Retrieval Priority
+## AWS Access
 
-When answering questions about the codebase, repos, architecture, or past decisions:
+- Run `aws sso login --sso-session moia` to authenticate.
+- Ask which AWS profile/role to use before first AWS CLI call in a session.
+- Default to read-only profile if none specified.
+- Pass `--profile <name>` explicitly on every call.
 
-1. **Use `knowledge_search` FIRST** — it searches the indexed knowledge base (FTS5 + graph). Faster and more complete than grep.
-2. **Use `knowledge_graph_query`** — to traverse relationships between services, modules, and resources.
-3. **Use `session_recall`** — to find past decisions, learnings, and corrections.
-4. **Use bash/grep ONLY** — when you need exact file contents not yet indexed, or to read/modify specific files.
+## Communication Style
 
-### Session Memory
+- Terse. Results first.
+- Never ask technical architecture questions — make those calls yourself.
+- Only ask: business decisions, access/credential blockers, or approval gates (push, PR, deploy, apply).
 
-At the start of complex work:
-- Use `session_start` to begin a tracked session
-- Use `session_record` to save decisions, learnings, or corrections during work
-- Use `session_feedback` when the user corrects you — this persists across sessions
+## Autonomy
 
-### Workflow Coordination
+**Just do it (no approval needed):**
+File reads/edits, local commits, branch creation, builds, tests, linting, terraform plan/validate, research.
 
-For multi-specialist tasks, use the workflow engine:
-- `workflow_start` — kick off a multi-agent workflow
-- `workflow_status` — check progress
-- `workflow_kill` — abort a runaway workflow
+**Approval gates (stop and ask):**
+Push to remote, create PR, merge, terraform apply, cdk deploy, kubectl apply, destructive commands.
 
-### Budget Awareness
+## Information Retrieval (STRICT ORDER — MANDATORY)
 
-Workflows are budget-constrained. The workflow engine tracks token usage and kills workflows that exceed limits. Check budget with `workflow_estimate` before starting expensive operations.
+**BEFORE using bash find/grep/cat to answer ANY question about repos, architecture, or configs, you MUST first call the knowledge_search MCP tool.**
 
-### What NOT to do
+Step 1 — Load the tool schema (required because MCP tools are deferred):
+```
+ToolSearch({ query: "select:mcp__cap-knowledge__knowledge_search" })
+```
+
+Step 2 — Call the tool:
+```
+mcp__cap-knowledge__knowledge_search({ query: "your search terms", workspace: "<workspace-path>" })
+```
+
+Full retrieval priority:
+1. `mcp__cap-knowledge__knowledge_search` — FTS5 + semantic + graph across all indexed repos
+2. `mcp__cap-knowledge__knowledge_graph_query` — traverse service/resource relationships
+3. `mcp__cap-session__session_recall` — past decisions, learnings, corrections
+4. Bash grep/find — ONLY for exact file contents not yet indexed, or for execution
+
+**NEVER skip straight to bash.** The knowledge base is faster and more complete than filesystem traversal.
+
+## Session Memory
+
+- Use `session_start` at the beginning of complex work
+- Use `session_record` to persist decisions and learnings during work
+- Use `session_feedback` when the user corrects you — it persists across sessions
+
+## What NOT to do
 
 - Do NOT use bash grep/find to search for information when `knowledge_search` can answer it
-- Do NOT re-discover repo structure manually — the knowledge graph already has it indexed
+- Do NOT re-discover repo structure manually — the knowledge graph has it indexed
+- Do NOT read `~/.claude/knowledge/` files — they are legacy static files
 - Do NOT ignore session corrections — they persist specifically so you won't repeat mistakes
 """
 
 
-_LEGACY_INFO_HIERARCHY_MARKERS = [
-    "## Information Hierarchy (STRICT ORDER)",
-    "## Information Hierarchy",
-]
-
-
-def _install_claude_instructions(claude_dir: Path, force: bool = False) -> bool:
-    """Append CAP instructions to ~/.claude/CLAUDE.md. Returns True if modified."""
+def _install_claude_md(force: bool = False) -> bool:
+    """Create ~/.claude/CLAUDE.md with CAP instructions. Returns True if written."""
+    claude_dir = _claude_dir()
     claude_md = claude_dir / "CLAUDE.md"
 
-    if claude_md.exists():
-        content = claude_md.read_text()
-        if _CAP_INSTRUCTIONS_START in content:
-            if not force:
-                return False
-            content = _remove_cap_instructions(content)
-        content = _replace_legacy_info_hierarchy(content)
-    else:
-        claude_dir.mkdir(parents=True, exist_ok=True)
-        content = ""
+    if claude_md.exists() and not force:
+        return False
 
-    block = f"\n{_CAP_INSTRUCTIONS_START}\n{_CAP_INSTRUCTIONS_BODY}\n{_CAP_INSTRUCTIONS_END}\n"
-    content = content.rstrip() + "\n" + block
-    claude_md.write_text(content)
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    claude_md.write_text(_CLAUDE_MD_CONTENT)
     return True
 
 
-def _replace_legacy_info_hierarchy(content: str) -> str:
-    """Replace legacy file-based info hierarchy with a pointer to CAP MCP tools."""
-    for marker in _LEGACY_INFO_HIERARCHY_MARKERS:
-        idx = content.find(marker)
-        if idx == -1:
-            continue
-        next_section = content.find("\n## ", idx + len(marker))
-        if next_section == -1:
-            end_idx = len(content)
-        else:
-            end_idx = next_section
-        replacement = (
-            "## Information Hierarchy (STRICT ORDER)\n\n"
-            "When agents need to understand something:\n"
-            "1. **CAP `knowledge_search` FIRST** — searches the indexed knowledge base (FTS5 + semantic + graph). Covers all repos.\n"
-            "2. **CAP `session_recall`** — for past decisions, learnings, and corrections.\n"
-            "3. **MCP Servers** — Use structured tools (aws-iam, aws-eks, kubernetes, terraform, aws-cloudwatch) for live state.\n"
-            "4. **Bash LAST** — Only for exact file contents not yet indexed, or for execution (tests, builds).\n\n"
-            "When spawning agents: use `knowledge_search` to gather context, not bash grep.\n"
-        )
-        content = content[:idx] + replacement + content[end_idx:]
-        break
-    return content
+# ── Settings.json ────────────────────────────────────────────────────────────
+
+_CAP_MCP_PERMISSIONS = [
+    "mcp__cap-knowledge__knowledge_search",
+    "mcp__cap-knowledge__knowledge_graph_query",
+    "mcp__cap-knowledge__knowledge_graph_add",
+    "mcp__cap-knowledge__knowledge_ingest",
+    "mcp__cap-knowledge__knowledge_record",
+    "mcp__cap-knowledge__knowledge_status",
+    "mcp__cap-knowledge__knowledge_sync",
+    "mcp__cap-session__session_start",
+    "mcp__cap-session__session_record",
+    "mcp__cap-session__session_recall",
+    "mcp__cap-session__session_feedback",
+    "mcp__cap-session__session_end",
+    "mcp__cap-session__session_checkpoint",
+    "mcp__cap-session__session_history",
+    "mcp__cap-fleet__fleet_status",
+    "mcp__cap-fleet__fleet_health_check",
+    "mcp__cap-fleet__fleet_discover",
+    "mcp__cap-fleet__fleet_logs",
+    "mcp__workflow-engine__workflow_start",
+    "mcp__workflow-engine__workflow_status",
+    "mcp__workflow-engine__workflow_kill",
+    "mcp__workflow-engine__workflow_list",
+    "mcp__workflow-engine__workflow_estimate",
+    "mcp__workflow-engine__workflow_report",
+    "mcp__workflow-engine__workflow_signal",
+]
 
 
-def _remove_cap_instructions(content: str) -> str:
-    """Remove the CAP instructions block from CLAUDE.md content."""
-    start_idx = content.find(_CAP_INSTRUCTIONS_START)
-    end_idx = content.find(_CAP_INSTRUCTIONS_END)
-    if start_idx == -1 or end_idx == -1:
-        return content
-    return content[:start_idx].rstrip() + content[end_idx + len(_CAP_INSTRUCTIONS_END):]
+def _install_settings_permissions() -> bool:
+    """Add CAP MCP tool permissions to ~/.claude/settings.json. Returns True if modified."""
+    settings_path = _settings_json_path()
 
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except json.JSONDecodeError:
+            settings = {}
+    else:
+        _claude_dir().mkdir(parents=True, exist_ok=True)
+        settings = {}
 
-def _uninstall_claude_instructions(claude_dir: Path) -> bool:
-    """Remove CAP instructions from ~/.claude/CLAUDE.md. Returns True if modified."""
-    claude_md = claude_dir / "CLAUDE.md"
-    if not claude_md.exists():
+    permissions = settings.setdefault("permissions", {})
+    allow_list = permissions.setdefault("allow", [])
+
+    added = 0
+    for perm in _CAP_MCP_PERMISSIONS:
+        if perm not in allow_list:
+            allow_list.append(perm)
+            added += 1
+
+    if added == 0:
         return False
 
-    content = claude_md.read_text()
-    if _CAP_INSTRUCTIONS_START not in content:
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    return True
+
+
+def _remove_settings_permissions() -> bool:
+    """Remove CAP MCP tool permissions from settings.json. Returns True if modified."""
+    settings_path = _settings_json_path()
+    if not settings_path.exists():
         return False
 
-    new_content = _remove_cap_instructions(content)
-    claude_md.write_text(new_content)
+    try:
+        settings = json.loads(settings_path.read_text())
+    except json.JSONDecodeError:
+        return False
+
+    allow_list = settings.get("permissions", {}).get("allow", [])
+    original_len = len(allow_list)
+    allow_list[:] = [p for p in allow_list if p not in _CAP_MCP_PERMISSIONS]
+
+    if len(allow_list) == original_len:
+        return False
+
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     return True
 
 
@@ -294,6 +361,101 @@ def _load_manifest(cap_home: Path) -> dict:
 def _save_manifest(cap_home: Path, manifest: dict):
     mf = cap_home / MANIFEST_FILE
     mf.write_text(json.dumps(manifest, indent=2) + "\n")
+
+
+# ── MCP Server Definitions ───────────────────────────────────────────────────
+
+def _get_platform_mcp_servers() -> list[dict]:
+    """Platform MCP servers (AWS, K8s, Terraform) — installed if not already present."""
+    return [
+        {
+            "name": "kubernetes",
+            "command": "npx",
+            "args": ["-y", "mcp-server-kubernetes"],
+            "env": [],
+        },
+        {
+            "name": "aws-docs",
+            "command": "uvx",
+            "args": ["awslabs.aws-documentation-mcp-server@latest"],
+            "env": [],
+        },
+        {
+            "name": "aws-iam",
+            "command": "uvx",
+            "args": ["awslabs.iam-mcp-server"],
+            "env": [],
+        },
+        {
+            "name": "aws-eks",
+            "command": "uvx",
+            "args": ["awslabs.eks-mcp-server"],
+            "env": [],
+        },
+        {
+            "name": "aws-cloudwatch",
+            "command": "uvx",
+            "args": ["awslabs.cloudwatch-mcp-server"],
+            "env": [],
+        },
+        {
+            "name": "aws-lambda",
+            "command": "uvx",
+            "args": ["awslabs.lambda-tool-mcp-server"],
+            "env": [],
+        },
+        {
+            "name": "aws-pricing",
+            "command": "uvx",
+            "args": ["awslabs.aws-pricing-mcp-server"],
+            "env": [],
+        },
+        {
+            "name": "aws-iac",
+            "command": "uvx",
+            "args": ["awslabs.aws-iac-mcp-server"],
+            "env": [],
+        },
+        {
+            "name": "terraform",
+            "command": "npx",
+            "args": ["-y", "terraform-mcp-server"],
+            "env": [],
+        },
+    ]
+
+
+def _get_cap_mcp_servers(cap_home: Path, data_dir: Path) -> list[dict]:
+    """CAP's own MCP servers — always installed fresh."""
+    python_bin = sys.executable
+    servers_dir = Path(__file__).parent.parent / "servers"
+
+    return [
+        {
+            "name": "cap-knowledge",
+            "command": python_bin,
+            "args": [str(servers_dir / "knowledge_server.py")],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+        },
+        {
+            "name": "cap-session",
+            "command": python_bin,
+            "args": [str(servers_dir / "session_server.py")],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+        },
+        {
+            "name": "cap-fleet",
+            "command": python_bin,
+            "args": [str(servers_dir / "fleet_server.py")],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+        },
+        {
+            "name": "workflow-engine",
+            "command": python_bin,
+            "args": [str(servers_dir / "workflow_server.py")],
+            "env": [f"PLATFORM_DATA_DIR={data_dir}", f"PYTHONPATH={cap_home}"],
+        },
+    ]
 
 
 # ── cap init ──────────────────────────────────────────────────────────────────
@@ -355,7 +517,8 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
     initialize_all_databases(data_dir)
     for db_name in ["platform.db", "knowledge.db", "sessions.db", "fleet.db"]:
         db_path = data_dir / db_name
-        os.chmod(db_path, 0o600)
+        if db_path.exists():
+            os.chmod(db_path, 0o600)
     console.print(f"  [green]✓[/green] 4 databases initialized (WAL mode, 0600 permissions)")
 
     # ── 5. Agents ─────────────────────────────────────────────────────────
@@ -406,46 +569,57 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
     if not skip_mcp:
         console.print("\n[bold]7. Registering MCP servers[/bold]")
 
-        python_bin = sys.executable
-        servers_dir = Path(__file__).parent.parent / "servers"
-
-        mcp_servers = [
-            ("cap-knowledge", str(servers_dir / "knowledge_server.py"),
-             [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"]),
-            ("cap-session", str(servers_dir / "session_server.py"),
-             [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"]),
-            ("cap-fleet", str(servers_dir / "fleet_server.py"),
-             [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"]),
-            ("workflow-engine", str(servers_dir / "workflow_server.py"),
-             [f"PLATFORM_DATA_DIR={data_dir}", f"PYTHONPATH={cap_home}"]),
-        ]
-
-        registered = []
-        for name, script, env_vars in mcp_servers:
-            if force:
-                _run_claude_mcp(["remove", "--scope", "user", name])
-            env_args = []
-            for var in env_vars:
-                env_args.extend(["-e", var])
-            ok = _run_claude_mcp(["add", name, "--scope", "user"] + env_args + ["--", python_bin, script])
+        # Platform servers (AWS, K8s, Terraform) — only if not already present
+        platform_servers = _get_platform_mcp_servers()
+        for srv in platform_servers:
+            if _mcp_server_exists(srv["name"]):
+                console.print(f"  [dim]─[/dim] {srv['name']} (already registered)")
+                continue
+            cmd_args = ["add", srv["name"], "--scope", "user"]
+            for var in srv["env"]:
+                cmd_args.extend(["-e", var])
+            cmd_args.extend(["--", srv["command"]] + srv["args"])
+            ok = _run_claude_mcp(cmd_args)
             if ok:
-                console.print(f"  [green]✓[/green] {name}")
-                registered.append(name)
+                console.print(f"  [green]✓[/green] {srv['name']}")
             else:
-                console.print(f"  [yellow]![/yellow] {name} — failed (register manually with `claude mcp add`)")
+                console.print(f"  [yellow]![/yellow] {srv['name']} — failed")
+
+        # CAP servers — always register (remove first if force)
+        cap_servers = _get_cap_mcp_servers(cap_home, data_dir)
+        registered = []
+        for srv in cap_servers:
+            if force:
+                _run_claude_mcp(["remove", "--scope", "user", srv["name"]])
+            cmd_args = ["add", srv["name"], "--scope", "user"]
+            for var in srv["env"]:
+                cmd_args.extend(["-e", var])
+            cmd_args.extend(["--", str(srv["command"])] + srv["args"])
+            ok = _run_claude_mcp(cmd_args)
+            if ok:
+                console.print(f"  [green]✓[/green] {srv['name']}")
+                registered.append(srv["name"])
+            else:
+                console.print(f"  [yellow]![/yellow] {srv['name']} — failed (register manually with `claude mcp add`)")
         manifest["mcp_servers"] = registered
     else:
         console.print("\n[bold]7. MCP servers[/bold] — skipped (--skip-mcp)")
 
-    # ── 8. Install CLAUDE.md instructions ────────────────────────────────
+    # ── 8. CLAUDE.md ─────────────────────────────────────────────────────
     console.print("\n[bold]8. Installing Claude instructions[/bold]")
-    instructions_installed = _install_claude_instructions(claude_dir, force)
-    if instructions_installed:
-        console.print(f"  [green]✓[/green] CAP instructions → ~/.claude/CLAUDE.md")
+    if _install_claude_md(force):
+        console.print(f"  [green]✓[/green] ~/.claude/CLAUDE.md created")
     else:
-        console.print(f"  [dim]─[/dim] CAP instructions already present")
+        console.print(f"  [dim]─[/dim] ~/.claude/CLAUDE.md exists (use --force to overwrite)")
 
-    # ── 9. Save manifest ──────────────────────────────────────────────────
+    # ── 9. Settings permissions ───────────────────────────────────────────
+    console.print("\n[bold]9. Configuring MCP tool permissions[/bold]")
+    if _install_settings_permissions():
+        console.print(f"  [green]✓[/green] {len(_CAP_MCP_PERMISSIONS)} tool permissions added to settings.json")
+    else:
+        console.print(f"  [dim]─[/dim] Permissions already configured")
+
+    # ── 10. Save manifest ─────────────────────────────────────────────────
     manifest["version"] = "0.3.0"
     manifest["cap_home"] = str(cap_home)
     manifest["python"] = sys.executable
@@ -456,15 +630,13 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
     console.print("\n" + "─" * 60)
     console.print(Panel(
         "[bold green]CAP initialized successfully![/bold green]\n\n"
-        "[bold]Quick start:[/bold]\n"
-        "  [cyan]cap status[/cyan]          — Platform overview\n"
-        "  [cyan]cap doctor[/cyan]          — Health check\n"
-        "  [cyan]cap workflow demo[/cyan]   — Team simulation demo\n"
-        "  [cyan]cap workflow daemon[/cyan] — Auto-render workflows\n"
-        "  [cyan]cap eval run[/cyan]        — Run quality evaluations\n"
+        "[bold]Next steps:[/bold]\n"
+        "  [cyan]cap sync --workspace ~/path/to/code[/cyan]  — Index your codebase\n"
+        "  [cyan]cap status[/cyan]                           — Platform overview\n"
+        "  [cyan]cap doctor[/cyan]                           — Health check\n"
         "\n[bold]In Claude Code:[/bold]\n"
-        "  Workflows render as team conversations automatically.\n"
-        "  MCP tools: knowledge_ingest, session_start, fleet_status, workflow_start\n"
+        "  Reload window (Cmd+Shift+P → Reload) to pick up new MCP servers.\n"
+        "  Then ask anything — Claude will use knowledge_search automatically.\n"
         "\n[bold]Safety:[/bold]\n"
         f"  Config backups stored in {_backups_dir()}\n"
         "  Run [cyan]cap uninstall[/cyan] to cleanly restore original configs.",
@@ -495,7 +667,7 @@ def uninstall(keep_data: bool, yes: bool):
     table.add_column("Reversible?", justify="center")
 
     table.add_row(
-        "Deregister MCP servers",
+        "Deregister CAP MCP servers",
         f"{len(manifest.get('mcp_servers', []))} servers",
         "[green]yes[/green]",
     )
@@ -510,9 +682,9 @@ def uninstall(keep_data: bool, yes: bool):
         "[green]yes[/green] (reinstall)",
     )
     table.add_row(
-        "Restore configs",
-        "~/.claude.json, ~/.claude/settings.json",
-        "[green]yes[/green] (from backup)",
+        "Remove CAP-owned configs",
+        "CAP permissions from settings.json; CLAUDE.md if CAP-generated",
+        "[green]yes[/green] (surgical removal)",
     )
     if keep_data:
         table.add_row(
@@ -533,8 +705,8 @@ def uninstall(keep_data: bool, yes: bool):
     if not yes:
         click.confirm("Proceed with uninstall?", abort=True)
 
-    # ── 1. Deregister MCP servers ─────────────────────────────────────────
-    console.print("\n[bold]1. Deregistering MCP servers[/bold]")
+    # ── 1. Deregister CAP MCP servers ────────────────────────────────────
+    console.print("\n[bold]1. Deregistering CAP MCP servers[/bold]")
     for name in manifest.get("mcp_servers", []):
         ok = _run_claude_mcp(["remove", "--scope", "user", name])
         if ok:
@@ -564,22 +736,27 @@ def uninstall(keep_data: bool, yes: bool):
             removed_workflows += 1
     console.print(f"  [green]✓[/green] {removed_workflows} workflows removed")
 
-    # ── 4. Restore user configs from backup ───────────────────────────────
-    console.print("\n[bold]4. Restoring user configs[/bold]")
-    restore_results = _restore_user_configs()
-
-    for label, success in restore_results.items():
-        if success:
-            console.print(f"  [green]✓[/green] Restored {label}")
-        else:
-            console.print(f"  [dim]─[/dim] {label} — no backup found (was not modified by CAP)")
-
-    # ── 5. Remove Claude instructions ────────────────────────────────────
-    console.print("\n[bold]5. Removing Claude instructions[/bold]")
-    if _uninstall_claude_instructions(claude_dir):
-        console.print(f"  [green]✓[/green] CAP instructions removed from CLAUDE.md")
+    # ── 4. Remove CAP MCP permissions from settings ──────────────────────
+    console.print("\n[bold]4. Removing MCP tool permissions[/bold]")
+    if _remove_settings_permissions():
+        console.print(f"  [green]✓[/green] CAP permissions removed from settings.json")
     else:
-        console.print(f"  [dim]─[/dim] No CAP instructions found in CLAUDE.md")
+        console.print(f"  [dim]─[/dim] No CAP permissions found")
+
+    # ── 5. Surgical config cleanup ────────────────────────────────────────
+    # Do NOT wholesale-restore from backup: restoring ~/.claude.json would undo
+    # the claude mcp remove calls we just made above, and restoring settings.json
+    # would undo the permission removal already done in step 4.
+    # Instead, only remove artefacts that CAP owns outright.
+    console.print("\n[bold]5. Removing CAP-owned config artefacts[/bold]")
+
+    # CLAUDE.md — remove only if the file is entirely CAP-generated
+    claude_md = _claude_dir() / "CLAUDE.md"
+    if claude_md.exists() and claude_md.read_text().startswith(_CLAUDE_MD_CONTENT[:120]):
+        claude_md.unlink()
+        console.print(f"  [green]✓[/green] ~/.claude/CLAUDE.md removed (was CAP-generated)")
+    else:
+        console.print(f"  [dim]─[/dim] ~/.claude/CLAUDE.md left untouched (user-customised or absent)")
 
     # ── 6. Remove platform data ───────────────────────────────────────────
     if keep_data:
@@ -601,8 +778,8 @@ def uninstall(keep_data: bool, yes: bool):
     console.print("\n" + "─" * 60)
     console.print(Panel(
         "[bold green]Uninstall complete.[/bold green]\n\n"
-        "Your original configs have been restored.\n"
-        "Your system is back to its pre-CAP state.\n\n"
+        "CAP permissions and CAP-generated CLAUDE.md have been removed.\n"
+        "Platform MCP servers (AWS, K8s, Terraform) were left untouched.\n\n"
         "[dim]To also remove the Python package:[/dim]\n"
         "  [cyan]uv tool uninstall claude-agent-platform[/cyan]",
         box=box.ROUNDED,
@@ -623,7 +800,6 @@ def backup():
     else:
         console.print("[dim]No configs found to backup.[/dim]")
 
-    # Also backup CAP's own config
     cap_config = _cap_home() / "config.toml"
     if cap_config.exists():
         bp = _backup_file(cap_config, "cap-config-toml")
@@ -662,7 +838,6 @@ def restore(list_backups: bool):
         console.print(table)
         return
 
-    # Restore latest of each type
     results = _restore_user_configs()
     for label, success in results.items():
         if success:

@@ -477,9 +477,14 @@ class SessionEvalSuite(EvalSuite):
         t0 = time.perf_counter()
 
         try:
+            import re
+            fts_query = re.sub(r'(\w)-(\w)', r'\1 \2', query)
+            fts_query = re.sub(r'[{}()\[\]^~*]', ' ', fts_query)
+            terms = [t for t in fts_query.split() if t]
+            fts_query = ' OR '.join(terms) if len(terms) > 1 else (terms[0] if terms else query)
             cursor = self._conn.execute(
                 "SELECT rowid FROM decisions_fts WHERE decisions_fts MATCH ? ORDER BY rank LIMIT 5",
-                (query,),
+                (fts_query,),
             )
             actual_ids = [row[0] for row in cursor.fetchall()]
         except Exception:

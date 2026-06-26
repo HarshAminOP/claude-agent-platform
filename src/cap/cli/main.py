@@ -1331,6 +1331,7 @@ def sync(workspace: str, trigger: str, full: bool):
     """Index workspace files into the knowledge base."""
     from cap.lib.config import load_config
     from cap.lib.db_init import init_knowledge_db
+    from cap.lib.repo_extractor import extract_and_index_repos
     from cap.lib.sync_engine import sync_workspace
 
     workspace = _resolve_workspace(workspace)
@@ -1346,10 +1347,24 @@ def sync(workspace: str, trigger: str, full: bool):
         console.print(f"[red]Database init failed: {exc}[/red]")
         raise SystemExit(1)
 
+    # Phase 1: Repo-level summaries (high-quality structured entries)
+    console.print("[bold]Phase 1: Repo summaries[/bold]")
+    with console.status("[cyan]Extracting repo summaries…[/cyan]"):
+        repo_stats = extract_and_index_repos(db, workspace)
+
+    console.print(f"  [green]✓[/green] {repo_stats.repos_found} repos found, "
+                  f"{repo_stats.repos_indexed} indexed, "
+                  f"{repo_stats.repos_updated} updated, "
+                  f"{repo_stats.graph_edges_created} graph edges")
+    if repo_stats.errors:
+        for err in repo_stats.errors[:3]:
+            console.print(f"  [yellow]![/yellow] {err}")
+
+    # Phase 2: File-level indexing (for grep-like precision queries)
+    console.print("\n[bold]Phase 2: File indexing[/bold]")
     with console.status("[cyan]Scanning and indexing files…[/cyan]"):
         stats = sync_workspace(db, workspace, full=full)
 
-    # Results table
     table = Table(box=box.SIMPLE)
     table.add_column("Metric", style="bold")
     table.add_column("Count", justify="right")
@@ -1370,13 +1385,145 @@ def sync(workspace: str, trigger: str, full: bool):
         if len(stats.errors) > 5:
             console.print(f"  [dim]… and {len(stats.errors) - 5} more[/dim]")
 
-    total = stats.files_indexed + stats.files_updated
+    total = stats.files_indexed + stats.files_updated + repo_stats.repos_indexed
     if total > 0:
         console.print(f"\n[green]✓[/green] Knowledge base updated ({total} entries)")
     elif stats.files_unchanged > 0:
-        console.print(f"\n[green]✓[/green] Already up to date ({stats.files_unchanged} files unchanged)")
+        console.print(f"\n[green]✓[/green] Already up to date")
     else:
-        console.print("\n[yellow]No indexable files found in workspace[/yellow]")
+        console.print("\n[yellow]No indexable content found in workspace[/yellow]")
+
+
+# ── cap embed ──────────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--batch-size", "-b", default=100, help="Entries per batch")
+@click.option("--max-entries", "-n", default=0, help="Max entries to process (0 = all)")
+@click.option("--profile", "-p", default=None, help="AWS profile for Bedrock access")
+def embed(batch_size: int, max_entries: int, profile: str):
+    """Generate embeddings for queued knowledge entries via Bedrock Titan."""
+    import asyncio
+    from cap.lib.config import load_config
+    from cap.lib.db_init import init_knowledge_db
+    from cap.lib.embeddings import EmbeddingClient, EmbeddingConfig
+
+    config = load_config()
+    data_dir = config.data_dir
+
+    try:
+        db = init_knowledge_db(data_dir)
+    except Exception as exc:
+        console.print(f"[red]Database init failed: {exc}[/red]")
+        raise SystemExit(1)
+
+    # Count pending
+    pending_count = db.execute(
+        "SELECT COUNT(*) FROM embedding_queue WHERE status = 'pending'"
+    ).fetchone()[0]
+
+    if pending_count == 0:
+        console.print("[green]✓[/green] No pending embeddings — queue is empty.")
+        return
+
+    limit = max_entries if max_entries > 0 else pending_count
+    console.print(f"[bold]Embedding:[/bold] {min(limit, pending_count)} of {pending_count} pending entries")
+    console.print(f"[dim]Model: amazon.titan-embed-text-v2:0  Region: {config.bedrock.region}[/dim]\n")
+
+    # Init embedding client
+    embed_config = EmbeddingConfig(
+        region=config.bedrock.region,
+        profile=profile or config.bedrock.profile,
+        max_concurrent=config.bedrock.embedding_max_concurrent,
+    )
+    client = EmbeddingClient(embed_config)
+
+    # Init LanceDB
+    vectors_dir = data_dir / "vectors"
+    vectors_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import lancedb
+        import pyarrow as pa
+
+        lance_db = lancedb.connect(str(vectors_dir))
+        try:
+            vectors_table = lance_db.open_table("knowledge_vectors")
+        except Exception:
+            schema = pa.schema([
+                pa.field("uuid", pa.string()),
+                pa.field("workspace", pa.string()),
+                pa.field("vector", pa.list_(pa.float32(), 1024)),
+            ])
+            vectors_table = lance_db.create_table("knowledge_vectors", schema=schema)
+    except ImportError:
+        console.print("[red]LanceDB not available — install with: pip install lancedb[/red]")
+        raise SystemExit(1)
+
+    # Process in batches
+    processed = 0
+    succeeded = 0
+    failed = 0
+
+    async def _process_all():
+        nonlocal processed, succeeded, failed
+
+        async_client = EmbeddingClient(embed_config)
+
+        while processed < limit:
+            batch_limit = min(batch_size, limit - processed)
+            rows = db.execute(
+                """SELECT eq.entry_id, ke.uuid, ke.content
+                   FROM embedding_queue eq
+                   JOIN knowledge_entries ke ON ke.id = eq.entry_id
+                   WHERE eq.status = 'pending'
+                   LIMIT ?""",
+                (batch_limit,),
+            ).fetchall()
+
+            if not rows:
+                break
+
+            entries = [(r[0], r[1], r[2] or "") for r in rows]
+            texts = [content for _, _, content in entries]
+            vectors = await async_client.embed_batch(texts)
+
+            for (entry_id, uuid, _), vector in zip(entries, vectors):
+                if vector is not None:
+                    workspace = db.execute(
+                        "SELECT workspace FROM knowledge_entries WHERE id = ?", (entry_id,)
+                    ).fetchone()[0]
+                    vectors_table.add([{
+                        "uuid": uuid,
+                        "workspace": workspace,
+                        "vector": vector,
+                    }])
+                    db.execute(
+                        "UPDATE knowledge_entries SET embedding_status = 'embedded' WHERE id = ?",
+                        (entry_id,),
+                    )
+                    db.execute(
+                        "UPDATE embedding_queue SET status = 'done' WHERE entry_id = ?",
+                        (entry_id,),
+                    )
+                    succeeded += 1
+                else:
+                    db.execute(
+                        "UPDATE embedding_queue SET status = 'failed' WHERE entry_id = ?",
+                        (entry_id,),
+                    )
+                    failed += 1
+            db.commit()
+            processed += len(entries)
+
+        return async_client
+
+    with console.status("[cyan]Generating embeddings via Bedrock…[/cyan]"):
+        client = asyncio.run(_process_all())
+
+    console.print(f"\n[green]✓[/green] Processed: {processed}  Succeeded: {succeeded}  Failed: {failed}")
+
+    if client.is_available is False:
+        console.print("[yellow]⚠ Bedrock unavailable — check AWS credentials/region[/yellow]")
 
 
 # ── cap eval ──────────────────────────────────────────────────────────────────

@@ -314,6 +314,28 @@ async def _handle_signal(args: dict):
             (args["tokens_delta"], wf_id)
         )
 
+        # Check budget enforcement
+        budget_row = db.execute(
+            "SELECT tokens_used, budget_tokens FROM workflows WHERE id = ?", (wf_id,)
+        ).fetchone()
+        if budget_row and budget_row[0] >= budget_row[1]:
+            db.execute(
+                "UPDATE workflows SET killed = 1, status = 'killed', completed_at = ?, error = ? WHERE id = ?",
+                (now, f"Budget exhausted: {budget_row[0]}/{budget_row[1]} tokens", wf_id)
+            )
+            db.execute(
+                """INSERT INTO workflow_events (workflow_id, event_type, message, timestamp)
+                   VALUES (?, 'killed', ?, ?)""",
+                (wf_id, f"Auto-killed: budget exhausted ({budget_row[0]}/{budget_row[1]} tokens)", now)
+            )
+            db.commit()
+            logger.warning("Workflow %s auto-killed: budget exhausted %d/%d", wf_id, budget_row[0], budget_row[1])
+            return [TextContent(type="text", text=json.dumps({
+                "ok": True, "event_type": event_type,
+                "budget_exceeded": True, "killed": True,
+                "tokens_used": budget_row[0], "budget_tokens": budget_row[1],
+            }))]
+
     db.commit()
     return [TextContent(type="text", text=json.dumps({"ok": True, "event_type": event_type}))]
 
