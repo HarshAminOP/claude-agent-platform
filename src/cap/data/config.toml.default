@@ -1,0 +1,97 @@
+[platform]
+version = "0.3.0"
+log_level = "INFO"
+
+[bedrock]
+region = "eu-central-1"
+# profile = "your-aws-profile"
+embedding_model = "amazon.titan-embed-text-v2:0"
+embedding_dimensions = 1024
+embedding_batch_size = 25
+embedding_max_concurrent = 3
+embedding_max_input_tokens = 8192
+
+[bedrock.retry]
+max_retries = 3
+base_delay_ms = 500
+max_delay_ms = 10000
+backoff_multiplier = 2.0
+
+[models.opus]
+input_cost = 15.00
+output_cost = 75.00
+
+[models.sonnet]
+input_cost = 3.00
+output_cost = 15.00
+
+[models.haiku]
+input_cost = 0.25
+output_cost = 1.25
+
+[models.titan_embed_v2]
+cost_per_million = 0.02
+
+[concurrency]
+min_slots = 3
+max_slots = 8
+initial_slots = 4
+scale_up_after_seconds = 60.0
+
+[budget]
+monthly_cap_usd = 50.00
+warning_threshold = 0.8
+per_workflow_default_usd = 5.00
+kill_on_exceed = true
+
+[knowledge.retrieval]
+default_strategy = "hybrid"
+rrf_k = 60
+default_top_k = 10
+recency_boost_halflife_days = 30
+
+[knowledge.retrieval.weights]
+keyword = 0.3
+semantic = 0.5
+graph = 0.2
+
+[knowledge.retrieval.fallback_weights]
+keyword = 0.6
+graph = 0.4
+
+[knowledge.sync]
+auto_sync_on_session_start = true
+auto_sync_on_git_pull = true
+scheduled_interval_minutes = 60
+max_file_size_kb = 500
+skip_patterns = [
+    '\\.git/', 'node_modules/', 'vendor/', '\\.terraform/',
+    '__pycache__/', '\\.pyc$', '\\.lock$', '\\.env$',
+    '\\.(png|jpg|gif|ico|woff|ttf|eot|so|dylib)$',
+]
+
+[knowledge.graph]
+max_traversal_depth = 3
+default_depth = 2
+
+[session]
+checkpoint_interval_seconds = 300
+max_corrections_loaded = 20
+max_learnings_loaded = 30
+max_decisions_loaded = 15
+recency_weight = 0.7
+
+[fleet]
+health_check_interval_seconds = 30
+health_check_timeout_seconds = 5
+unhealthy_threshold = 3
+max_restarts = 5
+restart_backoff_base = 2.0
+auto_restart_enabled = true
+
+[maintenance]
+wal_checkpoint_threshold_mb = 50.0
+vacuum_growth_threshold_mb = 100.0
+daily_prune_hour = 3
+weekly_vacuum_day = 6
+backup_retention_count = 5

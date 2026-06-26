@@ -1,190 +1,304 @@
+<div align="center">
+
+<br>
+
 # Claude Agent Platform
 
-A self-improving multi-agent system for [Claude Code CLI](https://claude.ai/code). Turns Claude into a team of 14 autonomous specialists that coordinate, review each other's work, and learn from every session.
+### Your AI assistant just became an engineering team.
 
-## What You Get
+<br>
 
-- **14 specialist agents** — devops, security, architect, SRE, dev, optimization, CI/CD, testing, code review, docs, teacher, system (self-improving)
-- **10 multi-agent workflows** — new service deployment, incident response, security audit, cost optimization, architecture explainer, and more
-- **Proactive session observer** — automatically captures your corrections and preferences, improves with every conversation
-- **Knowledge base** — persistent memory across all sessions and workspaces
-- **9 MCP servers** — structured read-only access to AWS (IAM, EKS, CloudWatch, Lambda, pricing), Terraform registry, and Kubernetes
-- **Auto-sync** — repos stay fresh, stale branches get pruned
-- **Self-improving** — a dedicated system agent audits and optimizes the setup itself
+CAP transforms Claude from a single chat session into a **persistent, budget-aware, multi-specialist platform** that remembers everything, searches your entire codebase, and coordinates work like a real team — visible in real time.
 
-## Prerequisites
+<br>
 
-- **Claude Code CLI** installed and authenticated ([install guide](https://claude.ai/code))
-- **git**, **node/npm**, **python3** (most systems have these)
-- **uvx** (optional, for AWS MCP servers) — install with `pip install uv`
-- **AWS CLI + SSO** (optional, for AWS access) — configured in `~/.aws/config`
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue?style=for-the-badge)](pyproject.toml)
 
-## Install
+<br>
 
-```bash
-git clone <this-repo> claude-agent-platform
-cd claude-agent-platform
-./install.sh
-```
+[Why CAP](#why-cap) · [Features](#features) · [Get Started](#get-started) · [Documentation](#documentation)
 
-The installer asks a few questions:
-1. AI provider (Anthropic direct / AWS Bedrock / skip)
-2. AWS SSO session name (optional — enables 7 AWS MCP servers)
-3. Git conventions (SSH vs HTTPS, branch pattern)
-4. Effort level (how deep Claude thinks)
+<br>
 
-Then it installs everything to `~/.claude/` (global, works in any directory).
+</div>
 
-## Usage
-
-Just use Claude normally. The system routes automatically:
-
-```bash
-# In any project directory:
-claude
-
-# Security audit (spawns security agent, 3 parallel dimensions)
-> audit this repo for security issues
-
-# New service (triggers full workflow: architect → implement → review → monitor → document)
-> deploy a new Lambda that processes SQS events
-
-# Incident response (triggers workflow: triage → correlate → mitigate → fix → postmortem)  
-> production alerts firing, pods OOMKilling in staging
-
-# Architecture explanation (parallel mappers + synthesizer)
-> how does the deployment pipeline work end-to-end?
-
-# Cost optimization (3-way scan → alternatives → implement)
-> our AWS bill is too high, find waste
-
-# Self-improvement
-> improve the agent system
-> add a new agent for database migrations
-```
-
-## Commands
-
-| Command | What it does |
-|---------|--------------|
-| `~/.claude/scripts/init-repo.sh [path]` | Set up a new repo with Claude integration |
-| `~/.claude/scripts/aws-sso-login.sh` | Authenticate AWS SSO (all accounts) |
-| `~/.claude/scripts/aws-sso-login.sh status` | Check SSO session health |
-| `~/.claude/scripts/auto-sync.sh` | Fetch/pull all repos in workspace |
-| `~/.claude/scripts/build-knowledge-base.sh` | Rebuild repo index in knowledge base |
-
-## Inside Claude, say:
-
-| You say | What happens |
-|---------|--------------|
-| `/session-observe` | Analyze session, save learnings |
-| `/repo-sync-clean` | Sync repos + prune stale branches |
-| "improve the setup" | System agent audits and fixes |
-| "review this code" | Code-review + security agents run |
-| "explain how X works" | Teacher agent with architecture context |
-
-## How It Works
-
-### Agent Coordination
-
-```
-You → Orchestrator → routes to specialist(s)
-                   → parallel: security + code-review
-                   → sequential: architect → implementer
-                   → workflow: multi-phase pipeline
-```
-
-Agents pass context to each other. The orchestrator manages handoffs, retry loops, and conflict resolution (security has veto power).
-
-### Self-Improvement Loop
-
-```
-Session → Observer captures corrections/preferences → Memory
-        → System agent detects patterns → Updates agents/workflows
-        → Knowledge base grows → Future sessions start smarter
-```
-
-### File Layout
-
-```
-~/.claude/
-├── CLAUDE.md           ← Orchestrator instructions
-├── settings.json       ← Permissions, model, env
-├── agents/             ← 14 specialist agent definitions
-├── workflows/          ← 10 multi-agent pipeline scripts
-├── scripts/            ← Utility scripts (sync, init, SSO)
-└── knowledge/          ← Persistent brain (repos, domains, tasks)
-```
-
-## Upgrade
-
-```bash
-cd claude-agent-platform
-git pull
-./upgrade.sh    # Updates agents, workflows, scripts — preserves your config
-```
-
-## Uninstall
-
-```bash
-./uninstall.sh  # Removes everything except knowledge base
-```
-
-## Customization
-
-### Add a new agent
-
-Create `~/.claude/agents/my-agent.md`:
-```markdown
----
-name: my-agent
-description: What this agent does (shown in picker menu)
-model: sonnet
 ---
 
-# My Agent
+<br>
 
-You are a specialist in X. Your responsibilities:
-- Do Y
-- Validate Z
+## Why CAP
+
+Every AI coding assistant has the same problem:
+
+> It forgets everything the moment you close the window.
+
+You spend time teaching it your architecture, correcting its mistakes, explaining your conventions — and next session, it's a blank slate again. Multiply that across a team of engineers, each re-teaching the same AI the same things, and you're bleeding hours every week.
+
+**CAP solves this permanently.**
+
+| Capability | Without CAP | With CAP |
+|:-----------|:---:|:---:|
+| Remembers across sessions | ✗ | ✓ |
+| Searches your actual codebase | ✗ | ✓ |
+| Live visibility into multi-agent work | ✗ | ✓ |
+| Budget controls & automatic kill | ✗ | ✓ |
+| Self-healing infrastructure | ✗ | ✓ |
+| Quality evaluation framework | ✗ | ✓ |
+| One-command install & uninstall | ✗ | ✓ |
+
+<br>
+
+---
+
+<br>
+
+## Features
+
+<br>
+
+### Persistent Memory
+
+Your AI learns once and remembers forever.
+
+When you correct Claude — "don't use mocks for DB tests, we got burned by that" — CAP stores that correction with confidence scoring. Next session, next week, next month: it remembers. Decisions, preferences, patterns, domain knowledge — all persisted and reinforced over time.
+
+The more you use it, the smarter it gets. Not through retraining — through accumulated institutional knowledge that never fades.
+
+<br>
+
+---
+
+<br>
+
+### Codebase Intelligence
+
+Ask anything about your code. Get answers from reality, not imagination.
+
+CAP continuously indexes your workspace using three search channels working together:
+
+- **Keyword matching** — fast exact lookups (like grep, but ranked)
+- **Semantic search** — finds conceptually related content even without keyword overlap
+- **Knowledge graph** — traverses relationships between services, configs, and decisions
+
+Results are automatically fused and ranked. Claude cites where it found each answer. No more "I think the config is probably in..." — it knows exactly where it is.
+
+<br>
+
+---
+
+<br>
+
+### Live Team Simulation
+
+Watch your AI work like a coordinated engineering team — not a black box.
+
+When CAP handles complex tasks, it assigns work to specialist agents (Architect, DevOps, Security, SRE, etc.) and renders their collaboration as a live conversation:
+
+```
+┌─ Architecture ───────────────────────────────────────────
+│
+│  Architect    Proposed: ALB → EKS, 3 replicas, Karpenter nodes
+│  Security  →  Architect  "IAM role too broad — needs source conditions"
+│  Architect    Acknowledged. Revising to least-privilege...
+│  Architect  ✓ Design approved (2 revisions)
+│
+┌─ Implementation ─────────────────────────────────────────
+│
+│  DevOps      Writing Terraform + Helm chart
+│  SRE         Creating alerting rules
+│  DevOps   →  SRE  "Chart ready. Need alerts for p99 > 500ms"
+│  SRE       ✓ 3 alerts: latency, error_rate, saturation
+│  DevOps    ✓ Plan: +14 resources, no destroy
+│
+└─ Done ───────────────────────────────────────────────────
+   2m 34s · $0.42 · 6 agents · passed
 ```
 
-Then tell Claude: "add my-agent to the routing table" — the system agent will update CLAUDE.md.
+You see concerns raised, handoffs between specialists, acknowledgements, and final decisions — all in real time. Not after the fact. Not in a log file. **As it happens.**
 
-### Add a new workflow
+<br>
 
-Create `~/.claude/workflows/my-workflow.js`:
-```javascript
-export const meta = {
-  name: 'my-workflow',
-  description: 'What it does',
-  whenToUse: 'When to trigger it',
-  phases: [
-    { title: 'Phase1', detail: 'What happens' },
-    { title: 'Phase2', detail: 'What happens next' },
-  ],
-}
+---
 
-phase('Phase1')
-const result = await agent('Do X', { agentType: 'devops' })
+<br>
 
-phase('Phase2')
-await agent(`Based on ${result}, do Y`, { agentType: 'security' })
+### Budget Controls
+
+Set it and forget it. Or watch it like a hawk. Either way, you're in control.
+
+- **Monthly caps** — hard ceiling on total spend
+- **Per-task limits** — each workflow has its own budget
+- **Automatic kill** — exceeds budget? Workflow stops immediately
+- **Live tracking** — see exactly what each model tier costs
+
+No more "I left it running overnight and it burned $200." CAP makes that impossible.
+
+<br>
+
+---
+
+<br>
+
+### Self-Managing Infrastructure
+
+CAP runs 4 background servers that extend Claude's capabilities. You never need to think about them:
+
+- Automatic health checks every 30 seconds
+- Self-restart on failure with exponential backoff
+- Zero-touch setup — one command brings everything online
+- Clean shutdown and restore on uninstall
+
+If something fails, it fixes itself. If something can't be fixed, it tells you why.
+
+<br>
+
+---
+
+<br>
+
+## What's Included
+
+| | Component | What It Does |
+|:--|:----------|:-------------|
+| **Agents** | 14 specialists | Architect, DevOps, Security, SRE, CI/CD, Test, Optimization, Code Review, Docs, and more |
+| **Workflows** | 10 pipelines | New service setup, incident response, security audit, cost optimization, architecture review |
+| **Servers** | 4 MCP servers | Knowledge retrieval, session memory, workflow orchestration, fleet health |
+| **CLI** | `cap` command | Status, diagnostics, eval, workflow watch, budget tracking, knowledge search |
+| **Eval** | Quality framework | Automated scoring of retrieval accuracy, security coverage, session memory, and workflows |
+
+<br>
+
+---
+
+<br>
+
+## Get Started
+
+Three commands. Under 60 seconds.
+
+```bash
+uv tool install claude-agent-platform    # Install the package
+cap init                                  # Set up databases, agents, servers
+cap status                                # Verify everything is running
 ```
 
-### Modify permissions
+**Done.** Next time you open Claude Code, CAP is active. No configuration needed.
 
-Edit `~/.claude/settings.json` — add patterns to `allow` or `deny`.
+<br>
 
-## Architecture Decisions
+> **Zero risk:** CAP backs up your existing settings before touching anything. Uninstall restores them perfectly — your system returns to exactly how it was before.
 
-- **Global install (`~/.claude/`)** — works identically in every directory without per-project setup
-- **Read-only MCP servers** — all AWS access is read-only by design; no server can create/modify/delete
-- **Security veto** — security agent can block merges; its concerns must be addressed before proceeding
-- **Knowledge over re-reading** — knowledge base is checked first; raw files only when KB isn't enough
-- **One SSO login = all accounts** — a single browser auth grants access to the entire organization
-- **Proactive learning** — corrections are captured silently; the system never needs the same feedback twice
+<br>
 
-## License
+<details>
+<summary><strong>What about my existing Claude setup?</strong></summary>
 
-MIT
+<br>
+
+CAP is additive. It doesn't replace or modify your existing Claude Code configuration — it extends it by registering additional MCP servers. Your current agents, settings, and workflows remain untouched.
+
+If you uninstall, `cap uninstall` removes only what it added and restores your original configs from backup.
+
+</details>
+
+<details>
+<summary><strong>Do I need AWS credentials?</strong></summary>
+
+<br>
+
+**For semantic search — yes, currently.** CAP uses **Amazon Titan Text Embeddings V2** (via Bedrock) to generate vector embeddings that power semantic search. This requires an AWS account with SSO and Bedrock model access enabled in your region.
+
+**Without AWS credentials**, CAP still works — it falls back to keyword search + knowledge graph traversal, which covers most use cases well. Semantic search adds the ability to find conceptually related content even when exact keywords don't match.
+
+**For the LLM agents themselves**, CAP coordinates specialist agents that run through Claude Code's own model access (your existing Anthropic API key or Bedrock-backed Claude). CAP doesn't make its own LLM calls — it orchestrates Claude Code sessions that already have model access.
+
+Support for alternative embedding providers (OpenAI, local models like `nomic-embed`) is planned. See the [Installation Guide](docs/INSTALL.md) for Bedrock credential setup.
+
+</details>
+
+<details>
+<summary><strong>Can I share this with my team?</strong></summary>
+
+<br>
+
+Yes. Build a wheel with `uv build` and share the `.whl` file, or install directly from your Git repository:
+
+```bash
+uv tool install git+ssh://git@github.com/your-org/claude-agent-platform.git
+```
+
+See the [Distribution Guide](docs/DISTRIBUTION.md) for all options including private PyPI, CodeArtifact, and S3.
+
+</details>
+
+<br>
+
+---
+
+<br>
+
+## Who It's For
+
+| Role | What CAP gives you |
+|:-----|:-------------------|
+| **Any engineer using Claude** | It remembers your preferences and never repeats the same mistake twice |
+| **Platform / DevOps** | Instant search across dozens of repos, infrastructure decisions persisted |
+| **Tech leads** | Visibility into AI-assisted work, cost controls, quality scoring |
+| **Teams** | Shared knowledge base that compounds with every conversation |
+
+<br>
+
+---
+
+<br>
+
+## Safe By Design
+
+| Principle | How |
+|:----------|:----|
+| **Your data stays local** | Everything in SQLite on your machine. Nothing sent anywhere except optional AWS embeddings. |
+| **Non-destructive install** | Backs up configs before modifying. Uninstall restores originals. |
+| **Budget-enforced** | Monthly caps, per-workflow limits, auto-kill. Impossible to overspend silently. |
+| **Secure by default** | Database files `0600`. Path traversal blocked. Injection patterns detected. Command whitelist enforced. |
+
+<br>
+
+---
+
+<br>
+
+## Documentation
+
+| Guide | Description |
+|:------|:------------|
+| **[Installation](docs/INSTALL.md)** | Prerequisites, setup, credentials, troubleshooting |
+| **[Usage](docs/USAGE.md)** | How and when each feature activates, with examples |
+| **[Configuration](docs/CONFIGURATION.md)** | Every setting explained — budgets, search weights, sync behavior |
+| **[Distribution](docs/DISTRIBUTION.md)** | Build, publish, and share with your team |
+| **[Technical](docs/TECHNICAL.md)** | Architecture diagrams, API surface, internals |
+| **[Architecture](docs/ARCHITECTURE.md)** | System design document |
+| **[ADRs](docs/adr/)** | Key technical decisions with rationale |
+
+<br>
+
+---
+
+<br>
+
+<div align="center">
+
+**One install. Permanent memory. Real-time visibility. Full control.**
+
+<br>
+
+```bash
+uv tool install claude-agent-platform && cap init
+```
+
+<br>
+
+MIT License · [MOIA Platform Engineering](https://github.com/moia-dev)
+
+</div>
