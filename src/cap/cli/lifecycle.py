@@ -57,13 +57,17 @@ def _backups_dir() -> Path:
 
 
 def _run_claude_mcp(args: list[str]) -> bool:
-    """Run `claude mcp ...` command. Returns True on success."""
+    """Run `claude mcp ...` command. Returns True on success or already-exists."""
     try:
         result = subprocess.run(
             ["claude", "mcp"] + args,
             capture_output=True, text=True, timeout=30,
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            return True
+        if "already exists" in result.stderr.lower() or "already exists" in result.stdout.lower():
+            return True
+        return False
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
 
@@ -297,6 +301,8 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
 
         registered = []
         for name, script, env_vars in mcp_servers:
+            if force:
+                _run_claude_mcp(["remove", "--scope", "user", name])
             env_args = []
             for var in env_vars:
                 env_args.extend(["-e", var])
