@@ -197,6 +197,12 @@ Workflows are budget-constrained. The workflow engine tracks token usage and kil
 """
 
 
+_LEGACY_INFO_HIERARCHY_MARKERS = [
+    "## Information Hierarchy (STRICT ORDER)",
+    "## Information Hierarchy",
+]
+
+
 def _install_claude_instructions(claude_dir: Path, force: bool = False) -> bool:
     """Append CAP instructions to ~/.claude/CLAUDE.md. Returns True if modified."""
     claude_md = claude_dir / "CLAUDE.md"
@@ -207,6 +213,7 @@ def _install_claude_instructions(claude_dir: Path, force: bool = False) -> bool:
             if not force:
                 return False
             content = _remove_cap_instructions(content)
+        content = _replace_legacy_info_hierarchy(content)
     else:
         claude_dir.mkdir(parents=True, exist_ok=True)
         content = ""
@@ -215,6 +222,31 @@ def _install_claude_instructions(claude_dir: Path, force: bool = False) -> bool:
     content = content.rstrip() + "\n" + block
     claude_md.write_text(content)
     return True
+
+
+def _replace_legacy_info_hierarchy(content: str) -> str:
+    """Replace legacy file-based info hierarchy with a pointer to CAP MCP tools."""
+    for marker in _LEGACY_INFO_HIERARCHY_MARKERS:
+        idx = content.find(marker)
+        if idx == -1:
+            continue
+        next_section = content.find("\n## ", idx + len(marker))
+        if next_section == -1:
+            end_idx = len(content)
+        else:
+            end_idx = next_section
+        replacement = (
+            "## Information Hierarchy (STRICT ORDER)\n\n"
+            "When agents need to understand something:\n"
+            "1. **CAP `knowledge_search` FIRST** — searches the indexed knowledge base (FTS5 + semantic + graph). Covers all repos.\n"
+            "2. **CAP `session_recall`** — for past decisions, learnings, and corrections.\n"
+            "3. **MCP Servers** — Use structured tools (aws-iam, aws-eks, kubernetes, terraform, aws-cloudwatch) for live state.\n"
+            "4. **Bash LAST** — Only for exact file contents not yet indexed, or for execution (tests, builds).\n\n"
+            "When spawning agents: use `knowledge_search` to gather context, not bash grep.\n"
+        )
+        content = content[:idx] + replacement + content[end_idx:]
+        break
+    return content
 
 
 def _remove_cap_instructions(content: str) -> str:
