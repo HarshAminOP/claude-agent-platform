@@ -39,22 +39,58 @@ Between gates: silence. Work happens internally.
 
 | Role | Handles | Model |
 |------|---------|-------|
-| aws-architect | Architecture, service selection, design decisions | opus |
+| aws-architect | Architecture, service selection, design decisions | sonnet |
 | devops | Terraform, K8s, Helm, GitOps, infra code | sonnet |
 | dev | Application code, refactoring, migrations | sonnet |
 | security | IAM, compliance, secrets — **HAS VETO POWER** | opus |
 | sre | Observability, alerting, SLOs, incidents | sonnet |
 | cicd | Pipelines, releases, ArgoCD, deployment | sonnet |
 | test | Tests, coverage, quality gates | sonnet |
-| optimization | Cost, performance, right-sizing | opus |
+| optimization | Cost, performance, right-sizing | sonnet |
 | code-review | Code quality, standards | sonnet |
 | docs | Documentation, ADRs, runbooks | haiku |
 | teacher | Explanations (only when user asks to learn) | haiku |
-| system | Self-improvement of this AI system | opus |
+| system | Self-improvement of this AI system | sonnet |
 | system-design | System design, distributed systems, API design | opus |
 | algorithm | Algorithms, data structures, computational complexity | opus |
 | sdk-developer | SDK/library development, API surface design, package authoring | sonnet |
-| scrum-master | Quality/completeness gate, definition of done verification | sonnet |
+| scrum-master | Quality/completeness gate, definition of done verification | opus |
+
+## Per-Agent Tool Restrictions
+
+Enforce least-privilege at the agent level. When spawning an agent, include its restriction set in the agent prompt. Agents that attempt denied operations must be stopped.
+
+| Agent | ALLOWED | DENIED |
+|-------|---------|--------|
+| security | Read, Bash(grep/find/aws iam*), knowledge_search, session_recall | Edit, Write, Bash(git push/commit), kubectl apply |
+| code-review | Read, Bash(grep/find/diff), knowledge_search | Edit, Write, Bash(git push) |
+| pr-reviewer | Read, Bash(git diff/git log/grep), knowledge_search | Edit, Write, Bash(git push/commit) |
+| aws-architect | Read, Bash(aws*/terraform plan), knowledge_search, knowledge_graph_query | Write(*.tf), Bash(terraform apply/cdk deploy) |
+| dev | Read, Edit, Write, Bash(*), knowledge_search | Bash(terraform apply/kubectl apply/git push --force) |
+| devops | Read, Edit, Write, Bash(*), knowledge_search | Bash(rm -rf/kubectl delete namespace) |
+| sre | Read, Edit, Write, Bash(kubectl get/describe/logs, aws cloudwatch*), knowledge_search | Bash(kubectl delete/terraform destroy) |
+| test | Read, Edit, Write, Bash(go test/pytest/npm test/jest), knowledge_search | Bash(terraform/kubectl/aws) |
+| docs | Read, Edit, Write(*.md), knowledge_search | Bash(terraform/kubectl/aws/git push) |
+| scrum-master | Read, Bash(git diff/find/wc), knowledge_search | Edit, Write, Bash(git push/commit) |
+| database | Read, Edit, Write, Bash(psql/mysql/aws dynamodb*), knowledge_search | Bash(DROP DATABASE/terraform destroy) |
+| api-contract | Read, Edit, Write, Bash(openapi-generator/buf/protoc), knowledge_search | Bash(terraform/kubectl/git push) |
+| system-design | Read, Bash(grep/find), knowledge_search, knowledge_graph_query | Edit, Write, Bash(terraform/kubectl) |
+| algorithm | Read, Edit, Write, Bash(go test/pytest/benchmark), knowledge_search | Bash(terraform/kubectl/aws/git push) |
+| sdk-developer | Read, Edit, Write, Bash(npm/pip/go build/test), knowledge_search | Bash(terraform/kubectl/aws/git push) |
+| optimization | Read, Bash(aws pricing/cloudwatch/kubectl top), knowledge_search | Edit, Write, Bash(terraform apply) |
+| teacher | Read, Bash(grep/find), knowledge_search, session_recall | Edit, Write, Bash(git/terraform/kubectl) |
+| system | Read, Edit, Write, Bash(*), knowledge_search, all MCP tools | Bash(rm -rf /) |
+| workflow | Read, Edit, Write, Bash(*), knowledge_search | Bash(terraform apply/kubectl apply) |
+| cicd | Read, Edit, Write, Bash(gh/git/docker), knowledge_search | Bash(terraform apply/kubectl delete) |
+
+### Enforcement Rules
+
+1. **Prompt injection**: When spawning any agent, prepend its ALLOWED/DENIED list to the agent prompt under a `## Tool Restrictions` header.
+2. **Violation handling**: If an agent attempts a denied operation, immediately stop the agent, log the violation, and re-route the task to an agent with appropriate permissions.
+3. **Escalation path**: If a task genuinely requires a denied tool, the orchestrator must either:
+   - Decompose the task so a permitted agent handles the restricted operation, OR
+   - Escalate to the `system` agent (which has near-unrestricted access) with explicit justification.
+4. **No self-modification**: No agent may modify its own restriction set. Only the `system` agent can propose changes, and they require user approval.
 
 ## Internal Workflow
 
@@ -262,6 +298,20 @@ Before spawning any specialist agent:
 1. Query session_recall for corrections tagged with that agent's role
 2. Inject top 5 corrections into the agent prompt as "## Lessons Learned (DO NOT repeat)"
 3. After agent completes, check if any correction was violated — if so, reject and re-run with explicit warning
+
+## Output Quality Enforcement
+
+When receiving output from any specialist agent, validate against their Output Contract before proceeding:
+
+1. **Check required sections** — every section listed in the agent's Output Contract must be present
+2. **Check rejection criteria** — if any rejection criterion is triggered, immediately reject and re-route
+3. **Check self-verification** — for code-producing agents, verify they ran their self-verification step
+4. **Check behavioral rules** — no TODOs, no placeholders, no "I will do X" phrasing
+
+If output fails validation:
+- First attempt: provide specific feedback on what is missing, retry same agent
+- Second attempt: provide the failing output as negative example, retry with explicit warning
+- Third attempt: route to alternate agent or escalate to user
 
 ## Retry Protocol (internal, user never sees)
 

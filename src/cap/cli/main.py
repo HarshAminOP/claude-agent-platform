@@ -1394,6 +1394,187 @@ def sync(workspace: str, trigger: str, full: bool):
         console.print("\n[yellow]No indexable content found in workspace[/yellow]")
 
 
+# ── cap github ─────────────────────────────────────────────────────────────────
+
+@cli.group()
+def github():
+    """GitHub org configuration and repo resolution."""
+    pass
+
+
+@github.command("config")
+@click.option("--org", "-o", default=None, help="GitHub org name (e.g., moia-dev)")
+@click.option("--clone-path", "-p", default=None, help="Base path for cloned repos")
+@click.option("--ssh/--https", "use_ssh", default=True, help="Clone protocol")
+@click.option("--auto-clone/--no-auto-clone", "auto_clone", default=True, help="Auto-clone on missing dep")
+@click.option("--depth", "-d", type=int, default=1, help="Clone depth (0 = full)")
+@click.option("--max-clones", type=int, default=10, help="Max auto-clones per session")
+@click.option("--show", is_flag=True, help="Show current config")
+def github_config(org, clone_path, use_ssh, auto_clone, depth, max_clones, show):
+    """Configure GitHub org for auto-resolution of dependent repos."""
+    from cap.lib.config import load_config
+
+    config_path = _cap_home() / "config.toml"
+
+    if show:
+        cfg = load_config()
+        gh = cfg.github
+        console.print(Panel(
+            f"Org:              [bold cyan]{gh.org or '(not set)'}[/bold cyan]\n"
+            f"Clone base path:  {gh.clone_base_path or '(not set)'}\n"
+            f"Protocol:         {'SSH' if gh.use_ssh else 'HTTPS'}\n"
+            f"Auto-clone:       {'enabled' if gh.auto_clone_on_missing_dep else 'disabled'}\n"
+            f"Clone depth:      {gh.clone_depth}\n"
+            f"Max per session:  {gh.max_auto_clones_per_session}\n"
+            f"Default branch:   {gh.default_branch}\n"
+            f"Org URL:          {gh.org_url or '(not set)'}",
+            title="GitHub Configuration",
+            box=box.ROUNDED,
+        ))
+        return
+
+    if not any([org, clone_path]):
+        console.print("[yellow]Provide at least --org or --clone-path. Use --show to view current config.[/yellow]")
+        return
+
+    try:
+        import tomli_w
+    except ImportError:
+        console.print("[red]tomli-w not installed. Run: pip install tomli-w[/red]")
+        raise SystemExit(1)
+
+    try:
+        import tomli as tomllib
+    except ImportError:
+        import tomllib
+
+    existing = {}
+    if config_path.exists():
+        with open(config_path, "rb") as f:
+            existing = tomllib.load(f)
+
+    gh_section = existing.get("github", {})
+    if org is not None:
+        gh_section["org"] = org
+    if clone_path is not None:
+        gh_section["clone_base_path"] = os.path.abspath(os.path.expanduser(clone_path))
+    gh_section["use_ssh"] = use_ssh
+    gh_section["auto_clone_on_missing_dep"] = auto_clone
+    gh_section["clone_depth"] = depth
+    gh_section["max_auto_clones_per_session"] = max_clones
+
+    existing["github"] = gh_section
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(config_path, "wb") as f:
+        tomli_w.dump(existing, f)
+
+    console.print(f"[green]✓[/green] GitHub config saved to {config_path}")
+    if org:
+        console.print(f"  Org: [cyan]{org}[/cyan]")
+    if clone_path:
+        console.print(f"  Clone path: [cyan]{gh_section['clone_base_path']}[/cyan]")
+
+
+@github.command("resolve")
+@click.argument("repo_name")
+@click.option("--domain", "-d", default=None, help="Domain hint directory")
+def github_resolve(repo_name: str, domain: str | None):
+    """Resolve a dependent repo (find locally or clone from org)."""
+    from cap.lib.config import load_config
+    from cap.lib.db_init import init_knowledge_db
+    from cap.lib.repo_resolver import resolve_repo
+
+    config = load_config()
+    data_dir = config.data_dir
+
+    if not config.github.org:
+        console.print("[red]GitHub org not configured. Run: cap github config --org YOUR_ORG --clone-path /path[/red]")
+        raise SystemExit(1)
+
+    with console.status(f"[cyan]Resolving {repo_name}…[/cyan]"):
+        try:
+            db = init_knowledge_db(data_dir)
+            result = resolve_repo(
+                repo_name=repo_name,
+                db=db,
+                config=config.github,
+                domain_hint=domain,
+            )
+        except Exception as exc:
+            console.print(f"[red]Resolution failed: {exc}[/red]")
+            raise SystemExit(1)
+
+    status = result["status"]
+    if status == "found_locally":
+        console.print(f"[green]✓[/green] Found locally: {result['path']}")
+    elif status == "cloned":
+        console.print(f"[green]✓[/green] Cloned: {result['path']}")
+        console.print(f"  [dim]Knowledge base updated[/dim]")
+    elif status == "not_found_remote":
+        console.print(f"[yellow]✗[/yellow] Not found on GitHub: {config.github.org}/{repo_name}")
+    else:
+        console.print(f"[red]✗[/red] {result.get('message', status)}")
+
+
+@github.command("deps")
+@click.option("--workspace", "-w", default=None, help="Scope to workspace")
+@click.option("--auto-clone/--no-auto-clone", "auto_clone", default=True)
+@click.option("--max", "max_clones", type=int, default=5, help="Max repos to clone")
+def github_deps(workspace: str | None, auto_clone: bool, max_clones: int):
+    """Find and resolve unresolved dependencies from knowledge graph."""
+    from cap.lib.config import load_config
+    from cap.lib.db_init import init_knowledge_db
+    from cap.lib.repo_resolver import find_unresolved_dependencies, resolve_multiple
+
+    config = load_config()
+    data_dir = config.data_dir
+    resolved_ws = _resolve_workspace(workspace) if workspace else None
+
+    if not config.github.org:
+        console.print("[red]GitHub org not configured. Run: cap github config --org YOUR_ORG --clone-path /path[/red]")
+        raise SystemExit(1)
+
+    with console.status("[cyan]Scanning knowledge graph for unresolved deps…[/cyan]"):
+        try:
+            db = init_knowledge_db(data_dir)
+            unresolved = find_unresolved_dependencies(db, resolved_ws)
+        except Exception as exc:
+            console.print(f"[red]Query failed: {exc}[/red]")
+            raise SystemExit(1)
+
+    if not unresolved:
+        console.print("[green]✓[/green] All dependencies are available locally.")
+        return
+
+    t = Table(title=f"Unresolved Dependencies ({len(unresolved)})", box=box.SIMPLE_HEAD, show_edge=False)
+    t.add_column("Repo", style="bold")
+    t.add_column("Depended On By")
+    t.add_column("Reason")
+    for dep in unresolved[:20]:
+        t.add_row(dep["repo_name"], dep["depended_on_by"], dep.get("reason", ""))
+    console.print(t)
+
+    if auto_clone:
+        console.print(f"\n[bold]Auto-cloning up to {max_clones} repos…[/bold]")
+        with console.status("[cyan]Cloning…[/cyan]"):
+            results = resolve_multiple(
+                [dep["repo_name"] for dep in unresolved[:max_clones]],
+                db=db,
+                config=config.github,
+            )
+
+        cloned = sum(1 for r in results if r.get("cloned"))
+        console.print(f"[green]✓[/green] Cloned {cloned} / {len(results)} repos")
+        for r in results:
+            if r.get("cloned"):
+                console.print(f"  [green]✓[/green] {r['path']}")
+            elif r["status"] != "found_locally":
+                console.print(f"  [yellow]✗[/yellow] {r.get('message', '')[:60]}")
+    else:
+        console.print(f"\n[dim]Run with --auto-clone to resolve these automatically.[/dim]")
+
+
 # ── cap embed ──────────────────────────────────────────────────────────────────
 
 @cli.command()

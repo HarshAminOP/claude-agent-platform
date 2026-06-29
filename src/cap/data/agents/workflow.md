@@ -98,6 +98,32 @@ After any modification:
 4. Verify CLAUDE.md roster matches .claude/agents/ contents
 5. Verify workflow agent references match actual agent names
 
+## Output Contract
+
+Every response from this agent MUST include ALL of the following:
+
+1. **What Changed** — exact list of files modified with full paths
+2. **Why** — rationale for each change
+3. **Cross-references Updated** — which other files were updated for consistency
+4. **Validation** — confirmation that the system remains consistent
+
+## Rejection Criteria
+
+The orchestrator MUST reject this agent's output if:
+- Cross-references are broken after changes (agent renamed but not updated elsewhere)
+- YAML frontmatter is syntactically invalid
+- Changes introduce inconsistency between orchestrator routing table and available agents
+- No validation step was performed
+- Changes affect deny rules without user approval
+
+## Mandatory Behavioral Rules
+
+- NEVER produce placeholder changes. Every modification must be complete and tested.
+- NEVER skip steps. If tasked with updating 5 agents, update all 5.
+- NEVER explain what you will do — just do it. Output is the change itself.
+- ALWAYS verify your output works before returning (read modified files, check cross-refs).
+- ALWAYS cite knowledge base sources when using retrieved information.
+
 ## Output Format
 
 1. **What Changed** — list of files modified

@@ -30,6 +30,7 @@ from lib.retrieval import hybrid_search, SearchResult
 from lib.graph import find_entities, bfs_traverse, get_related_entries, add_edge, get_node_context
 from lib.security import sanitize_content, validate_path
 from lib.inbox import poll_inbox, ack_message, nack_message
+from lib.repo_resolver import resolve_repo, resolve_multiple, find_unresolved_dependencies, reset_session_counter
 
 logger = logging.getLogger("cap.knowledge")
 logging.basicConfig(
@@ -250,6 +251,30 @@ async def list_tools():
                 },
             },
         ),
+        Tool(
+            name="knowledge_resolve_repo",
+            description="Resolve a dependent repo: finds it locally or auto-clones from the configured GitHub org, then indexes it into the knowledge base.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "repo_name": {"type": "string", "description": "Repository name to resolve (e.g., 'alerting', 'fleet-connector')"},
+                    "domain_hint": {"type": "string", "description": "Optional domain/group directory hint (e.g., 'Observability-Alerting')"},
+                },
+                "required": ["repo_name"],
+            },
+        ),
+        Tool(
+            name="knowledge_resolve_deps",
+            description="Find all unresolved dependencies in the knowledge graph and auto-clone missing repos from the configured GitHub org.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workspace": {"type": "string", "description": "Scope to workspace (optional, searches all if omitted)"},
+                    "auto_clone": {"type": "boolean", "default": True, "description": "Whether to auto-clone missing repos"},
+                    "max_clones": {"type": "integer", "default": 5, "minimum": 1, "maximum": 20, "description": "Max repos to clone in one call"},
+                },
+            },
+        ),
     ]
 
 
@@ -270,6 +295,10 @@ async def call_tool(name: str, arguments: dict):
             return await _handle_sync(arguments)
         elif name == "knowledge_status":
             return await _handle_status(arguments)
+        elif name == "knowledge_resolve_repo":
+            return await _handle_resolve_repo(arguments)
+        elif name == "knowledge_resolve_deps":
+            return await _handle_resolve_deps(arguments)
         else:
             return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
     except Exception as e:
@@ -516,6 +545,56 @@ async def _handle_status(args: dict):
         "business_knowledge_entries": bk_count,
         "semantic_search_available": embedding_client.is_available is not False,
         "lancedb_available": vectors_table is not None,
+    }))]
+
+
+async def _handle_resolve_repo(args: dict):
+    repo_name = args["repo_name"]
+    domain_hint = args.get("domain_hint")
+
+    result = resolve_repo(
+        repo_name=repo_name,
+        db=db,
+        config=config.github,
+        domain_hint=domain_hint,
+    )
+
+    if result.get("cloned"):
+        _cache_clear()
+
+    return [TextContent(type="text", text=json.dumps(result))]
+
+
+async def _handle_resolve_deps(args: dict):
+    workspace = args.get("workspace")
+    auto_clone = args.get("auto_clone", True)
+    max_clones = args.get("max_clones", 5)
+
+    unresolved = find_unresolved_dependencies(db, workspace)
+
+    if not unresolved:
+        return [TextContent(type="text", text=json.dumps({
+            "status": "all_resolved",
+            "unresolved_count": 0,
+            "message": "All dependencies are available locally.",
+        }))]
+
+    clone_results = []
+    if auto_clone:
+        to_clone = unresolved[:max_clones]
+        clone_results = resolve_multiple(
+            [dep["repo_name"] for dep in to_clone],
+            db=db,
+            config=config.github,
+        )
+        _cache_clear()
+
+    return [TextContent(type="text", text=json.dumps({
+        "status": "resolved",
+        "unresolved_count": len(unresolved),
+        "unresolved": unresolved[:20],
+        "clone_results": clone_results,
+        "cloned_count": sum(1 for r in clone_results if r.get("cloned")),
     }))]
 
 

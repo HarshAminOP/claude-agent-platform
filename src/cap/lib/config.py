@@ -76,6 +76,23 @@ class MaintenanceConfig:
 
 
 @dataclass
+class GitHubConfig:
+    org: str = ""
+    clone_base_path: str = ""
+    use_ssh: bool = True
+    auto_clone_on_missing_dep: bool = True
+    max_auto_clones_per_session: int = 10
+    default_branch: str = "main"
+    clone_depth: int = 1
+
+    @property
+    def org_url(self) -> str:
+        if self.use_ssh:
+            return f"git@github.com:{self.org}" if self.org else ""
+        return f"https://github.com/{self.org}" if self.org else ""
+
+
+@dataclass
 class FleetConfig:
     health_check_interval_seconds: int = 30
     health_check_timeout_seconds: int = 5
@@ -106,6 +123,7 @@ class PlatformConfig:
     maintenance: MaintenanceConfig = field(default_factory=MaintenanceConfig)
     fleet: FleetConfig = field(default_factory=FleetConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
+    github: GitHubConfig = field(default_factory=GitHubConfig)
 
     @property
     def data_dir(self) -> Path:
@@ -228,6 +246,18 @@ def load_config(config_path: Path | None = None) -> PlatformConfig:
             max_learnings_loaded=se.get("max_learnings_loaded", config.session.max_learnings_loaded),
             max_decisions_loaded=se.get("max_decisions_loaded", config.session.max_decisions_loaded),
             recency_weight=se.get("recency_weight", config.session.recency_weight),
+        )
+
+    if "github" in raw:
+        gh = raw["github"]
+        config.github = GitHubConfig(
+            org=gh.get("org", config.github.org),
+            clone_base_path=gh.get("clone_base_path", config.github.clone_base_path),
+            use_ssh=gh.get("use_ssh", config.github.use_ssh),
+            auto_clone_on_missing_dep=gh.get("auto_clone_on_missing_dep", config.github.auto_clone_on_missing_dep),
+            max_auto_clones_per_session=gh.get("max_auto_clones_per_session", config.github.max_auto_clones_per_session),
+            default_branch=gh.get("default_branch", config.github.default_branch),
+            clone_depth=gh.get("clone_depth", config.github.clone_depth),
         )
 
     return config
