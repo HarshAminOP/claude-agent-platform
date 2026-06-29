@@ -35,6 +35,8 @@ _registry: Dict[HookType, List[Callable[[HookContext], Any]]] = {
     ht: [] for ht in HookType
 }
 
+_builtins_registered: bool = False
+
 
 def register_hook(hook_type: HookType, handler: Callable[[HookContext], Any]) -> None:
     """Register a handler for a lifecycle hook type."""
@@ -47,10 +49,24 @@ def unregister_hook(hook_type: HookType, handler: Callable[[HookContext], Any]) 
 
 
 def emit_hook(hook_type: HookType, context: HookContext) -> List[Any]:
-    """Emit a hook, invoking all handlers in order. Returns list of results."""
+    """Emit a hook, invoking all handlers in order.
+
+    Collects results from all handlers. If a handler raises, the exception
+    is captured in the results list and remaining handlers still run.
+    """
     results: List[Any] = []
+    errors: List[Exception] = []
     for handler in _registry[hook_type]:
-        results.append(handler(context))
+        try:
+            results.append(handler(context))
+        except Exception as exc:
+            errors.append(exc)
+            results.append(exc)
+
+    if errors:
+        for err in errors:
+            if isinstance(err, (PermissionError, RuntimeError)):
+                raise err
     return results
 
 
@@ -61,6 +77,17 @@ def clear_hooks(hook_type: HookType | None = None) -> None:
     else:
         for ht in HookType:
             _registry[ht] = []
+
+
+def register_builtin_hooks() -> None:
+    """Explicitly register built-in hooks. Call once from application entry point."""
+    global _builtins_registered
+    if _builtins_registered:
+        return
+    _builtins_registered = True
+    register_hook(HookType.before_agent_spawn, correction_injection_hook)
+    register_hook(HookType.before_agent_spawn, tool_restriction_hook)
+    register_hook(HookType.before_agent_spawn, budget_check_hook)
 
 
 # ---------------------------------------------------------------------------
@@ -75,6 +102,7 @@ def correction_injection_hook(ctx: HookContext) -> Any:
     corrections = recall_fn(query="corrections", agent_id=ctx.agent_id)
     if corrections:
         ctx.metadata["injected_corrections"] = corrections
+        ctx.metadata["original_prompt"] = ctx.prompt
         ctx.prompt += f"\n\n[SYSTEM] Prior corrections:\n{corrections}"
     return corrections
 
@@ -100,9 +128,3 @@ def budget_check_hook(ctx: HookContext) -> Any:
         ctx.metadata["budget_warning"] = True
         return {"warning": f"Budget at {ctx.budget_pct:.0f}%"}
     return None
-
-
-# Auto-register built-in hooks
-register_hook(HookType.before_agent_spawn, correction_injection_hook)
-register_hook(HookType.before_agent_spawn, tool_restriction_hook)
-register_hook(HookType.before_agent_spawn, budget_check_hook)

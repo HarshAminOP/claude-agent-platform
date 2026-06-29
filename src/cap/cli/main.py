@@ -105,7 +105,7 @@ def _status_color(status: str) -> str:
 # ── Root group ─────────────────────────────────────────────────────────────────
 
 @click.group()
-@click.version_option(version="0.3.0")
+@click.version_option(version="0.5.0")
 def cli():
     """CAP — Claude Agent Platform"""
     pass
@@ -135,7 +135,7 @@ def status():
     data_dir = config.data_dir
 
     console.print(Panel(
-        f"[bold cyan]CAP — Claude Agent Platform[/bold cyan]  [dim]v0.3.0[/dim]\n"
+        f"[bold cyan]CAP — Claude Agent Platform[/bold cyan]  [dim]v0.5.0[/dim]\n"
         f"[dim]Home:[/dim] {config.home}\n"
         f"[dim]Data:[/dim] {data_dir}",
         title="Platform",
@@ -1405,12 +1405,14 @@ def github():
 @github.command("config")
 @click.option("--org", "-o", default=None, help="GitHub org name (e.g., moia-dev)")
 @click.option("--clone-path", "-p", default=None, help="Base path for cloned repos")
-@click.option("--ssh/--https", "use_ssh", default=True, help="Clone protocol")
-@click.option("--auto-clone/--no-auto-clone", "auto_clone", default=True, help="Auto-clone on missing dep")
-@click.option("--depth", "-d", type=int, default=1, help="Clone depth (0 = full)")
-@click.option("--max-clones", type=int, default=10, help="Max auto-clones per session")
+@click.option("--ssh", "use_ssh", is_flag=True, default=None, help="Use SSH protocol")
+@click.option("--https", "use_https", is_flag=True, default=None, help="Use HTTPS protocol")
+@click.option("--auto-clone", "auto_clone", is_flag=True, default=None, help="Enable auto-clone on missing dep")
+@click.option("--no-auto-clone", "no_auto_clone", is_flag=True, default=None, help="Disable auto-clone")
+@click.option("--depth", "-d", type=int, default=None, help="Clone depth (0 = full)")
+@click.option("--max-clones", type=int, default=None, help="Max auto-clones per session")
 @click.option("--show", is_flag=True, help="Show current config")
-def github_config(org, clone_path, use_ssh, auto_clone, depth, max_clones, show):
+def github_config(org, clone_path, use_ssh, use_https, auto_clone, no_auto_clone, depth, max_clones, show):
     """Configure GitHub org for auto-resolution of dependent repos."""
     from cap.lib.config import load_config
 
@@ -1433,8 +1435,8 @@ def github_config(org, clone_path, use_ssh, auto_clone, depth, max_clones, show)
         ))
         return
 
-    if not any([org, clone_path]):
-        console.print("[yellow]Provide at least --org or --clone-path. Use --show to view current config.[/yellow]")
+    if not any([org, clone_path, use_ssh, use_https, auto_clone, no_auto_clone, depth is not None, max_clones is not None]):
+        console.print("[yellow]Provide at least one option to set. Use --show to view current config.[/yellow]")
         return
 
     try:
@@ -1458,10 +1460,18 @@ def github_config(org, clone_path, use_ssh, auto_clone, depth, max_clones, show)
         gh_section["org"] = org
     if clone_path is not None:
         gh_section["clone_base_path"] = os.path.abspath(os.path.expanduser(clone_path))
-    gh_section["use_ssh"] = use_ssh
-    gh_section["auto_clone_on_missing_dep"] = auto_clone
-    gh_section["clone_depth"] = depth
-    gh_section["max_auto_clones_per_session"] = max_clones
+    if use_ssh:
+        gh_section["use_ssh"] = True
+    elif use_https:
+        gh_section["use_ssh"] = False
+    if auto_clone:
+        gh_section["auto_clone_on_missing_dep"] = True
+    elif no_auto_clone:
+        gh_section["auto_clone_on_missing_dep"] = False
+    if depth is not None:
+        gh_section["clone_depth"] = depth
+    if max_clones is not None:
+        gh_section["max_auto_clones_per_session"] = max_clones
 
     existing["github"] = gh_section
 
@@ -1839,6 +1849,325 @@ def eval_report(file_path: str):
                 console.print(t)
     else:
         console.print(f"[yellow]Unrecognized report format.[/yellow]")
+
+
+# ── cap backlog ───────────────────────────────────────────────────────────────
+
+@cli.group()
+def backlog():
+    """Persistent task backlog management."""
+    pass
+
+
+@backlog.command("list")
+@click.option(
+    "--status", "-s",
+    type=click.Choice(["backlog", "ready", "in_progress", "in_review", "blocked", "done", "cancelled"]),
+    default=None,
+)
+@click.option("--assigned", "-a", default=None, help="Filter by assigned agent")
+@click.option("--limit", "-n", type=int, default=50)
+def backlog_list(status: str | None, assigned: str | None, limit: int):
+    """List backlog tasks."""
+    from cap.lib.backlog import init_backlog_table, list_tasks, TaskStatus
+    from cap.lib.db_init import _open_existing, create_database
+
+    db_path = _data_dir() / "backlog.db"
+    if not db_path.exists():
+        console.print("[dim]No backlog database found.[/dim]")
+        return
+
+    db = _open_existing(db_path)
+    init_backlog_table(db)
+    ts = TaskStatus(status) if status else None
+    tasks = list_tasks(db, status=ts, assigned_to=assigned, limit=limit)
+
+    if not tasks:
+        console.print("[dim]No tasks found.[/dim]")
+        return
+
+    t = Table(title=f"Backlog ({len(tasks)} tasks)", box=box.SIMPLE_HEAD, show_edge=False)
+    t.add_column("ID", style="dim", width=12)
+    t.add_column("P", width=2)
+    t.add_column("Status", width=12)
+    t.add_column("Title", max_width=40)
+    t.add_column("Assigned", width=14)
+    t.add_column("Criteria", justify="right", width=8)
+
+    priority_icons = {"critical": "[red]![/red]", "high": "[yellow]H[/yellow]", "medium": "M", "low": "[dim]L[/dim]"}
+    for task in tasks:
+        met = sum(1 for c in task.acceptance_criteria if c.verified)
+        total = len(task.acceptance_criteria)
+        crit_str = f"{met}/{total}" if total else "—"
+        t.add_row(
+            task.id[:12],
+            priority_icons.get(task.priority.value, "?"),
+            _status_color(task.status.value),
+            task.title[:40],
+            task.assigned_to[:14] if task.assigned_to else "—",
+            crit_str,
+        )
+    console.print(t)
+
+
+@backlog.command("stats")
+def backlog_stats_cmd():
+    """Show backlog statistics."""
+    from cap.lib.backlog import init_backlog_table, backlog_stats
+    from cap.lib.db_init import _open_existing
+
+    db_path = _data_dir() / "backlog.db"
+    if not db_path.exists():
+        console.print("[dim]No backlog database found.[/dim]")
+        return
+
+    db = _open_existing(db_path)
+    init_backlog_table(db)
+    stats = backlog_stats(db)
+
+    console.print(Panel(
+        f"Total tasks:     [cyan]{stats['total']}[/cyan]\n"
+        f"Completion:      [green]{stats['completion_pct']}%[/green]\n"
+        f"In progress:     [yellow]{stats['in_progress']}[/yellow]\n"
+        f"Blocked:         [{'red' if stats['blocked'] else 'dim'}]{stats['blocked']}[/{'red' if stats['blocked'] else 'dim'}]\n"
+        f"By status:       {json.dumps(stats['by_status'], indent=2)}",
+        title="Backlog Stats",
+        box=box.ROUNDED,
+    ))
+
+
+# ── cap decisions ─────────────────────────────────────────────────────────────
+
+@cli.group()
+def decisions():
+    """Decision card management."""
+    pass
+
+
+@decisions.command("list")
+@click.option(
+    "--status", "-s",
+    type=click.Choice(["pending", "approved", "rejected", "deferred"]),
+    default=None,
+)
+@click.option("--limit", "-n", type=int, default=20)
+def decisions_list(status: str | None, limit: int):
+    """List decision cards."""
+    from cap.lib.decision_cards import init_decision_cards_table, list_cards, DecisionStatus
+    from cap.lib.db_init import _open_existing
+
+    db_path = _data_dir() / "backlog.db"
+    if not db_path.exists():
+        console.print("[dim]No backlog database found.[/dim]")
+        return
+
+    db = _open_existing(db_path)
+    init_decision_cards_table(db)
+    ds = DecisionStatus(status) if status else None
+    cards = list_cards(db, status=ds, limit=limit)
+
+    if not cards:
+        console.print("[dim]No decision cards found.[/dim]")
+        return
+
+    t = Table(title=f"Decisions ({len(cards)})", box=box.SIMPLE_HEAD, show_edge=False)
+    t.add_column("ID", style="dim", width=12)
+    t.add_column("Status", width=10)
+    t.add_column("Title", max_width=40)
+    t.add_column("Options", justify="right", width=7)
+    t.add_column("Domain", width=12)
+    t.add_column("Created")
+
+    for card in cards:
+        t.add_row(
+            card.id[:12],
+            _status_color(card.status.value),
+            card.title[:40],
+            str(len(card.options)),
+            card.domain or "—",
+            (card.created_at or "")[:10],
+        )
+    console.print(t)
+
+
+# ── cap conflicts ─────────────────────────────────────────────────────────────
+
+@cli.group()
+def conflicts():
+    """Inter-agent disagreement management."""
+    pass
+
+
+@conflicts.command("list")
+@click.option(
+    "--status", "-s",
+    type=click.Choice(["open", "escalated", "resolved", "overridden"]),
+    default=None,
+)
+@click.option("--limit", "-n", type=int, default=20)
+def conflicts_list(status: str | None, limit: int):
+    """List conflicts."""
+    from cap.lib.disagreement import init_conflicts_table, list_conflicts, ConflictStatus
+    from cap.lib.db_init import _open_existing
+
+    db_path = _data_dir() / "backlog.db"
+    if not db_path.exists():
+        console.print("[dim]No backlog database found.[/dim]")
+        return
+
+    db = _open_existing(db_path)
+    init_conflicts_table(db)
+    cs = ConflictStatus(status) if status else None
+    items = list_conflicts(db, status=cs, limit=limit)
+
+    if not items:
+        console.print("[dim]No conflicts found.[/dim]")
+        return
+
+    t = Table(title=f"Conflicts ({len(items)})", box=box.SIMPLE_HEAD, show_edge=False)
+    t.add_column("ID", style="dim", width=12)
+    t.add_column("Severity", width=10)
+    t.add_column("Status", width=10)
+    t.add_column("Title", max_width=40)
+    t.add_column("Created")
+
+    sev_colors = {"advisory": "dim", "warning": "yellow", "blocking": "red"}
+    for item in items:
+        sev_color = sev_colors.get(item.severity.value, "white")
+        t.add_row(
+            item.id[:12],
+            f"[{sev_color}]{item.severity.value}[/{sev_color}]",
+            _status_color(item.status.value),
+            item.title[:40],
+            (item.created_at or "")[:10],
+        )
+    console.print(t)
+
+
+# ── cap dashboard ─────────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--poll", "-p", type=float, default=2.0, help="Refresh interval in seconds")
+@click.option("--once", is_flag=True, help="Render once and exit (no live refresh)")
+def dashboard(poll: float, once: bool):
+    """Real-time status dashboard (TUI)."""
+    from cap.lib.dashboard import Dashboard
+
+    data_dir = _data_dir()
+    dash = Dashboard(data_dir, poll_interval=poll)
+
+    if once:
+        layout = dash.render_once()
+        console.print(layout)
+    else:
+        dash.run()
+
+
+# ── cap git ───────────────────────────────────────────────────────────────────
+
+@cli.group("git")
+def git_cmd():
+    """Git knowledge ingestion."""
+    pass
+
+
+@git_cmd.command("ingest")
+@click.option("--workspace", "-w", default=".", help="Repo path")
+@click.option("--max-prs", type=int, default=30, help="Max PRs to fetch")
+@click.option("--files", "-f", multiple=True, help="Key files for blame analysis")
+def git_ingest(workspace: str, max_prs: int, files: tuple):
+    """Ingest git blame + PR discussions into knowledge base."""
+    from cap.lib.config import load_config
+    from cap.lib.db_init import init_knowledge_db
+    from cap.lib.git_knowledge import ingest_git_knowledge
+
+    workspace = os.path.abspath(os.path.expanduser(workspace))
+    config = load_config()
+    data_dir = config.data_dir
+
+    # Auto-discover key files if none specified
+    key_files = list(files) if files else None
+    if not key_files:
+        from pathlib import Path as _Path
+        repo = _Path(workspace)
+        patterns = ["*.tf", "*.py", "*.go", "*.ts", "Dockerfile", "*.yaml"]
+        discovered = []
+        for pattern in patterns:
+            for f in repo.rglob(pattern):
+                if ".git" not in str(f) and "node_modules" not in str(f):
+                    discovered.append(str(f.relative_to(repo)))
+                    if len(discovered) >= 50:
+                        break
+            if len(discovered) >= 50:
+                break
+        key_files = discovered[:50]
+
+    with console.status(f"[cyan]Ingesting git knowledge from {workspace}…[/cyan]"):
+        try:
+            db = init_knowledge_db(data_dir)
+            stats = ingest_git_knowledge(
+                repo_path=workspace,
+                knowledge_db=db,
+                workspace=workspace,
+                max_prs=max_prs,
+                key_files=key_files,
+            )
+        except Exception as exc:
+            console.print(f"[red]Ingestion failed: {exc}[/red]")
+            raise SystemExit(1)
+
+    console.print(
+        f"[green]✓[/green] Ingested: "
+        f"{stats['ownership_entries']} ownership entries, "
+        f"{stats['pr_entries']} PR discussions"
+    )
+    if stats["errors"]:
+        console.print(f"  [yellow]{stats['errors']} errors[/yellow]")
+
+
+# ── cap drift ─────────────────────────────────────────────────────────────────
+
+@cli.group()
+def drift():
+    """Terraform drift detection."""
+    pass
+
+
+@drift.command("check")
+@click.argument("workspace", default=".")
+@click.option("--profile", "-p", default="", help="AWS profile for terraform")
+@click.option("--auto-task/--no-auto-task", default=True, help="Create backlog task on drift")
+@click.option("--json-output", "json_out", is_flag=True, help="Output as JSON")
+def drift_check(workspace: str, profile: str, auto_task: bool, json_out: bool):
+    """Check a terraform workspace for drift."""
+    from cap.lib.drift_sentinel import check_drift_and_report
+
+    workspace = os.path.abspath(os.path.expanduser(workspace))
+    backlog_db = str(_data_dir() / "backlog.db") if auto_task else None
+
+    with console.status(f"[cyan]Running terraform plan on {workspace}…[/cyan]"):
+        report = check_drift_and_report(workspace, profile, backlog_db)
+
+    if json_out:
+        console.print_json(json.dumps(report.to_dict()))
+        return
+
+    if report.has_drift:
+        console.print(f"[red]DRIFT DETECTED[/red] in {workspace}")
+        console.print(f"  {report.summary}")
+        t = Table(box=box.SIMPLE_HEAD, show_edge=False)
+        t.add_column("Resource", style="bold")
+        t.add_column("Change Type")
+        for f in report.findings:
+            color = {"create": "green", "delete": "red", "update": "yellow", "replace": "magenta"}.get(f.change_type, "white")
+            t.add_row(f.resource_address, f"[{color}]{f.change_type}[/{color}]")
+        console.print(t)
+        if auto_task:
+            console.print("[dim]Backlog task created automatically.[/dim]")
+    elif report.plan_exit_code == 0:
+        console.print(f"[green]No drift[/green] in {workspace} ({report.duration_seconds:.1f}s)")
+    else:
+        console.print(f"[red]Error[/red] (exit {report.plan_exit_code}): {report.plan_stderr[:200]}")
 
 
 # ── Entrypoint ─────────────────────────────────────────────────────────────────

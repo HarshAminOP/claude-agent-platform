@@ -25,6 +25,12 @@ from lib.models import (
     init_database,
 )
 from lib.api_gateway import APIGateway, ConcurrencyConfig
+from lib.hooks import (
+    HookType,
+    HookContext,
+    emit_hook,
+    register_builtin_hooks,
+)
 
 logger = logging.getLogger("platform.workflow")
 logging.basicConfig(
@@ -38,6 +44,7 @@ DB_PATH = DATA_DIR / "platform.db"
 
 db = init_database(DB_PATH)
 gateway = APIGateway(DB_PATH, ConcurrencyConfig())
+register_builtin_hooks()
 
 server = Server("workflow-engine")
 
@@ -389,11 +396,40 @@ async def _handle_signal(args: dict):
 
     # Update agent count if new agent started
     if event_type == "agent_start":
+        # Emit before_agent_spawn hook — may raise to block the spawn
+        budget_row_pre = db.execute(
+            "SELECT tokens_used, budget_tokens FROM workflows WHERE id = ?", (wf_id,)
+        ).fetchone()
+        budget_pct = (budget_row_pre[0] / max(budget_row_pre[1], 1) * 100) if budget_row_pre else 0.0
+        hook_ctx = HookContext(
+            hook_type=HookType.before_agent_spawn,
+            agent_id=args.get("agent_id", ""),
+            prompt=args.get("message", ""),
+            budget_pct=budget_pct,
+            metadata={"workflow_id": wf_id, "phase": args.get("phase")},
+        )
+        try:
+            emit_hook(HookType.before_agent_spawn, hook_ctx)
+        except (PermissionError, RuntimeError) as hook_err:
+            return [TextContent(type="text", text=json.dumps({
+                "error": str(hook_err), "hook_blocked": True, "agent_id": args.get("agent_id"),
+            }))]
+
         db.execute("UPDATE workflows SET agents_spawned = agents_spawned + 1 WHERE id = ?", (wf_id,))
         # Check max_agents
         row2 = db.execute("SELECT agents_spawned, max_agents FROM workflows WHERE id = ?", (wf_id,)).fetchone()
         if row2 and row2[0] > row2[1]:
             logger.warning("Workflow %s exceeded max_agents (%d > %d)", wf_id, row2[0], row2[1])
+
+    # Emit after_agent_complete hook on agent_end
+    if event_type == "agent_end":
+        hook_ctx = HookContext(
+            hook_type=HookType.after_agent_complete,
+            agent_id=args.get("agent_id", ""),
+            output=args.get("message", ""),
+            metadata={"workflow_id": wf_id, "phase": args.get("phase")},
+        )
+        emit_hook(HookType.after_agent_complete, hook_ctx)
 
     # Update tokens if delta provided
     tokens_delta = args.get("tokens_delta", 0)

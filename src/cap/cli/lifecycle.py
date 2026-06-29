@@ -300,6 +300,32 @@ _CAP_MCP_PERMISSIONS = [
     # Knowledge resolver tools
     "mcp__cap-knowledge__knowledge_resolve_repo",
     "mcp__cap-knowledge__knowledge_resolve_deps",
+    # Backlog, decisions, conflicts tools
+    "mcp__cap-backlog__backlog_create",
+    "mcp__cap-backlog__backlog_claim",
+    "mcp__cap-backlog__backlog_complete",
+    "mcp__cap-backlog__backlog_verify",
+    "mcp__cap-backlog__backlog_list",
+    "mcp__cap-backlog__backlog_stats",
+    "mcp__cap-backlog__backlog_update",
+    "mcp__cap-backlog__decision_propose",
+    "mcp__cap-backlog__decision_resolve",
+    "mcp__cap-backlog__decision_list",
+    "mcp__cap-backlog__conflict_raise",
+    "mcp__cap-backlog__conflict_resolve",
+    "mcp__cap-backlog__conflict_override",
+    "mcp__cap-backlog__conflict_list",
+    "mcp__cap-backlog__conflict_blocking",
+    "mcp__cap-backlog__trace_record",
+    "mcp__cap-backlog__trace_explain",
+    "mcp__cap-backlog__blast_radius",
+    "mcp__cap-backlog__autonomy_check",
+    "mcp__cap-backlog__autonomy_record",
+    "mcp__cap-backlog__autonomy_levels",
+    # AST server tools
+    "mcp__cap-ast__ast_search",
+    "mcp__cap-ast__ast_match",
+    "mcp__cap-ast__ast_refactor",
 ]
 
 
@@ -364,7 +390,7 @@ def _load_manifest(cap_home: Path) -> dict:
     if mf.exists():
         return json.loads(mf.read_text())
     return {
-        "version": "0.3.0",
+        "version": "0.5.0",
         "installed_agents": [],
         "installed_workflows": [],
         "mcp_servers": [],
@@ -475,6 +501,18 @@ def _get_cap_mcp_servers(cap_home: Path, data_dir: Path) -> list[dict]:
             "args": [str(servers_dir / "diagram_server.py")],
             "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
         },
+        {
+            "name": "cap-backlog",
+            "command": python_bin,
+            "args": [str(servers_dir / "backlog_server.py")],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+        },
+        {
+            "name": "cap-ast",
+            "command": python_bin,
+            "args": [str(servers_dir / "ast_server.py")],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+        },
     ]
 
 
@@ -493,7 +531,7 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
     claude_dir = _claude_dir()
 
     console.print(Panel(
-        f"[bold]CAP — Claude Agent Platform[/bold] v0.3.0\n"
+        f"[bold]CAP — Claude Agent Platform[/bold] v0.5.0\n"
         f"Home: {cap_home}",
         box=box.ROUNDED, style="cyan",
     ))
@@ -528,7 +566,7 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
             console.print(f"  [green]✓[/green] config.toml created")
         else:
             console.print(f"  [yellow]![/yellow] Bundled config not found — creating minimal")
-            config_path.write_text('[platform]\nversion = "0.3.0"\nlog_level = "INFO"\n')
+            config_path.write_text('[platform]\nversion = "0.5.0"\nlog_level = "INFO"\n')
     else:
         console.print(f"  [dim]─[/dim] config.toml exists (use --force to overwrite)")
 
@@ -640,7 +678,7 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
         console.print(f"  [dim]─[/dim] Permissions already configured")
 
     # ── 10. Save manifest ─────────────────────────────────────────────────
-    manifest["version"] = "0.3.0"
+    manifest["version"] = "0.5.0"
     manifest["cap_home"] = str(cap_home)
     manifest["python"] = sys.executable
     manifest["installed_at"] = datetime.now(timezone.utc).isoformat()

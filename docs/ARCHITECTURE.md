@@ -2095,7 +2095,111 @@ allowed_tools = ["knowledge_search", "knowledge_record"]
 
 ---
 
-## 19. Agent Optimization (NEW in v0.5.0)
+## 19. Backlog & Governance System (NEW in v0.5.0)
+
+### 19.1 Persistent Backlog (`backlog_server.py`)
+
+Owner of `backlog.db`. Provides 21 MCP tools for task management, decision governance, conflict resolution, progressive autonomy, blast radius assessment, and reasoning audit.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Backlog Server (MCP)                      │
+├─────────────┬──────────────┬──────────────┬─────────────────┤
+│  Tasks (7)  │ Decisions (3)│ Conflicts (5)│ Governance (6)  │
+│ create      │ propose      │ raise        │ trace_record    │
+│ claim       │ resolve      │ resolve      │ trace_explain   │
+│ complete    │ list         │ override     │ blast_radius    │
+│ verify      │              │ list         │ autonomy_check  │
+│ list        │              │ blocking     │ autonomy_record │
+│ stats       │              │              │ autonomy_levels │
+│ update      │              │              │                 │
+└─────────────┴──────────────┴──────────────┴─────────────────┘
+```
+
+### 19.2 Task Queue
+
+Atomic claim with priority ordering (`critical > high > medium > low`), dependency resolution (tasks with unmet deps are skipped), and acceptance criteria per task.
+
+```python
+# Atomic claim — cursor.rowcount guarantees exactly-once assignment
+cursor = conn.execute(
+    "UPDATE backlog_tasks SET status='in_progress', assigned_to=? WHERE id=? AND status='ready'",
+    (agent_id, task.id),
+)
+if cursor.rowcount > 0:
+    conn.commit()
+    return task
+```
+
+### 19.3 Decision Cards
+
+Structured options with tradeoffs. Agent proposes; PO resolves. Every decision is recorded with rationale for future recall.
+
+### 19.4 Conflict Resolution
+
+When agents disagree (security blocks devops, etc.), the conflict is raised with both sides' arguments. Blocking conflicts auto-escalate to PO. Advisory conflicts are logged without blocking.
+
+### 19.5 Progressive Autonomy
+
+Trust is earned per `(agent_type, action_type)` pair through a 4-level system:
+
+| Level | Name | Approval Required |
+|-------|------|-------------------|
+| 0 | always_ask | Every time |
+| 1 | ask_first_time | First occurrence only |
+| 2 | ask_on_risk | Only for high/critical risk |
+| 3 | auto | Only for critical risk |
+
+Promotion thresholds: 3 successes at 90%+ → 10 at 95%+ → 25 at 98%+. Demotion: 2+ failures in 24h drops one level.
+
+### 19.6 Blast Radius
+
+Pre-execution dependency traversal via the knowledge graph. Finds direct and transitive dependents, team ownership, and generates risk assessment:
+
+- `single_file` / `module` / `service` / `cross_service` scope
+- `low` / `medium` / `high` / `critical` risk level
+- Auto-requires approval when multiple teams affected or risk is high/critical
+
+### 19.7 Reasoning Traces
+
+Full audit trail for every agent action. Records: steps taken, evidence consulted, alternatives considered (and why rejected), confidence scores, tools invoked, files modified, duration, and token cost.
+
+### 19.8 AST Server (`ast_server.py`)
+
+Structural code search via ast-grep (`sg`). Three tools:
+
+| Tool | Description |
+|------|-------------|
+| `ast_search` | Pattern search across directories with metavariables ($X, $$$) |
+| `ast_match` | Single-file pattern match with line numbers |
+| `ast_refactor` | Dry-run replacement preview (no file modification) |
+
+Supports: Python, TypeScript, JavaScript, Go, Rust, HCL/Terraform, YAML. 30s timeout, 10K char max pattern.
+
+### 19.9 Drift Sentinel
+
+Terraform drift detection via `terraform plan -detailed-exitcode`:
+- Exit 0 = no drift
+- Exit 2 = drift detected → parses plan output for resource changes → auto-creates backlog task
+
+### 19.10 Git Knowledge Ingestion
+
+Extracts ownership and context from git history:
+- `git blame --porcelain` → ownership maps (who owns what percentage of each file)
+- `gh pr list --json` → PR discussions, review comments, file changes
+
+### 19.11 Dashboard TUI
+
+Rich Live terminal dashboard with auto-refresh:
+- Active workflows with ETA estimation (token burn rate extrapolation)
+- Recent workflow events
+- Budget spend
+- Backlog stats (completion %, active, blocked)
+- Pending decisions and blocking conflicts
+
+---
+
+## 20. Agent Optimization (v0.5.0)
 
 ### Model Tier Distribution
 
@@ -2179,7 +2283,7 @@ Agents are selected according to this hierarchy:
 
 ---
 
-## 20. Key Architecture Decisions (ADRs)
+## 21. Key Architecture Decisions (ADRs)
 
 | Decision | Rationale | Alternatives Rejected |
 |----------|-----------|----------------------|

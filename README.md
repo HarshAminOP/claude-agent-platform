@@ -47,6 +47,12 @@ You spend time teaching it your architecture, correcting its mistakes, explainin
 | Self-healing infrastructure | ✗ | ✓ |
 | Quality evaluation framework | ✗ | ✓ |
 | One-command install & uninstall | ✗ | ✓ |
+| Task queue with dependency resolution | ✗ | ✓ |
+| Structured decisions & conflict resolution | ✗ | ✓ |
+| Progressive autonomy (earned trust) | ✗ | ✓ |
+| Blast radius pre-assessment | ✗ | ✓ |
+| Infrastructure drift detection | ✗ | ✓ |
+| AST-level code search | ✗ | ✓ |
 
 <br>
 
@@ -168,8 +174,17 @@ If something fails, it fixes itself. If something can't be fixed, it tells you w
 |:--|:----------|:-------------|
 | **Agents** | 21 specialists | 5 running Opus (architecture, security, optimization, system, orchestrator), 14 on Sonnet (devops, cicd, dev, sre, code-review, docs, test, teacher, dev, etc.), 2 on Haiku (basic CLI, helper) — all with output contracts and rejection criteria |
 | **Workflows** | 10 pipelines | New service setup, incident response, security audit, cost optimization, architecture review, repo health, deployment impact, security hardening, session memory, system evolution |
-| **Servers** | 13 MCP servers | 4 CAP core (knowledge, session, workflow, fleet) + 9 platform (AWS docs, IAM, EKS, CloudWatch, Lambda, Pricing, IaC, Kubernetes, Terraform) |
-| **CLI** | `cap` command | Status, diagnostics, eval, workflow watch, budget tracking, knowledge search |
+| **Servers** | 15 MCP servers | 6 CAP core (knowledge, session, workflow, fleet, backlog, AST) + 9 platform (AWS docs, IAM, EKS, CloudWatch, Lambda, Pricing, IaC, Kubernetes, Terraform) |
+| **Backlog** | Persistent task queue | Structured tasks with priority, dependencies, acceptance criteria, atomic claim, and agent-assignable work |
+| **Decisions** | Decision cards | Options with tradeoffs presented to PO; resolution recorded for audit trail |
+| **Conflicts** | Disagreement protocol | When agents disagree, blocking conflicts auto-escalate to PO; advisory logged |
+| **Autonomy** | Progressive trust | Earned trust per (agent, action) pair — starts requiring approval, promotes to auto with track record |
+| **Blast Radius** | Impact analysis | Pre-execution dependency traversal via knowledge graph; auto-requires approval for cross-team changes |
+| **Drift** | Terraform sentinel | `terraform plan -detailed-exitcode` parser, auto-creates backlog task on drift |
+| **AST** | Structural search | Pattern-based code search via ast-grep — metavariables, YAML rules, dry-run refactoring |
+| **Dashboard** | Live TUI | Real-time workflow progress, budget, backlog stats, blockers, ETA estimation |
+| **Traces** | Reasoning audit | "Why did you do this?" — full step chain with evidence, alternatives, and confidence scores |
+| **CLI** | `cap` command | Status, diagnostics, eval, workflow watch, budget tracking, knowledge search, backlog, decisions, drift, dashboard |
 | **Eval** | Quality framework | Automated scoring of retrieval accuracy, security coverage, session memory, and workflows |
 
 <br>
