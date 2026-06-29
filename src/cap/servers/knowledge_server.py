@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -76,6 +77,43 @@ def _now() -> str:
 
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
+
+
+# --- Search result cache (LRU-style, TTL-based) ---
+_SEARCH_CACHE: dict[str, tuple[float, list]] = {}
+_SEARCH_CACHE_TTL = 300  # seconds
+_SEARCH_CACHE_MAX_SIZE = 100
+
+
+def _cache_key(query: str, workspace: str | None, scope: str, strategy: str, top_k: int) -> str:
+    """Generate a deterministic cache key from search parameters."""
+    raw = json.dumps([query, workspace, scope, strategy, top_k], sort_keys=True)
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _cache_get(key: str) -> list | None:
+    """Return cached results if present and fresh, else None."""
+    entry = _SEARCH_CACHE.get(key)
+    if entry is None:
+        return None
+    ts, results = entry
+    if time.monotonic() - ts > _SEARCH_CACHE_TTL:
+        del _SEARCH_CACHE[key]
+        return None
+    return results
+
+
+def _cache_put(key: str, results: list) -> None:
+    """Store results in cache, evicting oldest entry on overflow."""
+    if len(_SEARCH_CACHE) >= _SEARCH_CACHE_MAX_SIZE:
+        oldest_key = min(_SEARCH_CACHE, key=lambda k: _SEARCH_CACHE[k][0])
+        del _SEARCH_CACHE[oldest_key]
+    _SEARCH_CACHE[key] = (time.monotonic(), results)
+
+
+def _cache_clear() -> None:
+    """Invalidate all cached search results."""
+    _SEARCH_CACHE.clear()
 
 
 @server.list_tools()
@@ -248,6 +286,13 @@ async def _handle_search(args: dict):
     strategy = args.get("strategy", "hybrid")
     scope = args.get("scope", "all")
 
+    # Check cache first
+    ck = _cache_key(query, workspace, scope, strategy, top_k)
+    cached = _cache_get(ck)
+    if cached is not None:
+        logger.debug("Search cache hit for query=%r", query)
+        return cached
+
     query_vector = None
     if strategy in ("hybrid", "semantic") and embedding_client.is_available is not False:
         query_vector = await embedding_client.embed_single(query)
@@ -263,7 +308,7 @@ async def _handle_search(args: dict):
         scope=scope if scope != "all" else None,
     )
 
-    return [TextContent(type="text", text=json.dumps({
+    response = [TextContent(type="text", text=json.dumps({
         "results": [
             {
                 "title": r.title,
@@ -279,6 +324,9 @@ async def _handle_search(args: dict):
         "strategy": strategy,
         "semantic_available": query_vector is not None,
     }))]
+
+    _cache_put(ck, response)
+    return response
 
 
 async def _handle_ingest(args: dict):
@@ -326,6 +374,9 @@ async def _handle_ingest(args: dict):
         (entry_id,)
     )
     db.commit()
+
+    # Invalidate search cache — new content may affect results
+    _cache_clear()
 
     return [TextContent(type="text", text=json.dumps({
         "status": "ingested",
@@ -412,6 +463,9 @@ async def _handle_sync(args: dict):
     from cap.lib.sync_engine import sync_workspace
 
     stats = sync_workspace(db, workspace, full=full)
+
+    # Invalidate search cache — synced content may affect results
+    _cache_clear()
 
     return [TextContent(type="text", text=json.dumps({
         "status": "complete" if not stats.errors else "complete_with_errors",

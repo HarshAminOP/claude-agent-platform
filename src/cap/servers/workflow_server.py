@@ -41,6 +41,25 @@ gateway = APIGateway(DB_PATH, ConcurrencyConfig())
 
 server = Server("workflow-engine")
 
+# Per-agent token tracking: {workflow_id: {agent_id: tokens_consumed}}
+_agent_token_usage: dict[str, dict[str, int]] = {}
+
+
+def _get_agent_cap(workflow_id: str) -> int:
+    """Per-agent token cap = budget_tokens / max_agents * 2.
+
+    This allows individual agents to use more than an even share while
+    still bounding runaway agents.
+    """
+    row = db.execute(
+        "SELECT budget_tokens, max_agents FROM workflows WHERE id = ?",
+        (workflow_id,)
+    ).fetchone()
+    if not row:
+        return 500_000 // 15 * 2  # fallback
+    budget_tokens, max_agents = row
+    return budget_tokens // max(max_agents, 1) * 2
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -291,6 +310,75 @@ async def _handle_signal(args: dict):
     if row[0] or row[1] in ("killed", "failed"):
         return [TextContent(type="text", text=json.dumps({"error": "Workflow is dead", "killed": True}))]
 
+    # --- Circular delegation prevention ---
+    if event_type == "agent_handoff":
+        target_agent = args.get("message", "")
+        # Query last 10 handoff events for this workflow
+        handoff_rows = db.execute(
+            """SELECT message FROM workflow_events
+               WHERE workflow_id = ? AND event_type = 'agent_handoff'
+               ORDER BY timestamp DESC LIMIT 10""",
+            (wf_id,)
+        ).fetchall()
+        # Build delegation chain from most recent 3 handoffs
+        recent_targets = [r[0] for r in handoff_rows[:3]]
+        if target_agent in recent_targets:
+            logger.warning(
+                "Circular delegation detected in %s: %s already in recent chain %s",
+                wf_id, target_agent, recent_targets,
+            )
+            return [TextContent(type="text", text=json.dumps({
+                "error": "Circular delegation detected",
+                "blocked": True,
+                "target_agent": target_agent,
+                "recent_delegation_chain": recent_targets,
+                "message": (
+                    f"Handoff to '{target_agent}' blocked: target already appears in the "
+                    f"last 3 handoffs. Break the cycle by assigning to a different agent "
+                    f"or resolving the task directly."
+                ),
+            }))]
+
+    # --- Infinite review loop protection ---
+    if event_type in ("agent_concern", "agent_fail"):
+        agent_id = args.get("agent_id")
+        phase = args.get("phase")
+        # Count occurrences of this (workflow_id, agent_id, phase) combo
+        count_row = db.execute(
+            """SELECT COUNT(*) FROM workflow_events
+               WHERE workflow_id = ? AND agent_id = ? AND phase = ?
+               AND event_type IN ('agent_concern', 'agent_fail')""",
+            (wf_id, agent_id, phase)
+        ).fetchone()
+        occurrence_count = count_row[0] if count_row else 0
+        if occurrence_count >= 3:
+            # Emit review_cap_reached event
+            db.execute(
+                """INSERT INTO workflow_events
+                   (workflow_id, event_type, agent_id, phase, message, tokens_delta, timestamp)
+                   VALUES (?, 'review_cap_reached', ?, ?, ?, 0, ?)""",
+                (wf_id, agent_id, phase,
+                 f"Review cap reached for agent={agent_id} phase={phase} after {occurrence_count} attempts. Force-accepting.",
+                 now)
+            )
+            db.commit()
+            logger.warning(
+                "Review cap reached in %s: agent=%s phase=%s count=%d — force-accepting",
+                wf_id, agent_id, phase, occurrence_count,
+            )
+            return [TextContent(type="text", text=json.dumps({
+                "review_cap_reached": True,
+                "force_accept": True,
+                "agent_id": agent_id,
+                "phase": phase,
+                "occurrence_count": occurrence_count,
+                "message": (
+                    f"Review cap reached: agent '{agent_id}' in phase '{phase}' has raised "
+                    f"concerns/failures {occurrence_count} times. Force-accepting to break "
+                    f"infinite review loop."
+                ),
+            }))]
+
     # Record event
     db.execute(
         """INSERT INTO workflow_events (workflow_id, event_type, agent_id, phase, message, tokens_delta, timestamp)
@@ -308,13 +396,56 @@ async def _handle_signal(args: dict):
             logger.warning("Workflow %s exceeded max_agents (%d > %d)", wf_id, row2[0], row2[1])
 
     # Update tokens if delta provided
-    if args.get("tokens_delta", 0) > 0:
+    tokens_delta = args.get("tokens_delta", 0)
+    if tokens_delta > 0:
         db.execute(
             "UPDATE workflows SET tokens_used = tokens_used + ? WHERE id = ?",
-            (args["tokens_delta"], wf_id)
+            (tokens_delta, wf_id)
         )
 
-        # Check budget enforcement
+        # --- Per-agent token tracking ---
+        agent_id = args.get("agent_id")
+        agent_budget_event = None
+        if agent_id:
+            if wf_id not in _agent_token_usage:
+                _agent_token_usage[wf_id] = {}
+            agent_totals = _agent_token_usage[wf_id]
+            agent_totals[agent_id] = agent_totals.get(agent_id, 0) + tokens_delta
+
+            agent_cap = _get_agent_cap(wf_id)
+            agent_used = agent_totals[agent_id]
+            agent_pct = agent_used / max(agent_cap, 1)
+
+            if agent_pct >= 1.0:
+                # Agent exceeded its cap — emit event
+                agent_budget_event = "agent_budget_exceeded"
+                msg = (
+                    f"Agent '{agent_id}' exceeded token cap: "
+                    f"{agent_used}/{agent_cap} tokens ({agent_pct*100:.0f}%)"
+                )
+                db.execute(
+                    """INSERT INTO workflow_events
+                       (workflow_id, event_type, agent_id, phase, message, tokens_delta, timestamp)
+                       VALUES (?, 'agent_budget_exceeded', ?, ?, ?, 0, ?)""",
+                    (wf_id, agent_id, args.get("phase"), msg, now)
+                )
+                logger.warning("Workflow %s: %s", wf_id, msg)
+            elif agent_pct >= 0.8:
+                # Agent at 80% — emit warning
+                agent_budget_event = "agent_budget_warning"
+                msg = (
+                    f"Agent '{agent_id}' at {agent_pct*100:.0f}% of token cap: "
+                    f"{agent_used}/{agent_cap} tokens"
+                )
+                db.execute(
+                    """INSERT INTO workflow_events
+                       (workflow_id, event_type, agent_id, phase, message, tokens_delta, timestamp)
+                       VALUES (?, 'agent_budget_warning', ?, ?, ?, 0, ?)""",
+                    (wf_id, agent_id, args.get("phase"), msg, now)
+                )
+                logger.info("Workflow %s: %s", wf_id, msg)
+
+        # Check workflow-level budget enforcement
         budget_row = db.execute(
             "SELECT tokens_used, budget_tokens FROM workflows WHERE id = ?", (wf_id,)
         ).fetchone()
@@ -336,6 +467,17 @@ async def _handle_signal(args: dict):
                 "tokens_used": budget_row[0], "budget_tokens": budget_row[1],
             }))]
 
+        # If agent budget event was triggered, include it in response
+        if agent_budget_event:
+            db.commit()
+            return [TextContent(type="text", text=json.dumps({
+                "ok": True, "event_type": event_type,
+                "agent_budget_event": agent_budget_event,
+                "agent_id": agent_id,
+                "agent_tokens_used": _agent_token_usage[wf_id][agent_id],
+                "agent_token_cap": _get_agent_cap(wf_id),
+            }))]
+
     db.commit()
     return [TextContent(type="text", text=json.dumps({"ok": True, "event_type": event_type}))]
 
@@ -355,6 +497,9 @@ async def _handle_kill(args: dict):
         (wf_id, reason, now)
     )
     db.commit()
+
+    # Clean up per-agent tracking for this workflow
+    _agent_token_usage.pop(wf_id, None)
 
     logger.warning("Workflow KILLED: %s — %s", wf_id, reason)
     return [TextContent(type="text", text=json.dumps({"killed": True, "workflow_id": wf_id, "reason": reason}))]

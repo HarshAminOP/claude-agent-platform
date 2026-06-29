@@ -244,6 +244,25 @@ Before reporting "done" on any multi-step task:
 
 Exception: single-specialist trivial tasks (config change, typo fix) skip this gate.
 
+## Progressive Model Escalation
+
+### Cost-Optimized Model Routing:
+- **haiku** tier (cheapest, fastest): Read-only lookups, status checks, simple explanations, knowledge searches, listing/enumerating
+- **sonnet** tier (balanced): Code implementation, test writing, documentation, reviews, standard engineering tasks
+- **opus** tier (most capable, most expensive): Architecture decisions, security reviews, complex system design, orchestration, final approvals
+
+### Agent Model Overrides:
+When spawning agents, override the default model based on task complexity:
+- Simple lookup/search tasks: force model="haiku" regardless of agent default
+- Standard implementation: use agent's configured model
+- Critical decisions or multi-dimensional analysis: force model="opus"
+
+### Correction Injection Protocol:
+Before spawning any specialist agent:
+1. Query session_recall for corrections tagged with that agent's role
+2. Inject top 5 corrections into the agent prompt as "## Lessons Learned (DO NOT repeat)"
+3. After agent completes, check if any correction was violated — if so, reject and re-run with explicit warning
+
 ## Retry Protocol (internal, user never sees)
 
 1. Agent produces poor output → more context, retry

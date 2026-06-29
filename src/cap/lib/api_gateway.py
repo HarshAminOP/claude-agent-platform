@@ -5,6 +5,7 @@ Every Bedrock API call routes through this layer.
 """
 
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -32,6 +33,11 @@ class BudgetExhaustedError(Exception):
 
 class WorkflowKilledError(Exception):
     """Workflow was killed by user."""
+    pass
+
+
+class MonthlyBudgetExceededError(Exception):
+    """Monthly spending cap has been exceeded."""
     pass
 
 
@@ -148,10 +154,48 @@ class AdaptivePool:
 class APIGateway:
     """Central rate limiter, budget enforcer, and cost tracker for Bedrock calls."""
 
+    # Default monthly cap in USD — override via MONTHLY_BUDGET_USD env var or system_state table
+    DEFAULT_MONTHLY_CAP_USD = float(os.environ.get("MONTHLY_BUDGET_USD", "150.0"))
+
     def __init__(self, db_path: Path, concurrency_config: ConcurrencyConfig = None):
         self._db = init_database(db_path)
         self._pool = AdaptivePool(config=concurrency_config or ConcurrencyConfig())
         self._db_lock = threading.Lock()
+
+    def check_monthly_budget(self) -> dict:
+        """Check monthly spend against cap. Raises MonthlyBudgetExceededError if over.
+
+        Returns dict with month_spend_usd, monthly_cap_usd, remaining_usd.
+        Monthly cap is read from system_state table (key='monthly_budget_usd')
+        or falls back to DEFAULT_MONTHLY_CAP_USD.
+        """
+        # Determine the cap: check system_state first, then env/default
+        cap_row = self._db.execute(
+            "SELECT value FROM system_state WHERE key = 'monthly_budget_usd'"
+        ).fetchone()
+        monthly_cap = float(cap_row[0]) if cap_row else self.DEFAULT_MONTHLY_CAP_USD
+
+        # Sum cost_usd for the current calendar month (UTC)
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+        row = self._db.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM api_calls WHERE timestamp >= ?",
+            (month_start,)
+        ).fetchone()
+        month_spend = row[0]
+
+        if month_spend >= monthly_cap:
+            raise MonthlyBudgetExceededError(
+                f"Monthly budget exhausted: ${month_spend:.2f} spent of ${monthly_cap:.2f} cap "
+                f"(month started {month_start})"
+            )
+
+        return {
+            "month_spend_usd": round(month_spend, 4),
+            "monthly_cap_usd": monthly_cap,
+            "remaining_usd": round(monthly_cap - month_spend, 4),
+        }
 
     def check_budget(self, workflow_id: str) -> tuple[int, int]:
         """Check remaining budget. Returns (tokens_used, budget_tokens).
@@ -182,9 +226,12 @@ class APIGateway:
         return (tokens_used, budget_tokens)
 
     def pre_call(self, workflow_id: str, model_tier: ModelTier) -> bool:
-        """Pre-call check: budget + kill switch + acquire concurrency slot.
-        Returns True if call can proceed. Raises on kill/budget.
+        """Pre-call check: monthly cap + workflow budget + kill switch + acquire concurrency slot.
+        Returns True if call can proceed. Raises on kill/budget/monthly cap.
         """
+        # Monthly budget gate — applies to all calls regardless of workflow
+        self.check_monthly_budget()
+
         if workflow_id:
             self.check_budget(workflow_id)
 
