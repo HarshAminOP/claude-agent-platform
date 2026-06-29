@@ -15,7 +15,7 @@ Config lives in [github] section of config.toml:
 """
 
 import logging
-import os
+import re
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -25,6 +25,16 @@ from cap.lib.config import GitHubConfig, load_config
 logger = logging.getLogger("cap.repo_resolver")
 
 _session_clone_count: int = 0
+
+_SAFE_NAME = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9._-]{0,99}[a-zA-Z0-9])?$')
+
+
+def _validate_name(name: str, label: str = "name") -> None:
+    """Reject names that could cause path traversal or command injection."""
+    if not name or not _SAFE_NAME.match(name):
+        raise ValueError(f"Invalid {label}: {name!r} — must be alphanumeric with ._- only")
+    if ".." in name or "/" in name or "\\" in name:
+        raise ValueError(f"Invalid {label}: {name!r} — path traversal not allowed")
 
 
 def resolve_repo(
@@ -45,6 +55,10 @@ def resolve_repo(
         Dict with keys: status, path, cloned, message
     """
     global _session_clone_count
+
+    _validate_name(repo_name, "repo_name")
+    if domain_hint:
+        _validate_name(domain_hint, "domain_hint")
 
     if config is None:
         config = load_config().github
@@ -133,11 +147,7 @@ def find_unresolved_dependencies(
 
     Returns list of {repo_name, depended_on_by, reason} dicts.
     """
-    where_clause = "AND e.workspace = ?" if workspace else ""
-    params = ("depends_on", workspace) if workspace else ("depends_on",)
-
-    rows = db.execute(
-        f"""
+    base_sql = """
         SELECT DISTINCT
             tgt.entity_name AS dep_name,
             src.entity_name AS source_repo,
@@ -147,10 +157,14 @@ def find_unresolved_dependencies(
         JOIN knowledge_graph_nodes tgt ON tgt.id = e.target_id
         WHERE e.predicate = ?
           AND tgt.entity_type IN ('repo', 'chart', 'terraform_module')
-          {where_clause}
-        """,
-        params,
-    ).fetchall()
+    """
+    if workspace:
+        rows = db.execute(
+            base_sql + " AND e.workspace = ?",
+            ("depends_on", workspace),
+        ).fetchall()
+    else:
+        rows = db.execute(base_sql, ("depends_on",)).fetchall()
 
     config = load_config().github
     clone_base = Path(config.clone_base_path) if config.clone_base_path else None
@@ -206,7 +220,7 @@ def _find_local_repo(
             return in_domain
 
     for domain_dir in clone_base.iterdir():
-        if not domain_dir.is_dir() or domain_dir.name.startswith("."):
+        if not domain_dir.is_dir() or domain_dir.is_symlink() or domain_dir.name.startswith("."):
             continue
         candidate = domain_dir / repo_name
         if candidate.is_dir() and (candidate / ".git").exists():

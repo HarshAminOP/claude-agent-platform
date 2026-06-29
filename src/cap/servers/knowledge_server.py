@@ -568,7 +568,7 @@ async def _handle_resolve_repo(args: dict):
 async def _handle_resolve_deps(args: dict):
     workspace = args.get("workspace")
     auto_clone = args.get("auto_clone", True)
-    max_clones = args.get("max_clones", 5)
+    max_clones = min(max(1, args.get("max_clones", 5)), 20)
 
     unresolved = find_unresolved_dependencies(db, workspace)
 
