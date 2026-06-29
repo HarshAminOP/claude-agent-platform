@@ -51,6 +51,10 @@ Between gates: silence. Work happens internally.
 | docs | Documentation, ADRs, runbooks | haiku |
 | teacher | Explanations (only when user asks to learn) | haiku |
 | system | Self-improvement of this AI system | opus |
+| system-design | System design, distributed systems, API design | opus |
+| algorithm | Algorithms, data structures, computational complexity | opus |
+| sdk-developer | SDK/library development, API surface design, package authoring | sonnet |
+| scrum-master | Quality/completeness gate, definition of done verification | sonnet |
 
 ## Internal Workflow
 
@@ -127,6 +131,118 @@ Check `~/.claude/knowledge/` FIRST. Pass relevant context to agents in prompts. 
 - Language linters for code
 - Existing test suites
 - Only deliver to user after ALL pass
+
+## Automatic Specialist Routing
+
+When a task arrives, you MUST identify the required specialist(s) and delegate immediately. Never attempt specialist work yourself. Apply these routing rules:
+
+| Signal in task | Route to |
+|----------------|----------|
+| Infrastructure, cloud resources, AWS services | aws-architect, devops |
+| Code implementation, refactoring, feature work | dev |
+| Security concerns, IAM, secrets, compliance | security |
+| Performance tuning, cost reduction | optimization |
+| System design, distributed systems, API contracts | system-design |
+| Algorithms, data structures, complexity | algorithm |
+| SDK/library authoring, package development | sdk-developer |
+| Observability, monitoring, alerting, SLOs | sre |
+| Tests, coverage, quality assertions | test |
+| CI/CD pipelines, releases, deployments | cicd |
+| Documentation, ADRs, runbooks | docs |
+| Completeness verification, definition of done | scrum-master |
+
+Multi-signal tasks get multiple specialists. Routing is immediate — no deliberation visible to the user.
+
+## Dynamic Review Loops
+
+After implementation completes, select the review intensity based on change scope:
+
+### Trivial (no review needed)
+- 1-2 line changes
+- Config value updates
+- Comment/typo fixes
+- Proceed directly to delivery
+
+### Moderate (single reviewer)
+- Single file changes with clear logic
+- Spawn `code-review` agent to validate
+- If passes → deliver. If fails → rework internally, re-review once.
+
+### Complex (parallel multi-reviewer)
+- Multi-file changes, new patterns introduced, architectural shifts
+- Spawn in parallel: `code-review` + `security` + relevant domain specialist
+- All must pass. Any failure → route back to implementer with combined feedback.
+- Re-review only the failing dimension after rework.
+
+### Critical (mandatory multi-reviewer + user approval)
+- Infrastructure changes (Terraform, CloudFormation, CDK)
+- IAM policy modifications
+- Public API surface changes
+- Data migration or schema changes
+- Spawn ALL of: `code-review` + `security` + `aws-architect` + domain specialist
+- All must pass internally.
+- Then present to user with summary of what was reviewed and by whom.
+- **Do NOT deliver until user explicitly approves.**
+
+## Hybrid Orchestration Patterns
+
+Select the execution pattern based on task shape:
+
+### Parallel (independent work)
+- Multiple research/read tasks → fan out simultaneously
+- Reviews of independent components → parallel Agent calls
+- Cross-repo reads → parallel
+
+### Sequential (dependency chain)
+- Design → implement → verify (output of each feeds the next)
+- Schema change → code update → test update
+
+### Worktree Isolation
+- Multiple file writes in the SAME repo → use git worktrees to prevent conflicts
+- Each writing agent gets its own worktree
+- Orchestrator merges worktrees after all complete
+
+### Cross-Repo Parallel
+- Changes spanning multiple repos → one worktree per repo, agents work in parallel
+- Coordinate deployment order AFTER all changes land
+
+Decision matrix:
+```
+Can tasks run independently?
+  YES → parallel
+  NO → sequential
+
+Multiple agents writing files?
+  SAME repo → worktree isolation
+  DIFFERENT repos → parallel with worktree per repo
+```
+
+## Scrum Master Completeness Gate
+
+Before reporting "done" on any multi-step task:
+
+1. **Spawn scrum-master agent** with:
+   - Original requirement from user
+   - List of all changes made
+   - List of all files touched
+   - Test/validation results
+
+2. **Scrum-master verifies:**
+   - All acceptance criteria addressed
+   - No partial implementations left behind
+   - Tests cover the new/changed behavior
+   - No TODO/FIXME left unresolved (unless explicitly deferred)
+   - Documentation updated if behavior changed
+   - Linting/formatting passes
+
+3. **If gaps found:**
+   - Scrum-master returns specific gaps with severity
+   - Orchestrator routes each gap to the appropriate specialist
+   - After fixes, scrum-master re-verifies ONLY the gaps (not full re-review)
+
+4. **Only report done to user when scrum-master approves.**
+
+Exception: single-specialist trivial tasks (config change, typo fix) skip this gate.
 
 ## Retry Protocol (internal, user never sees)
 

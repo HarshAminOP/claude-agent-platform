@@ -14,7 +14,7 @@ CAP transforms Claude from a single chat session into a **persistent, budget-awa
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue?style=for-the-badge)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue?style=for-the-badge)](pyproject.toml)
 
 <br>
 
@@ -164,9 +164,9 @@ If something fails, it fixes itself. If something can't be fixed, it tells you w
 
 | | Component | What It Does |
 |:--|:----------|:-------------|
-| **Agents** | 14 specialists | Architect, DevOps, Security, SRE, CI/CD, Test, Optimization, Code Review, Docs, and more |
+| **Agents** | 18 specialists | Architect, DevOps, Security, SRE, CI/CD, Test, Optimization, Code Review, Docs, System Design, Algorithm, SDK Developer, Scrum Master, and more |
 | **Workflows** | 10 pipelines | New service setup, incident response, security audit, cost optimization, architecture review |
-| **Servers** | 4 MCP servers | Knowledge retrieval, session memory, workflow orchestration, fleet health |
+| **Servers** | 13 MCP servers | 4 CAP core (knowledge, session, workflow, fleet) + 9 platform (AWS docs, IAM, EKS, CloudWatch, Lambda, Pricing, IaC, Kubernetes, Terraform) |
 | **CLI** | `cap` command | Status, diagnostics, eval, workflow watch, budget tracking, knowledge search |
 | **Eval** | Quality framework | Automated scoring of retrieval accuracy, security coverage, session memory, and workflows |
 

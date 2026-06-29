@@ -261,6 +261,10 @@ def _install_claude_md(force: bool = False) -> bool:
 # ── Settings.json ────────────────────────────────────────────────────────────
 
 _CAP_MCP_PERMISSIONS = [
+    # Core Claude Code orchestration — required for auto-orchestration
+    "Workflow(*)",
+    "Agent(*)",
+    # Knowledge server tools
     "mcp__cap-knowledge__knowledge_search",
     "mcp__cap-knowledge__knowledge_graph_query",
     "mcp__cap-knowledge__knowledge_graph_add",
@@ -268,6 +272,7 @@ _CAP_MCP_PERMISSIONS = [
     "mcp__cap-knowledge__knowledge_record",
     "mcp__cap-knowledge__knowledge_status",
     "mcp__cap-knowledge__knowledge_sync",
+    # Session server tools
     "mcp__cap-session__session_start",
     "mcp__cap-session__session_record",
     "mcp__cap-session__session_recall",
@@ -275,10 +280,12 @@ _CAP_MCP_PERMISSIONS = [
     "mcp__cap-session__session_end",
     "mcp__cap-session__session_checkpoint",
     "mcp__cap-session__session_history",
+    # Fleet server tools
     "mcp__cap-fleet__fleet_status",
     "mcp__cap-fleet__fleet_health_check",
     "mcp__cap-fleet__fleet_discover",
     "mcp__cap-fleet__fleet_logs",
+    # Workflow engine tools
     "mcp__workflow-engine__workflow_start",
     "mcp__workflow-engine__workflow_status",
     "mcp__workflow-engine__workflow_kill",
