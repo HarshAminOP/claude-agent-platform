@@ -93,10 +93,16 @@ uv tool update-shell && source ~/.zshrc   # or ~/.bashrc
 # 3. Initialize (creates databases, agents, workflows, registers MCP servers)
 cap init
 
-# 4. Index your workspace (populates the knowledge base)
+# 4. (Optional) Configure GitHub org for auto-resolution
+# Edit ~/.claude-platform/config.toml and set:
+# [github]
+# org = "your-org-name"
+# clone_base_path = "~/Projects/your-org"
+
+# 5. Index your workspace (populates the knowledge base)
 cap sync --workspace /path/to/your/project
 
-# 5. Verify everything is healthy
+# 6. Verify everything is healthy
 cap status
 ```
 
@@ -139,18 +145,27 @@ A default configuration file is placed at `~/.claude-platform/config.toml`. It c
 - Budget limits and rate limiting
 - Server fleet configuration
 
-#### 4. Installs 14 agent definitions
+#### 4. Installs 21 agent definitions
 
 Agent markdown files are installed to `~/.claude/agents/`:
 
+**Opus-tier (5 agents):**
 ```
-aws-architect.md  cicd.md     code-review.md  dev.md
-devops.md         docs.md     optimization.md orchestrator.md
-security.md       sre.md      system.md       teacher.md
-test.md           workflow.md
+aws-architect.md  security.md  optimization.md  system.md  orchestrator.md
 ```
 
-These appear in Claude Code's agent picker menu.
+**Sonnet-tier (14 agents):**
+```
+cicd.md      code-review.md  dev.md      devops.md   docs.md
+sre.md       test.md         teacher.md  and 6 more specialized agents
+```
+
+**Haiku-tier (2 agents):**
+```
+basic-cli.md  helper.md
+```
+
+All agents include output contracts and rejection criteria. These appear in Claude Code's agent picker menu.
 
 #### 5. Installs 10 workflow scripts
 
@@ -171,9 +186,13 @@ CAP registers its MCP servers via `claude mcp add`:
 | Server | Function |
 |--------|----------|
 | `cap-platform` | Workflow engine, budget tracking, event bus |
-| `cap-knowledge` | Knowledge graph, semantic search, embeddings |
+| `cap-knowledge` | Knowledge graph, semantic search, embeddings, GitHub auto-resolution |
 | `cap-sessions` | Session memory, learnings, corrections |
 | `cap-fleet` | Server health, registry, diagnostics |
+
+New MCP tools in v0.5.0:
+- `knowledge_resolve_repo` — GitHub auto-resolution
+- `knowledge_resolve_deps` — Dependency resolver
 
 #### 7. Backs up existing configuration
 

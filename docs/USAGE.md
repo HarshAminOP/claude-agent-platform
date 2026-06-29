@@ -225,6 +225,14 @@ You will almost never interact with this directly. If something feels broken, `c
 | `cap knowledge status` | Check index health, embedding coverage | Shows entry counts, queue status |
 | `cap knowledge add` | Manually record team/ownership/convention | `cap knowledge add -c team -k "sre" -v '{"slack": "#sre"}'` |
 
+### GitHub Operations
+
+| Command | When to use | Example |
+|---------|-------------|---------|
+| `cap github config` | Review GitHub org and clone settings | Shows configured org, clone path, SSH setting |
+| `cap github resolve` | Manually resolve missing repo dependencies | `cap github resolve` — clones missing repos from org |
+| `cap github deps` | See which repos have been auto-cloned | Shows dependency resolution history |
+
 ### Session Operations
 
 | Command | When to use | Example |
@@ -249,6 +257,14 @@ You will almost never interact with this directly. If something feels broken, `c
 |---------|-------------|---------|
 | `cap budget status` | Monthly cost review, pre-workflow check | Shows spend, cap, per-model breakdown |
 
+### GitHub Operations
+
+| Command | When to use | Example |
+|---------|-------------|---------|
+| `cap github config` | Review GitHub org and clone settings | Shows configured org, clone path, SSH setting |
+| `cap github resolve` | Manually resolve missing repo dependencies | `cap github resolve` — clones missing repos from org |
+| `cap github deps` | See which repos have been auto-cloned | Shows dependency resolution history |
+
 ### Fleet Operations
 
 | Command | When to use | Example |
@@ -256,6 +272,42 @@ You will almost never interact with this directly. If something feels broken, `c
 | `cap fleet status` | Check if all MCP servers are running | Shows PID, health, restart count |
 | `cap fleet health-check` | Force immediate health probe | Finds dead processes, updates status |
 | `cap fleet discover` | After adding new MCP servers to config | Finds unmanaged servers in `.claude.json` |
+
+---
+
+## GitHub Auto-Resolution (NEW in v0.5.0)
+
+Missing repository references are automatically resolved, cloned, and indexed.
+
+**How it works:**
+
+1. Agent references a repo (e.g., "See the alerting-repo for config details")
+2. Knowledge graph detects the reference is unresolved
+3. CAP checks `[github]` config for org name
+4. Runs `gh repo clone org/repo-name --depth=1` over SSH
+5. Repo cloned to `clone_base_path/repo-name`
+6. Content automatically indexed into knowledge base
+7. Next query finds the repo locally
+
+**Configuration:**
+
+```toml
+[github]
+org = "moia-dev"
+clone_base_path = "~/Projects/moia"
+use_ssh = true
+auto_clone_on_missing_dep = true
+max_auto_clones_per_session = 5
+clone_depth = 1
+```
+
+**Key features:**
+
+- **SSH-only by default** — all clones use SSH for security
+- **Shallow clones** — configurable depth limits bandwidth
+- **Session rate limit** — `max_auto_clones_per_session` prevents runaway clones
+- **Automatic indexing** — cloned repos are immediately available for search
+- **Manual override** — `cap github resolve` for explicit resolution
 
 ---
 

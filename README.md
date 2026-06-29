@@ -14,7 +14,7 @@ CAP transforms Claude from a single chat session into a **persistent, budget-awa
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.4.0-blue?style=for-the-badge)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue?style=for-the-badge)](pyproject.toml)
 
 <br>
 
@@ -85,6 +85,8 @@ CAP continuously indexes your workspace using three search channels working toge
 Results are automatically fused and ranked. Claude cites where it found each answer. No more "I think the config is probably in..." — it knows exactly where it is.
 
 **Global by default:** Knowledge is accessible from any directory. Agents don't need to be in the indexed workspace — they search across all workspaces automatically.
+
+**GitHub Auto-Resolution:** Missing repository dependencies are automatically resolved via GitHub using `gh` and `git`, then cloned over SSH, indexed, and made available to the knowledge graph — no manual repo management needed.
 
 <br>
 
@@ -164,8 +166,8 @@ If something fails, it fixes itself. If something can't be fixed, it tells you w
 
 | | Component | What It Does |
 |:--|:----------|:-------------|
-| **Agents** | 18 specialists | Architect, DevOps, Security, SRE, CI/CD, Test, Optimization, Code Review, Docs, System Design, Algorithm, SDK Developer, Scrum Master, and more |
-| **Workflows** | 10 pipelines | New service setup, incident response, security audit, cost optimization, architecture review |
+| **Agents** | 21 specialists | 5 running Opus (architecture, security, optimization, system, orchestrator), 14 on Sonnet (devops, cicd, dev, sre, code-review, docs, test, teacher, dev, etc.), 2 on Haiku (basic CLI, helper) — all with output contracts and rejection criteria |
+| **Workflows** | 10 pipelines | New service setup, incident response, security audit, cost optimization, architecture review, repo health, deployment impact, security hardening, session memory, system evolution |
 | **Servers** | 13 MCP servers | 4 CAP core (knowledge, session, workflow, fleet) + 9 platform (AWS docs, IAM, EKS, CloudWatch, Lambda, Pricing, IaC, Kubernetes, Terraform) |
 | **CLI** | `cap` command | Status, diagnostics, eval, workflow watch, budget tracking, knowledge search |
 | **Eval** | Quality framework | Automated scoring of retrieval accuracy, security coverage, session memory, and workflows |

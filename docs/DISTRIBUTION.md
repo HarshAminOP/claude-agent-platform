@@ -23,7 +23,7 @@ uv build
 That's it. You now have a `.whl` file in `dist/`:
 
 ```
-dist/claude_agent_platform-0.3.0-py3-none-any.whl
+dist/claude_agent_platform-0.5.0-py3-none-any.whl
 ```
 
 This single file contains everything — CLI, agents, workflows, eval framework, config defaults. No other files are needed.
@@ -36,17 +36,17 @@ Pick whichever method fits your team:
 
 ### Option A: Send the file
 
-Share `dist/claude_agent_platform-0.3.0-py3-none-any.whl` via Slack, Teams, email, shared drive, S3 — whatever you use to share files internally.
+Share `dist/claude_agent_platform-0.5.0-py3-none-any.whl` via Slack, Teams, email, shared drive, S3 — whatever you use to share files internally.
 
 ### Option B: Install directly from Git
 
 Skip the build step entirely. Your teammate runs:
 
 ```bash
-uv tool install "git+ssh://git@github.com/moia-dev/claude-agent-platform.git@v0.3.0"
+uv tool install "git+ssh://git@github.com/moia-dev/claude-agent-platform.git@v0.5.0"
 ```
 
-This clones, builds, and installs in one command. Replace `v0.3.0` with the tag or branch you want.
+This clones, builds, and installs in one command. Replace `v0.5.0` with the tag or branch you want.
 
 ---
 
@@ -65,13 +65,13 @@ Your teammate needs three things:
 ### Install from the wheel file
 
 ```bash
-uv tool install ./claude_agent_platform-0.3.0-py3-none-any.whl
+uv tool install ./claude_agent_platform-0.5.0-py3-none-any.whl
 ```
 
 ### Or install from Git (no wheel file needed)
 
 ```bash
-uv tool install "git+ssh://git@github.com/moia-dev/claude-agent-platform.git@v0.3.0"
+uv tool install "git+ssh://git@github.com/moia-dev/claude-agent-platform.git@v0.5.0"
 ```
 
 ### Initialize
@@ -120,10 +120,10 @@ When a new version is available:
 
 ```bash
 # From a new wheel file
-uv tool install ./claude_agent_platform-0.4.0-py3-none-any.whl --force
+uv tool install ./claude_agent_platform-0.5.0-py3-none-any.whl --force
 
 # Or from Git
-uv tool install "git+ssh://git@github.com/moia-dev/claude-agent-platform.git@v0.4.0" --force
+uv tool install "git+ssh://git@github.com/moia-dev/claude-agent-platform.git@v0.5.0" --force
 
 # Then re-initialize (preserves your databases, updates agents/workflows/servers)
 cap init --force
@@ -157,7 +157,7 @@ cd claude-agent-platform
 uv build
 
 # 3. Share it (pick one)
-#    - Slack: drag dist/claude_agent_platform-0.3.0-py3-none-any.whl into a channel
+#    - Slack: drag dist/claude_agent_platform-0.5.0-py3-none-any.whl into a channel
 #    - S3:    aws s3 cp dist/*.whl s3://team-tools/cap/
 #    - Git:   just tell them the repo URL and tag
 ```
@@ -170,8 +170,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh   # Install uv
 source ~/.zshrc                                     # Reload shell
 
 # 2. Install CAP (pick one — from file, S3, or Git)
-uv tool install ./claude_agent_platform-0.3.0-py3-none-any.whl
-# OR: uv tool install "git+ssh://git@github.com/moia-dev/claude-agent-platform.git@v0.3.0"
+uv tool install ./claude_agent_platform-0.5.0-py3-none-any.whl
+# OR: uv tool install "git+ssh://git@github.com/moia-dev/claude-agent-platform.git@v0.5.0"
 
 # 3. Initialize
 cap init
@@ -219,7 +219,7 @@ uv tool install claude-agent-platform --python 3.12
 ```bash
 cap uninstall --yes
 uv tool uninstall claude-agent-platform
-uv tool install ./claude_agent_platform-0.3.0-py3-none-any.whl
+uv tool install ./claude_agent_platform-0.5.0-py3-none-any.whl
 cap init --force
 ```
 
@@ -258,7 +258,7 @@ Confirm the wheel is complete before distributing:
 ```bash
 python -c "
 import zipfile
-z = zipfile.ZipFile('dist/claude_agent_platform-0.3.0-py3-none-any.whl')
+z = zipfile.ZipFile('dist/claude_agent_platform-0.5.0-py3-none-any.whl')
 names = z.namelist()
 checks = {
     'CLI':       any('cap/cli/main.py' in n for n in names),

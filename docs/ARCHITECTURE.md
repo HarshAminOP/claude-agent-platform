@@ -22,6 +22,10 @@
 │  │  │retrieval │ │inbox     │ │security  │ │config        │ │              │
 │  │  │.py       │ │.py       │ │.py       │ │.py           │ │              │
 │  │  └──────────┘ └──────────┘ └──────────┘ └──────────────┘ │              │
+│  │  ┌──────────┐ ┌──────────┐ ┌──────────────────────────┐ │              │
+│  │  │hooks.py  │ │repo_     │ │Other utilities            │ │              │
+│  │  │          │ │resolver  │ │(team_renderer, graph...)  │ │              │
+│  │  └──────────┘ └──────────┘ └──────────────────────────┘ │              │
 │  └───────────────────────────────────────────────────────────┘              │
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────┐            │
@@ -89,6 +93,8 @@ Owner of `knowledge.db` + `knowledge_vectors/` (LanceDB). Hybrid retrieval engin
 | `knowledge_graph_query` | `(entity: str, workspace?: str, relation_type?: str, depth: int=2)` | Traverse knowledge graph. Workspace optional — omit or pass "all" for cross-workspace traversal |
 | `knowledge_graph_add` | `(subject: str, predicate: str, object: str, workspace: str, metadata?: dict)` | Add graph edge |
 | `knowledge_sync` | `(workspace: str, trigger: str, full: bool=false)` | Trigger workspace sync |
+| `knowledge_resolve_repo` | `(repo_name: str, org?: str)` | **NEW v0.5.0** — GitHub auto-resolution: clone repo from org, index, return path |
+| `knowledge_resolve_deps` | `(query: str)` | **NEW v0.5.0** — Detect missing repo dependencies from query, auto-resolve |
 | `knowledge_status` | `(workspace?: str)` | Index health, staleness, stats |
 
 ### 2.3 Session Server (`session_server.py`) — BUILT
@@ -1486,7 +1492,7 @@ The servers run in isolated `uv` environments and are auto-discovered by Claude 
 
 ```toml
 [platform]
-version = "0.3.0"
+version = "0.5.0"
 log_level = "INFO"                         # DEBUG|INFO|WARNING|ERROR
 
 [bedrock]
@@ -1887,7 +1893,257 @@ Priority: This is the highest-impact component — enables the entire team to be
 
 ---
 
-## Key Architecture Decisions (ADRs)
+## 17. GitHub Auto-Resolution (NEW in v0.5.0)
+
+### Overview
+
+Agents frequently reference external repositories ("See the alerting-repo for config"). CAP v0.5.0 automatically resolves missing repo dependencies by cloning them from GitHub, indexing their content, and making them available to the knowledge graph.
+
+### Architecture
+
+```
+Agent Query
+    │
+    ├─ Knowledge graph detects reference: "alerting-repo"
+    │
+    ├─ Lookup repo_name in knowledge_graph_nodes
+    │  → "alerting-repo" not found
+    │
+    ├─ Call knowledge_resolve_repo(repo_name="alerting-repo", org="moia-dev")
+    │  ├─ Validate repo_name against strict regex allowlist (security)
+    │  ├─ Run `gh repo clone moia-dev/alerting-repo --depth=1`
+    │  ├─ Clone to `clone_base_path/alerting-repo`
+    │  ├─ Trigger auto-sync: `cap sync --workspace clone_path`
+    │  └─ Add repo node to knowledge graph
+    │
+    └─ Next query finds repo locally
+```
+
+### Configuration
+
+```toml
+[github]
+org = "moia-dev"                      # GitHub organization
+clone_base_path = "~/Projects/moia"   # Base directory for clones
+use_ssh = true                        # SSH-only (enforced)
+auto_clone_on_missing_dep = true      # Auto-resolve on detect
+max_auto_clones_per_session = 5       # Rate limit
+default_branch = "main"               # Fallback branch
+clone_depth = 1                       # Shallow clone (bandwidth efficient)
+```
+
+### Security
+
+- **Repo name validation:** Strict regex allowlist prevents path traversal (`[a-z0-9_-]+` only)
+- **SSH-only clones:** No HTTPS, no credentials in URLs
+- **Rate limiting:** `max_auto_clones_per_session` prevents runaway clones
+- **Org scoping:** Requires explicit org in config (no arbitrary GitHub URLs)
+
+### MCP Tools
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `knowledge_resolve_repo` | `(repo_name: str, org?: str)` | Clone repo from org, index, return path |
+| `knowledge_resolve_deps` | `(query: str)` | Detect missing deps from query text, auto-resolve |
+
+### Integration
+
+- **Manual:** `cap github resolve` to trigger resolution
+- **Automatic:** Agents call `knowledge_resolve_deps()` on query (if enabled)
+- **Cli:** `cap github deps` to list resolved repos
+
+---
+
+## 18. Lifecycle Hooks System (NEW in v0.5.0)
+
+### Overview
+
+The hooks system (v0.5.0) provides fine-grained control over agent lifecycle events, enabling correction injection, tool restriction, and budget checks.
+
+### Architecture
+
+```python
+class LifecycleHook:
+    """Fires at specific agent lifecycle events."""
+    
+    # Before agent spawn
+    before_agent_spawn:
+        ├─ correction_injection
+        │  └─ Inject learnings/corrections into agent context
+        │
+        ├─ tool_restriction
+        │  └─ Limit which MCP tools the agent can call
+        │
+        └─ budget_check
+           └─ Verify budget available before spawn
+```
+
+### Hook Events
+
+| Event | Fired When | Access To | Use Cases |
+|-------|-----------|-----------|-----------|
+| `before_agent_spawn` | Agent about to start | agent_type, model, budget, context | Inject corrections, restrict tools, check budget |
+| `after_agent_complete` | Agent finished | agent_id, result, tokens, cost | Log outcome, update learnings |
+| `on_agent_error` | Agent failed | agent_id, error, context | Retry, escalate, record error pattern |
+
+### Correction Injection
+
+```python
+async def correction_injection_hook(agent_type: str, workspace: str):
+    """Inject high-confidence corrections into agent context."""
+    corrections = session_server.recall(
+        query="corrections",
+        workspace=workspace,
+        confidence_threshold=0.8  # Only high-confidence
+    )
+    return {
+        "system_prefix": format_corrections(corrections),
+        "constraints": extract_constraints(corrections),
+    }
+```
+
+### Tool Restriction
+
+```python
+# config.toml
+[orchestrator.tool_restriction]
+# Restrict specific agents from calling certain tools
+[orchestrator.tool_restriction.devops]
+excluded_tools = [
+    "workflow_kill",      # Cannot kill workflows
+    "budget_reset",       # Cannot reset budget
+]
+
+[orchestrator.tool_restriction.security]
+allowed_tools = [
+    "knowledge_search",
+    "knowledge_record",
+    "session_record",    # Can record learnings
+]
+```
+
+### Budget Check
+
+```python
+async def budget_check_hook(workflow_id: str, agent_type: str, model: str):
+    """Verify budget before spawning agent."""
+    workflow = await workflow_server.get_status(workflow_id)
+    remaining = workflow.budget_cap_usd - workflow.cost_incurred_usd
+    
+    estimated_cost = estimate_agent_cost(agent_type, model)
+    if estimated_cost > remaining:
+        raise BudgetExceeded(f"Need ${estimated_cost}, have ${remaining}")
+    
+    return True
+```
+
+### Configuration
+
+```toml
+[orchestrator]
+enable_hooks = true
+
+[orchestrator.hooks]
+correction_injection_enabled = true
+correction_confidence_threshold = 0.8
+tool_restriction_enabled = true
+budget_check_enabled = true
+
+# Per-agent tool restrictions
+[orchestrator.tool_restriction.devops]
+excluded_tools = ["workflow_kill"]
+
+[orchestrator.tool_restriction.security]
+allowed_tools = ["knowledge_search", "knowledge_record"]
+```
+
+---
+
+## 19. Agent Optimization (NEW in v0.5.0)
+
+### Model Tier Distribution
+
+All 21 agents now have optimized model assignments with output contracts and rejection criteria:
+
+| Tier | Count | Agents | Model | Reason |
+|------|-------|--------|-------|--------|
+| Opus | 5 | Architect, Security, Optimizer, System, Orchestrator | claude-3-5-opus | Complex decision-making, strategic planning |
+| Sonnet | 14 | DevOps, CI/CD, Dev, SRE, Code-Review, Docs, Test, Teacher, etc. | claude-3-5-sonnet | Good quality/cost balance, most tasks |
+| Haiku | 2 | Basic-CLI, Helper | claude-3-5-haiku | Simple, fast tasks, low cost |
+
+### Output Contracts
+
+Each agent defines:
+
+```python
+class AgentOutputContract:
+    """Specifies what valid output looks like."""
+    
+    required_sections: List[str]          # Must include these sections
+    rejection_criteria: List[str]         # Reject if output contains these
+    min_length_tokens: int                # Minimum output length
+    format: Literal["markdown", "json"]   # Output format expectation
+    example_output: str                   # Reference implementation
+```
+
+**Example:**
+
+```python
+# Code-Review agent
+code_review_contract = {
+    "required_sections": [
+        "Summary",
+        "Correctness Issues",
+        "Security Issues",
+        "Suggestions",
+    ],
+    "rejection_criteria": [
+        "TODO",
+        "FIXME",
+        "placeholder",
+        "implement later",
+    ],
+    "min_length_tokens": 300,
+    "format": "markdown",
+}
+```
+
+### Rejection Handling
+
+```python
+async def spawn_agent(agent_type: str, task: str, model: str = None):
+    """Spawn agent with automatic retry on contract rejection."""
+    contract = get_agent_contract(agent_type)
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        result = await orchestrator.call_agent(agent_type, task, model)
+        
+        if contract.validate(result):
+            return result  # Valid
+        
+        if attempt < max_retries - 1:
+            # Inject feedback + retry
+            task = f"{task}\n\n[Feedback: {contract.get_rejection_reason(result)}]"
+            continue
+        
+        raise AgentRejected(f"Agent failed contract after {max_retries} attempts")
+```
+
+### Agent Precedence Rules (6 Levels)
+
+Agents are selected according to this hierarchy:
+
+1. **User override** — user explicitly specifies `@agent-name`
+2. **Task-specific routing** — workflow specifies which agent to use
+3. **Workspace agents** — agents in `.claude/agents/` of current workspace
+4. **Project agents** — agents bundled with CAP in `data/agents/`
+5. **Session context** — agent preferences learned in past sessions
+6. **Default fallback** — orchestrator picks best match by task type
+
+---
+
+## 20. Key Architecture Decisions (ADRs)
 
 | Decision | Rationale | Alternatives Rejected |
 |----------|-----------|----------------------|
@@ -1899,6 +2155,8 @@ Priority: This is the highest-impact component — enables the entire team to be
 | RRF over learned fusion | Deterministic, no training needed, well-studied | LLM re-ranking (cost), linear combination (needs tuning) |
 | JSONL inbox over IPC | Crash-safe (atomic rename), inspectable, simple | Unix sockets (complex), shared memory (corruption risk) |
 | Click + Rich for CLI | Mature, auto-help, composable, beautiful output | argparse (ugly), Typer (less mature), Fire (too magic) |
+| SSH-only clones | Security best practice, no credentials in URLs | HTTPS (credentials risk), git:// (insecure) |
+| Strict repo_name regex | Prevents path traversal, injection attacks | Permissive parsing (security risk) |
 
 ---
 

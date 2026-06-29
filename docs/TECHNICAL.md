@@ -10,7 +10,7 @@ Claude Agent Platform
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](pyproject.toml)
 [![MCP](https://img.shields.io/badge/protocol-MCP%201.0-purple.svg)](https://modelcontextprotocol.io)
 
 ---
@@ -264,7 +264,7 @@ Security Boundary Tests
 ```bash
 $ cap status
 
-Claude Agent Platform v0.3.0
+Claude Agent Platform v0.5.0
 ────────────────────────────
   Config:    ~/.claude-platform/config.toml
   Data:      ~/.claude-platform/data/
@@ -380,7 +380,9 @@ claude-agent-platform/
 │   │   ├── models.py          # Data models + pricing constants
 │   │   ├── team_renderer.py   # Rich team simulation renderer
 │   │   ├── api_gateway.py     # Concurrency + rate limiting
-│   │   ├── security.py        # Input validation, path traversal prevention
+│   │   ├── hooks.py           # Lifecycle hooks system (correction_injection, tool_restriction, budget_check)
+│   │   ├── repo_resolver.py   # GitHub auto-resolution engine
+│   │   ├── security.py        # Input validation, path traversal prevention, repo_name validation
 │   │   ├── config.py          # TOML config loader
 │   │   ├── db_init.py         # Database initialization
 │   │   └── db_maintenance.py  # Vacuum, WAL checkpoint, integrity
@@ -394,7 +396,7 @@ claude-agent-platform/
 │   │   ├── cli.py             # cap eval commands
 │   │   └── suites/            # retrieval, session, security, workflow
 │   └── data/                   # Bundled in wheel (installed by cap init)
-│       ├── agents/            # 14 specialist agent definitions (.md)
+│       ├── agents/            # 21 specialist agent definitions (.md) — 5 Opus, 14 Sonnet, 2 Haiku with output contracts
 │       ├── workflows/         # 10 workflow pipelines (.js)
 │       └── config.toml.default
 ├── tests/

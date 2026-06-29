@@ -14,6 +14,7 @@ This file is created by `cap init` with sensible defaults. You can modify it at 
 
 ```toml
 [platform]              # General platform settings
+[github]                # GitHub org config and auto-resolution
 [bedrock]               # AWS Bedrock embedding configuration
 [bedrock.retry]         # Retry/backoff for Bedrock API calls
 [models.*]              # Cost per model tier (for budget tracking)
@@ -35,8 +36,45 @@ This file is created by `cap init` with sensible defaults. You can modify it at 
 
 | Key | Type | Default | Description |
 |:----|:-----|:--------|:------------|
-| `version` | string | `"0.3.0"` | Config schema version (do not change manually) |
+| `version` | string | `"0.5.0"` | Config schema version (do not change manually) |
 | `log_level` | string | `"INFO"` | Logging verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+
+---
+
+### `[github]`
+
+GitHub organization configuration for automatic repository resolution and dependency management.
+
+| Key | Type | Default | Description |
+|:----|:-----|:--------|:------------|
+| `org` | string | _(commented)_ | GitHub organization name (e.g., `moia-dev`) |
+| `clone_base_path` | string | `"~/Projects"` | Base directory for auto-cloned repos |
+| `use_ssh` | bool | `true` | Use SSH-only for clones (recommended for security) |
+| `auto_clone_on_missing_dep` | bool | `true` | Auto-clone missing dependency repos |
+| `max_auto_clones_per_session` | int | `5` | Limit auto-clones to prevent runaway |
+| `default_branch` | string | `"main"` | Default branch to clone (fallback: detect from repo) |
+| `clone_depth` | int | `1` | Shallow clone depth (1 = single commit, 0 = full history) |
+
+**Example: Enable GitHub auto-resolution**
+
+```toml
+[github]
+org = "moia-dev"
+clone_base_path = "~/Projects/moia"
+use_ssh = true
+auto_clone_on_missing_dep = true
+max_auto_clones_per_session = 10
+clone_depth = 1
+```
+
+**How it works:**
+
+1. Agent references a repository from your GitHub org (e.g., "See alerting-repo for details")
+2. Knowledge server detects missing repo via knowledge graph
+3. Runs `gh repo clone org/repo --depth=1` (SSH-only)
+4. Repo auto-cloned to `clone_base_path/repo-name`
+5. Content automatically indexed into knowledge base
+6. All subsequent references find the repo locally
 
 ---
 
