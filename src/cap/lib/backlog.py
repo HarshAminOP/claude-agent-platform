@@ -305,7 +305,7 @@ def verify_criteria(
 ) -> Optional[BacklogTask]:
     """Mark a specific acceptance criterion as verified/failed."""
     task = get_task(conn, task_id)
-    if not task or criterion_index >= len(task.acceptance_criteria):
+    if not task or criterion_index < 0 or criterion_index >= len(task.acceptance_criteria):
         return None
 
     now = datetime.now(timezone.utc).isoformat()

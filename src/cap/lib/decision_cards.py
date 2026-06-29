@@ -175,6 +175,12 @@ def resolve_card(
     status: DecisionStatus = DecisionStatus.approved,
     po_notes: str = "",
 ) -> Optional[DecisionCard]:
+    card = get_card(conn, card_id)
+    if not card:
+        return None
+    if status != DecisionStatus.rejected:
+        if chosen_option < 0 or chosen_option >= len(card.options):
+            return None
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         """UPDATE decision_cards
