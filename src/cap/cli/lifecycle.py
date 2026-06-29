@@ -293,6 +293,13 @@ _CAP_MCP_PERMISSIONS = [
     "mcp__workflow-engine__workflow_estimate",
     "mcp__workflow-engine__workflow_report",
     "mcp__workflow-engine__workflow_signal",
+    # Diagram server tools
+    "mcp__cap-diagram__diagram_render",
+    "mcp__cap-diagram__diagram_engines",
+    "mcp__cap-diagram__diagram_mermaid_to_md",
+    # Knowledge resolver tools
+    "mcp__cap-knowledge__knowledge_resolve_repo",
+    "mcp__cap-knowledge__knowledge_resolve_deps",
 ]
 
 
@@ -461,6 +468,12 @@ def _get_cap_mcp_servers(cap_home: Path, data_dir: Path) -> list[dict]:
             "command": python_bin,
             "args": [str(servers_dir / "workflow_server.py")],
             "env": [f"PLATFORM_DATA_DIR={data_dir}", f"PYTHONPATH={cap_home}"],
+        },
+        {
+            "name": "cap-diagram",
+            "command": python_bin,
+            "args": [str(servers_dir / "diagram_server.py")],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
         },
     ]
 
