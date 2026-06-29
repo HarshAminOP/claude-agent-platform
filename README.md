@@ -84,6 +84,8 @@ CAP continuously indexes your workspace using three search channels working toge
 
 Results are automatically fused and ranked. Claude cites where it found each answer. No more "I think the config is probably in..." — it knows exactly where it is.
 
+**Global by default:** Knowledge is accessible from any directory. Agents don't need to be in the indexed workspace — they search across all workspaces automatically.
+
 <br>
 
 ---

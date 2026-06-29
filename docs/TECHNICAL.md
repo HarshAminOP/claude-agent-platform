@@ -106,7 +106,7 @@ Workflows render as a live engineering team discussion — like watching a Slack
 
 ### 2. Hybrid Retrieval Engine
 
-Three independent search channels merged with Reciprocal Rank Fusion:
+Three independent search channels merged with Reciprocal Rank Fusion. The `workspace` parameter is optional — when omitted or set to `"all"`, search spans all indexed workspaces, making knowledge accessible from any directory.
 
 | Channel | Technology | What It Finds | Fallback Behavior |
 |---------|-----------|---------------|-------------------|

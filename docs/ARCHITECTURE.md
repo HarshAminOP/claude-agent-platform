@@ -63,63 +63,61 @@ Cross-server communication uses the **inbox pattern**: a server needing to write
 
 ## 2. MCP Server Tools & Responsibilities
 
-### 2.1 Workflow Server (`workflow_server.py`) — ALREADY BUILT
+### 2.1 Workflow Server (`workflow_server.py`) — BUILT
 
 Owner of `platform.db`. Orchestrates multi-agent workflows with budget enforcement.
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `workflow_start` | `(workflow_id: str, params: dict, budget_cap_usd: float)` | Launch a workflow with budget cap |
-| `workflow_status` | `(run_id: str)` | Get current state, cost, progress |
-| `workflow_signal` | `(run_id: str, signal: str, data: dict)` | Send signal (pause/resume/input) |
-| `workflow_kill` | `(run_id: str, reason: str)` | Emergency kill switch |
-| `workflow_list` | `(status_filter: str?, workspace: str?)` | List active/recent workflows |
-| `workflow_estimate` | `(workflow_id: str, params: dict)` | Cost estimate before execution |
-| `workflow_report` | `(run_id: str?, period: str?)` | Cost/performance report |
+| `workflow_start` | `(name: str, budget_tokens?: int, max_agents?: int, metadata?: dict)` | Start workflow with budget controls (default 500K tokens, 15 agents) |
+| `workflow_status` | `(workflow_id: str)` | Real-time status: phase, tokens, agents, budget remaining |
+| `workflow_signal` | `(workflow_id: str, event_type: str, phase?: str, agent_id?: str, message?: str, tokens_delta?: int)` | Signal workflow event (phase/agent transitions, failures) |
+| `workflow_kill` | `(workflow_id: str, reason?: str)` | Immediately kill a workflow |
+| `workflow_list` | `(status_filter?: str, limit?: int)` | List active/recent workflows |
+| `workflow_estimate` | `(agent_count: int, model_mix?: dict, avg_tokens_per_agent?: int)` | Estimate cost before launching |
+| `workflow_report` | `(workflow_id: str)` | Post-run report: duration, cost breakdown, agent outcomes |
 
-### 2.2 Knowledge Server (`knowledge_server.py`) — TO BUILD
+### 2.2 Knowledge Server (`knowledge_server.py`) — BUILT
 
 Owner of `knowledge.db` + `knowledge_vectors/` (LanceDB). Hybrid retrieval engine.
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `knowledge_search` | `(query: str, workspace: str?, scope: str?, top_k: int=10, strategy: "hybrid"\|"keyword"\|"semantic"\|"graph")` | Hybrid search with RRF merger |
-| `knowledge_ingest` | `(source: str, workspace: str, content_type: str, metadata: dict?)` | Ingest a file/snippet into KB |
-| `knowledge_ingest_batch` | `(sources: list[str], workspace: str)` | Batch ingest (uses Bedrock batching) |
-| `knowledge_record` | `(category: str, key: str, value: str, workspace: str?, relations: list[tuple]?)` | Agent-recorded knowledge entry |
-| `knowledge_graph_query` | `(entity: str, relation_type: str?, depth: int=2)` | Traverse knowledge graph |
-| `knowledge_graph_add` | `(subject: str, predicate: str, object: str, workspace: str?, metadata: dict?)` | Add graph edge |
-| `knowledge_sync` | `(workspace: str, trigger: str, incremental: bool=True)` | Trigger workspace sync |
-| `knowledge_status` | `(workspace: str?)` | Index health, staleness, stats |
+| `knowledge_search` | `(query: str, workspace?: str, scope?: str, top_k: int=10, strategy: "hybrid"\|"keyword"\|"semantic"\|"graph")` | Hybrid search with RRF merger. Workspace optional — omit or pass "all" for cross-workspace global search |
+| `knowledge_ingest` | `(source: str, workspace: str, content_type: str, title?: str, metadata?: dict)` | Ingest a file/snippet into KB |
+| `knowledge_record` | `(category: str, key: str, value: str, workspace: str, relations?: list[tuple])` | Agent-recorded knowledge entry |
+| `knowledge_graph_query` | `(entity: str, workspace?: str, relation_type?: str, depth: int=2)` | Traverse knowledge graph. Workspace optional — omit or pass "all" for cross-workspace traversal |
+| `knowledge_graph_add` | `(subject: str, predicate: str, object: str, workspace: str, metadata?: dict)` | Add graph edge |
+| `knowledge_sync` | `(workspace: str, trigger: str, full: bool=false)` | Trigger workspace sync |
+| `knowledge_status` | `(workspace?: str)` | Index health, staleness, stats |
 
-### 2.3 Session Server (`session_server.py`) — TO BUILD
+### 2.3 Session Server (`session_server.py`) — BUILT
 
-Owner of `sessions.db`. Manages cross-session memory and adaptive learning.
-
-| Tool | Signature | Description |
-|------|-----------|-------------|
-| `session_start` | `(workspace: str, context: dict?)` | Start session, load relevant memory |
-| `session_checkpoint` | `(session_id: str, decisions: list, learnings: list?)` | Mid-session save point |
-| `session_record` | `(session_id: str, event_type: str, data: dict)` | Record event (correction, preference, discovery) |
-| `session_recall` | `(query: str, session_id: str?, workspace: str?, recency_weight: float=0.7)` | Recall relevant past decisions |
-| `session_end` | `(session_id: str, summary: str?, learnings: list?)` | Close session, persist final state |
-| `session_feedback` | `(session_id: str, category: str, content: str)` | Record user correction/preference |
-| `session_history` | `(workspace: str?, limit: int=20)` | List past sessions with summaries |
-
-### 2.4 Fleet Manager (`fleet_server.py`) — TO BUILD
-
-No owned database (stateless, reads `platform.db` for config). Manages external MCP server lifecycle.
+Owner of `sessions.db`. Manages cross-session memory and adaptive learning. Sessions auto-start when session_id is omitted from `session_record` or `session_feedback`.
 
 | Tool | Signature | Description |
 |------|-----------|-------------|
-| `fleet_status` | `(server_name: str?)` | Health status of all/one managed server |
-| `fleet_register` | `(name: str, command: list[str], env: dict?, args: list[str]?, health_check: dict?)` | Register new MCP server |
+| `session_start` | `(workspace: str, context?: dict)` | Start session, load relevant memory |
+| `session_checkpoint` | `(session_id: str, decisions?: list, learnings?: list)` | Mid-session save point |
+| `session_record` | `(event_type: str, content: str, session_id?: str, workspace?: str, category?: str, data?: dict)` | Record event (decision, correction, preference, discovery, error, milestone). session_id optional — auto-creates if absent |
+| `session_recall` | `(query: str, workspace: str, session_id?: str, recency_weight: float=0.7)` | Recall relevant past decisions |
+| `session_end` | `(session_id: str, summary?: str, learnings?: list)` | Close session, persist final state |
+| `session_feedback` | `(what_was_wrong: str, what_is_correct: str, session_id?: str, workspace?: str, category?: str)` | Record user correction/preference. session_id optional — auto-creates if absent |
+| `session_history` | `(workspace?: str, limit: int=20)` | List past sessions with summaries |
+
+### 2.4 Fleet Manager (`fleet_server.py`) — BUILT
+
+Owns `fleet.db`. Manages external MCP server lifecycle via PID health checks.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `fleet_status` | `(server_name?: str)` | Health status of all/one managed server |
+| `fleet_register` | `(name: str, command: str, args?: list[str], env?: dict, health_check?: dict, max_restarts?: int)` | Register new MCP server (command must be whitelisted) |
 | `fleet_unregister` | `(name: str)` | Remove server from fleet |
-| `fleet_restart` | `(name: str, reason: str?)` | Restart a managed server |
-| `fleet_configure` | `(name: str, config: dict)` | Update server configuration |
-| `fleet_health_check` | `()` | Run health checks on all servers, auto-restart unhealthy |
-| `fleet_discover` | `(workspace: str)` | Auto-discover MCP servers from workspace config |
-| `fleet_logs` | `(name: str, lines: int=50, level: str?)` | Get server logs |
+| `fleet_restart` | `(name: str, reason?: str)` | Flag server for restart (Claude Code owns stdio lifecycle) |
+| `fleet_health_check` | `()` | Check all registered servers by verifying PIDs are alive |
+| `fleet_discover` | `(workspace: str)` | Auto-discover MCP servers from workspace and global config |
+| `fleet_logs` | `(name: str, lines?: int)` | Get recent events for a server |
 
 ---
 

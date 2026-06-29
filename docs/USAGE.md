@@ -20,7 +20,7 @@ CAP (Claude Agent Platform) runs as **4 MCP servers** alongside Claude Code. The
 
 **Three things to know:**
 
-1. Knowledge is indexed from your workspace and available to Claude in every session
+1. Knowledge is indexed from your workspace and available to Claude in every session, from any directory
 2. Decisions and corrections persist across sessions -- Claude never repeats mistakes
 3. Workflows render as team conversations so you can watch your agents collaborate
 
@@ -44,7 +44,7 @@ This is the most important section. CAP works because things happen automaticall
 You: "How does our alerting pipeline work?"
 
   [Claude internally]
-  → calls knowledge_search(query="alerting pipeline", workspace="/path/to/workspace")
+  → calls knowledge_search(query="alerting pipeline")
   → cap-knowledge runs:
       1. FTS5 keyword search (BM25 scoring)
       2. Bedrock Titan V2 semantic search (cosine similarity)
@@ -57,6 +57,8 @@ Claude: "Your alerting pipeline uses Prometheus rules defined in the
          and PagerDuty for P1s. The rules are deployed via ArgoCD from
          argocd-platform/..."
 ```
+
+> **Note:** The `workspace` parameter is optional. When omitted or set to `"all"`, knowledge search returns results from ALL indexed workspaces -- so agents can access the full knowledge base regardless of which directory they're invoked from. Pass a specific workspace path to scope results to that workspace only.
 
 > **Tip:** If Claude's answers seem generic or lack codebase-specific context, check that knowledge has been indexed: `cap knowledge status`
 
