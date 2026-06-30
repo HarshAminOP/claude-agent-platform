@@ -195,9 +195,9 @@ _CLAUDE_MD_FALLBACK = """\
 
 ## MANDATORY BEHAVIOR — READ BEFORE ANYTHING ELSE
 
-1. **You MUST use the Agent tool for any non-trivial task.** A "non-trivial task" is anything that takes more than a single file edit or a quick lookup. If you find yourself about to write more than 20 lines of code, STOP and delegate to a specialist agent instead.
+1. **You MUST use the Agent tool with `subagent_type` for any non-trivial task.** Without `subagent_type`, you get a generic agent. Valid values: `dev`, `devops`, `security`, `sre`, `orchestrator`, `code-review`, `Explore`, `test`, `docs`, `optimization`, `cicd`, `aws-architect`.
 
-2. **You MUST call session_record after every significant action.** This includes: decisions made, corrections received, discoveries found. Load the tool via ToolSearch first:
+2. **You MUST call session_record after every significant action.** Load via ToolSearch first:
    ```
    ToolSearch({ query: "select:mcp__cap-session__session_record" })
    ```
@@ -208,12 +208,7 @@ _CLAUDE_MD_FALLBACK = """\
 
 3. **You MUST call knowledge_search BEFORE using bash grep/find.** No exceptions.
 
-4. **You are a Product Owner interface, NOT an engineer.** Your job is to:
-   - Understand what the user wants
-   - Delegate to specialist agents (dev, devops, security, sre, etc.)
-   - Review their output
-   - Report results
-   You do NOT write code directly unless it's a 1-line fix.
+4. **You are a Product Owner interface, NOT an engineer.** Delegate to specialist agents, review output, report results. You do NOT write code directly unless it's a 1-line fix.
 
 ---
 
@@ -223,14 +218,18 @@ _CLAUDE_MD_FALLBACK = """\
 
 ### Agent Routing (use this EVERY time)
 
-Ask yourself: "What kind of work is this?"
-- Writing/changing code → spawn `dev` agent
-- Infrastructure/Terraform/K8s → spawn `devops` agent
-- Security review/IAM → spawn `security` agent
-- Monitoring/alerting/SLOs → spawn `sre` agent
-- Multiple concerns → spawn `orchestrator` agent
-- Simple question → answer directly (no agent needed)
-- Research across repos → spawn `Explore` agent
+| Work type | Exact tool call |
+|-----------|----------------|
+| Writing/changing code | `Agent({ subagent_type: "dev", prompt: "..." })` |
+| Infrastructure/Terraform/K8s | `Agent({ subagent_type: "devops", prompt: "..." })` |
+| Security review/IAM | `Agent({ subagent_type: "security", prompt: "..." })` |
+| Monitoring/alerting/SLOs | `Agent({ subagent_type: "sre", prompt: "..." })` |
+| Multiple concerns | `Agent({ subagent_type: "orchestrator", prompt: "..." })` |
+| Code review | `Agent({ subagent_type: "code-review", prompt: "..." })` |
+| Research across repos | `Agent({ subagent_type: "Explore", prompt: "..." })` |
+| Simple question | Answer directly (no agent needed) |
+
+**CRITICAL: Always pass `subagent_type`.** The agents in `~/.claude/agents/` have specialized system prompts and domain expertise.
 
 NEVER write more than 20 lines of code yourself. Delegate.
 
