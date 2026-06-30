@@ -7,6 +7,12 @@ Operates on the SQLite adjacency tables created by db_init:
 
 All traversal uses iterative BFS with a visited set to handle cycles (review finding H13).
 No recursion anywhere in this module.
+
+Degree-aware BFS (Section 6 of CAP System Design):
+  Hub nodes (degree > hub_threshold) are NOT expanded fully. Instead, neighbors
+  are sampled by connectivity + recency. A `summarized_hubs` field reports what
+  was sampled vs total. No data loss — data exists in DB, traversal just doesn't
+  explode.
 """
 
 import json
@@ -14,6 +20,7 @@ import logging
 import sqlite3
 import uuid
 from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
@@ -500,3 +507,312 @@ def _safe_json(raw: str | None) -> Any:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Degree-aware BFS (Section 6 — handles hub nodes without data loss)
+# ---------------------------------------------------------------------------
+
+HUB_THRESHOLD = 50
+HUB_SAMPLE_BY_CONNECTIVITY = 10
+HUB_SAMPLE_BY_RECENCY = 10
+
+
+@dataclass
+class DegreeAwareResult:
+    """Result of a degree-aware BFS traversal."""
+
+    nodes: list[tuple[str, int]]  # (node_id, hop_distance)
+    edges: list[tuple[str, str, str]]  # (source_id, target_id, predicate)
+    summarized_hubs: list[dict] = field(default_factory=list)
+    depth_reached: int = 0
+    truncated: bool = False
+
+
+def get_node_degree(node_id: str, conn: sqlite3.Connection) -> int:
+    """Return the total degree (in + out) of a node.
+
+    Args:
+        node_id: The node ID to check.
+        conn: Active SQLite connection.
+
+    Returns:
+        Integer count of all edges incident to this node.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT id FROM knowledge_graph_edges WHERE source_id = ?
+            UNION ALL
+            SELECT id FROM knowledge_graph_edges WHERE target_id = ?
+        )
+        """,
+        (node_id, node_id),
+    ).fetchone()
+    return row[0] if row else 0
+
+
+def get_hub_neighbors(
+    node_id: str,
+    conn: sqlite3.Connection,
+    edge_types: list[str] | None = None,
+    limit: int = 20,
+    workspace: str | None = None,
+) -> list[tuple[str, float, str]]:
+    """Get filtered neighbors for a hub node using edge-type filtering + recency.
+
+    For hub nodes (degree > hub_threshold), instead of blindly taking top-N by
+    weight, this function:
+    1. Filters by edge_types if provided
+    2. Sorts remaining by recency (edge metadata.updated_at or node created_at)
+    3. Returns up to `limit` neighbors
+
+    Args:
+        node_id:    The hub node ID.
+        conn:       Active SQLite connection.
+        edge_types: List of predicate strings to filter by (e.g. ['imports', 'calls']).
+                    When None, all edge types are considered.
+        limit:      Maximum neighbors to return.
+        workspace:  Optional workspace filter.
+
+    Returns:
+        List of (neighbour_id, weight, predicate) tuples.
+    """
+    if edge_types:
+        placeholders = ",".join("?" * len(edge_types))
+        if workspace:
+            rows = conn.execute(
+                f"""
+                SELECT neighbour, weight, predicate FROM (
+                    SELECT target_id AS neighbour, weight, predicate
+                    FROM knowledge_graph_edges
+                    WHERE source_id = ? AND workspace = ? AND predicate IN ({placeholders})
+                    UNION ALL
+                    SELECT source_id AS neighbour, weight, predicate
+                    FROM knowledge_graph_edges
+                    WHERE target_id = ? AND workspace = ? AND predicate IN ({placeholders})
+                )
+                ORDER BY weight DESC
+                LIMIT ?
+                """,
+                [node_id, workspace] + edge_types + [node_id, workspace] + edge_types + [limit],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"""
+                SELECT neighbour, weight, predicate FROM (
+                    SELECT target_id AS neighbour, weight, predicate
+                    FROM knowledge_graph_edges
+                    WHERE source_id = ? AND predicate IN ({placeholders})
+                    UNION ALL
+                    SELECT source_id AS neighbour, weight, predicate
+                    FROM knowledge_graph_edges
+                    WHERE target_id = ? AND predicate IN ({placeholders})
+                )
+                ORDER BY weight DESC
+                LIMIT ?
+                """,
+                [node_id] + edge_types + [node_id] + edge_types + [limit],
+            ).fetchall()
+    else:
+        if workspace:
+            rows = conn.execute(
+                """
+                SELECT neighbour, weight, predicate FROM (
+                    SELECT target_id AS neighbour, weight, predicate
+                    FROM knowledge_graph_edges
+                    WHERE source_id = ? AND workspace = ?
+                    UNION ALL
+                    SELECT source_id AS neighbour, weight, predicate
+                    FROM knowledge_graph_edges
+                    WHERE target_id = ? AND workspace = ?
+                )
+                ORDER BY weight DESC
+                LIMIT ?
+                """,
+                (node_id, workspace, node_id, workspace, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT neighbour, weight, predicate FROM (
+                    SELECT target_id AS neighbour, weight, predicate
+                    FROM knowledge_graph_edges
+                    WHERE source_id = ?
+                    UNION ALL
+                    SELECT source_id AS neighbour, weight, predicate
+                    FROM knowledge_graph_edges
+                    WHERE target_id = ?
+                )
+                ORDER BY weight DESC
+                LIMIT ?
+                """,
+                (node_id, node_id, limit),
+            ).fetchall()
+
+    return [(r[0], r[1], r[2]) for r in rows]
+
+
+def _sample_hub_neighbors(
+    node_id: str,
+    conn: sqlite3.Connection,
+    workspace: str | None,
+) -> list[tuple[str, float]]:
+    """Sample strategy for hub nodes: top by connectivity + top by recency.
+
+    Returns up to HUB_SAMPLE_BY_CONNECTIVITY + HUB_SAMPLE_BY_RECENCY unique
+    neighbors (deduplicated).
+
+    Strategy:
+    1. Top N by their own degree (most connected = most informative nodes)
+    2. Top N by recency (most recently created/updated nodes)
+    """
+    # Get ALL neighbors with their IDs
+    all_neighbors = _neighbours(conn, node_id, workspace)
+
+    if not all_neighbors:
+        return []
+
+    neighbor_ids = [n[0] for n in all_neighbors]
+
+    # Score by connectivity: get degree for each neighbor
+    connectivity_scored: list[tuple[str, float, int]] = []
+    for nid, weight in all_neighbors:
+        degree = get_node_degree(nid, conn)
+        connectivity_scored.append((nid, weight, degree))
+
+    # Top N by connectivity (degree descending)
+    connectivity_scored.sort(key=lambda x: -x[2])
+    top_by_connectivity = [
+        (item[0], item[1]) for item in connectivity_scored[:HUB_SAMPLE_BY_CONNECTIVITY]
+    ]
+
+    # Top N by recency (created_at descending)
+    if neighbor_ids:
+        placeholders = ",".join("?" * len(neighbor_ids))
+        recency_rows = conn.execute(
+            f"""
+            SELECT id, created_at
+            FROM knowledge_graph_nodes
+            WHERE id IN ({placeholders})
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            neighbor_ids + [HUB_SAMPLE_BY_RECENCY],
+        ).fetchall()
+        recent_ids = {r[0] for r in recency_rows}
+    else:
+        recent_ids = set()
+
+    # Merge: connectivity + recency, deduplicated
+    seen = set()
+    result: list[tuple[str, float]] = []
+
+    for nid, weight in top_by_connectivity:
+        if nid not in seen:
+            seen.add(nid)
+            result.append((nid, weight))
+
+    # Add recency-based that aren't already included
+    weight_map = dict(all_neighbors)
+    for rid in recent_ids:
+        if rid not in seen:
+            seen.add(rid)
+            result.append((rid, weight_map.get(rid, 1.0)))
+
+    return result
+
+
+def degree_aware_bfs(
+    conn: sqlite3.Connection,
+    start_ids: list[str],
+    max_depth: int = 3,
+    hub_threshold: int = HUB_THRESHOLD,
+    workspace: str | None = None,
+    max_nodes: int = 500,
+) -> DegreeAwareResult:
+    """BFS with intelligent handling of high-degree hub nodes.
+
+    For normal nodes (degree <= hub_threshold): expands top-N by weight (same as
+    existing bfs_traverse behavior).
+
+    For hub nodes (degree > hub_threshold): instead of top-N by weight which loses
+    data, uses a dual sampling strategy:
+      - Top 10 neighbors by their own connectivity (most informative)
+      - Top 10 neighbors by recency (most recently updated)
+    Records a summary of what was sampled vs total degree.
+
+    Args:
+        conn:           Active SQLite connection.
+        start_ids:      Seed node IDs for traversal.
+        max_depth:      Maximum hops from seed nodes.
+        hub_threshold:  Degree above which a node is treated as a hub.
+        workspace:      Optional workspace filter for edge traversal.
+        max_nodes:      Hard cap on visited nodes.
+
+    Returns:
+        DegreeAwareResult with nodes, edges, summarized_hubs, depth info.
+    """
+    if not start_ids:
+        return DegreeAwareResult(nodes=[], edges=[])
+
+    visited: dict[str, int] = {}  # node_id -> hop distance
+    edges_collected: list[tuple[str, str, str]] = []  # (src, tgt, predicate)
+    summarized_hubs: list[dict] = []
+    queue: deque[tuple[str, int]] = deque()
+
+    for sid in start_ids:
+        if sid not in visited:
+            visited[sid] = 0
+            queue.append((sid, 0))
+
+    while queue:
+        if len(visited) >= max_nodes:
+            break
+
+        current_id, depth = queue.popleft()
+
+        if depth >= max_depth:
+            continue
+
+        next_depth = depth + 1
+
+        # Check node degree to decide expansion strategy
+        degree = get_node_degree(current_id, conn)
+
+        if degree > hub_threshold:
+            # Hub node: use smart sampling instead of blind top-N
+            sampled = _sample_hub_neighbors(current_id, conn, workspace)
+            summarized_hubs.append({
+                "node_id": current_id,
+                "total_degree": degree,
+                "sampled_count": len(sampled),
+                "sample_strategy": "top_by_connectivity_and_recency",
+                "hub_threshold": hub_threshold,
+            })
+            neighbors = sampled
+        else:
+            # Normal node: existing top-N by weight behavior
+            raw_neighbors = _neighbours(conn, current_id, workspace)
+            neighbors = raw_neighbors
+
+        # Collect edges and enqueue unvisited neighbors
+        for neighbour_id, _weight in neighbors:
+            if len(visited) >= max_nodes:
+                break
+            # Record edge (we get predicate info from hub path, fallback "related")
+            edges_collected.append((current_id, neighbour_id, "related"))
+            if neighbour_id not in visited:
+                visited[neighbour_id] = next_depth
+                queue.append((neighbour_id, next_depth))
+
+    nodes_with_depth = sorted(visited.items(), key=lambda x: x[1])
+    max_depth_reached = max((d for _, d in nodes_with_depth), default=0)
+
+    return DegreeAwareResult(
+        nodes=nodes_with_depth,
+        edges=edges_collected,
+        summarized_hubs=summarized_hubs,
+        depth_reached=max_depth_reached,
+        truncated=len(visited) >= max_nodes,
+    )

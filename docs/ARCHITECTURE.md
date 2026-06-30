@@ -6,39 +6,46 @@
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         Claude Code (Host Process)                           │
 │                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────┐        │
+│  │  Hooks Layer (per-tool-call, short-lived)                        │        │
+│  │  src/cap/hooks/pretool.py  ← exit(2) = HARD BLOCK               │        │
+│  │  src/cap/hooks/posttool.py ← sync triggers, state updates       │        │
+│  └─────────────────────────────────────────────────────────────────┘        │
+│                              │ allowed                                       │
+│                              ▼                                               │
 │  ┌───────────┐  ┌───────────┐  ┌───────────┐  ┌───────────┐               │
-│  │ Workflow   │  │ Knowledge │  │ Session   │  │ Fleet     │               │
-│  │ Server    │  │ Server    │  │ Server    │  │ Manager   │               │
-│  │ (MCP)     │  │ (MCP)     │  │ (MCP)     │  │ (MCP)     │               │
+│  │ cap-      │  │ cap-      │  │ cap-      │  │ cap-      │               │
+│  │ orchestr. │  │ memory    │  │ code-     │  │ fleet     │               │
+│  │ (MCP)     │  │ (MCP)     │  │ intel     │  │ (MCP)     │               │
 │  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘  └─────┬─────┘               │
 │        │               │               │               │                    │
 │  ┌─────┴───────────────┴───────────────┴───────────────┴─────┐              │
-│  │                    Shared Library (cap.lib)                 │              │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐ │              │
-│  │  │api_gate  │ │models    │ │embeddings│ │db_maintenance│ │              │
-│  │  │way.py    │ │.py       │ │.py       │ │.py           │ │              │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────────┘ │              │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────────┐ │              │
-│  │  │retrieval │ │inbox     │ │security  │ │config        │ │              │
-│  │  │.py       │ │.py       │ │.py       │ │.py           │ │              │
-│  │  └──────────┘ └──────────┘ └──────────┘ └──────────────┘ │              │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────────────────────┐ │              │
-│  │  │hooks.py  │ │repo_     │ │Other utilities            │ │              │
-│  │  │          │ │resolver  │ │(team_renderer, graph...)  │ │              │
-│  │  └──────────┘ └──────────┘ └──────────────────────────┘ │              │
+│  │                    Module Layer (src/cap/)                  │              │
+│  │  ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐  │              │
+│  │  │orchestration/│ │memory/       │ │enforcement/      │  │              │
+│  │  │ router.py    │ │ scorer.py    │ │ passthrough.py   │  │              │
+│  │  │ context.py   │ │ manager.py   │ └──────────────────┘  │              │
+│  │  │ scratchpad.py│ │ eviction.py  │ ┌──────────────────┐  │              │
+│  │  └──────────────┘ │ consolidation│ │learning/         │  │              │
+│  │  ┌──────────────┐ └──────────────┘ │ engine.py        │  │              │
+│  │  │cost/         │ ┌──────────────┐ └──────────────────┘  │              │
+│  │  │ tracker.py   │ │runtime/      │ ┌──────────────────┐  │              │
+│  │  └──────────────┘ │ offline.py   │ │integrity/        │  │              │
+│  │  ┌──────────────┐ └──────────────┘ │ witness.py       │  │              │
+│  │  │db.py (WAL)   │                  └──────────────────┘  │              │
+│  │  └──────────────┘                                         │              │
 │  └───────────────────────────────────────────────────────────┘              │
 │                                                                             │
 │  ┌─────────────────────────────────────────────────────────────┐            │
 │  │                      Data Layer                              │            │
-│  │  ┌────────────┐  ┌────────────┐  ┌────────────┐            │            │
-│  │  │platform.db │  │knowledge.db│  │sessions.db │            │            │
-│  │  │(Workflow   │  │(Knowledge  │  │(Session    │            │            │
-│  │  │ Server)    │  │ Server)    │  │ Server)    │            │            │
-│  │  └────────────┘  └────────────┘  └────────────┘            │            │
-│  │  ┌────────────────────────┐  ┌──────────────────┐          │            │
-│  │  │knowledge_vectors/      │  │inbox/             │          │            │
-│  │  │(LanceDB - Knowledge)   │  │*.jsonl (cross-DB) │          │            │
-│  │  └────────────────────────┘  └──────────────────┘          │            │
+│  │  ┌──────────────────────────────────────────────────┐       │            │
+│  │  │  ~/.cap/cap.db (unified SQLite, WAL mode)        │       │            │
+│  │  │  - memory (working/active/archive + FTS5)        │       │            │
+│  │  │  - enforcement_state (violations, passthrough)   │       │            │
+│  │  │  - routing_decisions (self-learning)             │       │            │
+│  │  │  - sessions                                      │       │            │
+│  │  │  - cost_tracking                                 │       │            │
+│  │  └──────────────────────────────────────────────────┘       │            │
 │  └─────────────────────────────────────────────────────────────┘            │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
@@ -87,17 +94,19 @@ pie title Agent Model Distribution
     "Haiku (2)" : 2
 ```
 
-### Writer Ownership (one writer per DB, enforced by PID lockfile)
+### Unified Database (see ADR-012)
 
-| Database | Owner (Writer) | Readers |
-|----------|---------------|---------|
-| `platform.db` | Workflow Server | All servers (read-only) |
-| `knowledge.db` | Knowledge Server | All servers (read-only) |
-| `sessions.db` | Session Server | All servers (read-only) |
-| `fleet.db` | Fleet Manager | All servers (read-only) |
-| `knowledge_vectors/` | Knowledge Server | All servers (read-only) |
+All state is consolidated into a single SQLite database at `~/.cap/cap.db` with WAL mode for concurrent reads:
 
-Cross-server communication uses the **inbox pattern**: a server needing to write to another's DB drops a `.jsonl` message in `~/.claude-platform/inbox/<target>/`, which the owning server polls and processes.
+| Table Group | Purpose | Accessed By |
+|-------------|---------|-------------|
+| `memory_*` | 3-tier memory (working/active/archive + FTS5) | Memory MCP, Hooks |
+| `enforcement_*` | Violations, passthrough, agent contexts | PreToolUse Hook |
+| `routing_decisions` | Self-learning complexity routing | Orchestrator MCP |
+| `sessions` | Session lifecycle tracking | All servers |
+| `cost_*` | Token usage and budget tracking | Cost Tracker |
+
+WAL mode enables concurrent reads from hooks and MCP servers without contention. Single-writer semantics are enforced at the application level — only one MCP server writes to a given table group.
 
 ---
 
@@ -1466,15 +1475,20 @@ cap status
 
 3. Copies config.toml from package default
 
-4. Installs 14 agent definitions to ~/.claude/agents/
+4. Installs 21 agent definitions to ~/.claude/agents/
 
 5. Installs 10 workflow scripts to ~/.claude/workflows/
 
-6. Registers 4 MCP servers:
-   - cap-platform      (workflow orchestration)
-   - cap-knowledge     (hybrid search)
-   - cap-session       (session memory)
-   - cap-fleet         (server health)
+6. Registers 9 MCP servers:
+   - cap-orchestrator  (complexity routing, delegation)
+   - cap-workflow      (workflow engine, budget tracking)
+   - cap-knowledge     (hybrid search, embeddings, graph)
+   - cap-session       (session memory, learnings)
+   - cap-fleet         (server health monitoring)
+   - cap-backlog       (task queue, decisions, conflicts, autonomy)
+   - cap-code-intel    (code intelligence, blast radius)
+   - cap-ast           (AST search via ast-grep)
+   - cap-diagram       (diagram rendering)
 
 7. Backs up existing ~/.claude.json and ~/.claude/settings.json before MCP registration
 
@@ -1483,38 +1497,55 @@ cap status
 
 ### MCP Server Registration (`~/.claude.json`)
 
-After `cap init`, Claude Code's `~/.claude.json` has 4 new MCP server entries added:
+After `cap init`, Claude Code's `~/.claude.json` has 9 CAP MCP server entries added:
 
 ```json
 {
     "mcpServers": {
-        "cap-platform": {
+        "cap-orchestrator": {
             "command": "uv",
-            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-workflow-server"],
-            "env": {
-                "CAP_HOME": "~/.claude-platform"
-            }
+            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-orchestrator"],
+            "env": { "CAP_HOME": "~/.claude-platform" }
+        },
+        "cap-workflow": {
+            "command": "uv",
+            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-workflow"],
+            "env": { "CAP_HOME": "~/.claude-platform" }
         },
         "cap-knowledge": {
             "command": "uv",
-            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-knowledge-server"],
-            "env": {
-                "CAP_HOME": "~/.claude-platform"
-            }
+            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-knowledge"],
+            "env": { "CAP_HOME": "~/.claude-platform" }
         },
         "cap-session": {
             "command": "uv",
-            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-session-server"],
-            "env": {
-                "CAP_HOME": "~/.claude-platform"
-            }
+            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-session"],
+            "env": { "CAP_HOME": "~/.claude-platform" }
         },
         "cap-fleet": {
             "command": "uv",
-            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-fleet-server"],
-            "env": {
-                "CAP_HOME": "~/.claude-platform"
-            }
+            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-fleet"],
+            "env": { "CAP_HOME": "~/.claude-platform" }
+        },
+        "cap-backlog": {
+            "command": "uv",
+            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-backlog"],
+            "env": { "CAP_HOME": "~/.claude-platform" }
+        },
+        "cap-code-intel": {
+            "command": "uv",
+            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-code-intel"],
+            "env": { "CAP_HOME": "~/.claude-platform" }
+        },
+        "cap-ast": {
+            "command": "uv",
+            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-ast"],
+            "env": { "CAP_HOME": "~/.claude-platform" }
+        },
+        "cap-diagram": {
+            "command": "uv",
+            "args": ["tool", "run", "--from", "claude-agent-platform", "cap-diagram"],
+            "env": { "CAP_HOME": "~/.claude-platform" }
         }
     }
 }
@@ -1528,7 +1559,7 @@ The servers run in isolated `uv` environments and are auto-discovered by Claude 
 
 ```toml
 [platform]
-version = "0.5.0"
+version = "1.0.0"
 log_level = "INFO"                         # DEBUG|INFO|WARNING|ERROR
 
 [bedrock]
@@ -1643,83 +1674,134 @@ pid_lockfile_enabled = true
 
 ## 14. Project File Structure
 
+### Runtime Data (`~/.cap/`)
+
 ```
-~/.claude-platform/
+~/.cap/
+├── cap.db                                 # Unified SQLite database (WAL mode, 0600)
+├── cap.db-wal                             # WAL file
+├── cap.db-shm                             # Shared memory for WAL
 ├── config.toml                            # All tunable configuration
-├── data/
-│   ├── platform.db                        # Workflow + fleet + budget (0600)
-│   ├── platform.db-wal                    # WAL file
-│   ├── knowledge.db                       # Knowledge entries + FTS + graph (0600)
-│   ├── knowledge.db-wal
-│   ├── sessions.db                        # Session memory (0600)
-│   ├── sessions.db-wal
-│   ├── knowledge_vectors/                 # LanceDB vector store
-│   │   └── knowledge_vectors.lance/       # Lance dataset files
-│   └── backups/                           # Timestamped DB backups
-│       ├── platform.db.20240115_020000.bak
-│       ├── knowledge.db.20240115_020000.bak
-│       └── sessions.db.20240115_020000.bak
-├── inbox/                                 # Cross-server message passing
-│   ├── workflow/                           # Messages TO workflow server
-│   ├── knowledge/                         # Messages TO knowledge server
-│   ├── session/                           # Messages TO session server
-│   └── fleet/                             # Messages TO fleet manager
-├── logs/
-│   ├── workflow.log
-│   ├── knowledge.log
-│   ├── session.log
-│   ├── fleet.log
-│   └── maintenance.log
-└── locks/                                 # PID lockfiles
-    ├── platform.db.lock
-    ├── knowledge.db.lock
-    └── sessions.db.lock
+├── backups/                               # Timestamped DB backups
+│   └── cap.db.20260630_020000.bak
+└── logs/
+    ├── orchestrator.log
+    ├── memory.log
+    ├── code-intel.log
+    └── hooks.log
 ```
 
-**Note:** The CAP source code is not stored in `~/.claude-platform/`. It lives in `uv`'s tool cache:
+### Source Code (`src/cap/`)
 
 ```
-~/.local/share/uv/tools/claude-agent-platform/
-├── bin/
-│   ├── cap                                # CLI entry point
-│   └── cap-*-server                       # MCP server scripts
-└── lib/python3.*/site-packages/
-    └── cap/                               # Installed package
-    │       ├── servers/
-    │       │   ├── __init__.py
-    │       │   ├── workflow_server.py     # MCP server (BUILT)
-    │       │   ├── knowledge_server.py    # MCP server
-    │       │   ├── session_server.py      # MCP server
-    │       │   └── fleet_server.py        # MCP server
-    │       ├── lib/
-    │       │   ├── __init__.py
-    │       │   ├── models.py              # Shared data models (BUILT)
-    │       │   ├── api_gateway.py         # Rate limiting, concurrency (BUILT)
-    │       │   ├── embeddings.py          # Bedrock Titan V2 client
-    │       │   ├── retrieval.py           # Hybrid search + RRF
-    │       │   ├── db_init.py             # Database initialization
-    │       │   ├── db_maintenance.py      # WAL, vacuum, prune, doctor
-    │       │   ├── inbox.py               # Cross-server messaging
-    │       │   ├── security.py            # Sanitization, permissions
-    │       │   ├── config.py              # Config loader
-    │       │   ├── sync.py                # Incremental sync engine
-    │       │   ├── graph.py               # Graph traversal queries
-    │       │   └── business_knowledge.py  # Auto-extraction pipeline
-    │       └── install.py                 # Installation helpers
-    └── tests/
-        ├── __init__.py
-        ├── conftest.py                    # Shared fixtures
-        ├── test_gateway.py                # API gateway tests (BUILT, 8 passing)
-        ├── test_knowledge_server.py
-        ├── test_session_server.py
-        ├── test_fleet_server.py
-        ├── test_retrieval.py
-        ├── test_embeddings.py
-        ├── test_db_maintenance.py
-        ├── test_sync.py
-        ├── test_graph.py
-        ├── test_security.py
-        └── test_inbox.py
+src/cap/
+├── __init__.py
+├── __main__.py                            # Package entry point
+├── db.py                                  # Unified SQLite connection, WAL mode, migrations
+├── config.py                              # Configuration loading
+├── hooks/                                 # Claude Code hook scripts (short-lived)
+│   ├── __init__.py
+│   ├── pretool.py                         # PreToolUse: exit(2) = HARD BLOCK
+│   └── posttool.py                        # PostToolUse: sync triggers, state updates
+├── enforcement/                           # Enforcement bypass and state
+│   ├── __init__.py
+│   └── passthrough.py                     # Temporary bypass, logged + auto-expires
+├── memory/                                # 3-tier memory system
+│   ├── __init__.py
+│   ├── scorer.py                          # 4-weight composite scoring algorithm
+│   ├── manager.py                         # Store/recall/search memory entries
+│   ├── eviction.py                        # Background eviction daemon
+│   └── consolidation.py                   # Cross-session dedup and merging
+├── orchestration/                         # Complexity routing and delegation
+│   ├── __init__.py
+│   ├── router.py                          # 3-tier adaptive routing (INLINE/LIGHTWEIGHT/FULL)
+│   ├── context.py                         # Inter-agent context passing protocol
+│   └── scratchpad.py                      # Inter-agent artifact sharing
+├── learning/                              # Self-improvement engine
+│   ├── __init__.py
+│   └── engine.py                          # Record outcomes, adapt thresholds
+├── cost/                                  # Budget enforcement
+│   ├── __init__.py
+│   └── tracker.py                         # Token usage, estimates, budget checks
+├── runtime/                               # Environment detection
+│   ├── __init__.py
+│   └── offline.py                         # Network/budget state, mode switching
+├── integrity/                             # Audit and verification
+│   ├── __init__.py
+│   └── witness.py                         # Cryptographic audit trail
+├── servers/                               # MCP server entry points
+│   ├── __init__.py
+│   ├── orchestrator_server.py             # Orchestration MCP server
+│   ├── workflow_server.py                 # Workflow engine MCP server
+│   ├── knowledge_server.py               # Knowledge & retrieval MCP server
+│   ├── session_server.py                 # Session memory MCP server
+│   ├── fleet_server.py                   # Fleet management MCP server
+│   ├── backlog_server.py                 # Backlog & governance MCP server
+│   ├── code_intel_server.py              # Code intelligence MCP server
+│   ├── ast_server.py                     # AST search via ast-grep MCP server
+│   └── diagram_server.py                 # Diagram rendering MCP server
+├── code_intel/                            # Code intelligence modules
+│   ├── __init__.py
+│   ├── blast_radius.py                   # Dependency-based blast radius analysis
+│   ├── extractor.py                      # Code symbol extraction
+│   ├── indexer.py                        # Code indexing
+│   └── queries.py                        # Code intelligence queries
+├── sync/                                  # Knowledge sync engine
+│   ├── __init__.py
+│   ├── engine.py                         # Incremental sync orchestration
+│   └── git_ops.py                        # Git-based change detection
+├── eval/                                  # Quality evaluation framework
+│   ├── __init__.py
+│   ├── cli.py                            # cap eval CLI commands
+│   ├── framework.py                      # Eval suite runner
+│   └── suites/                           # Individual evaluation suites
+├── health/                                # Agent health monitoring
+│   ├── __init__.py
+│   └── monitor.py                        # Health state inference
+├── reliability/                           # Resilience patterns
+│   ├── __init__.py
+│   ├── circuit_breaker.py                # Per-agent circuit breakers (ADR-015)
+│   ├── cascade.py                        # Cascade failure prevention
+│   └── dlq.py                            # Dead-letter queue for failed tasks
+├── lib/                                   # Shared library modules
+│   ├── __init__.py
+│   ├── api_gateway.py                    # API rate limiting and concurrency
+│   ├── autonomy.py                       # Progressive autonomy engine
+│   ├── backlog.py                        # Task backlog operations
+│   ├── blast_radius.py                   # Blast radius assessment
+│   ├── config.py                         # Config model and loader
+│   ├── dashboard.py                      # Real-time TUI dashboard
+│   ├── db_init.py                        # Database initialization
+│   ├── db_maintenance.py                 # DB maintenance (checkpoint, vacuum, doctor)
+│   ├── decision_cards.py                 # Structured decision cards
+│   ├── disagreement.py                   # Conflict resolution protocol
+│   ├── drift_sentinel.py                 # Terraform drift detection
+│   ├── embeddings.py                     # Bedrock Titan V2 embedding client
+│   ├── git_knowledge.py                  # Git blame + PR ingestion
+│   ├── graph.py                          # Knowledge graph operations
+│   ├── hooks.py                          # Workflow lifecycle hooks
+│   ├── inbox.py                          # Cross-server messaging (JSONL inbox)
+│   ├── models.py                         # Shared Pydantic models
+│   ├── reasoning_traces.py              # Audit trail for agent actions
+│   ├── repo_extractor.py                # Repo-level knowledge extraction
+│   ├── repo_resolver.py                 # GitHub auto-resolution
+│   ├── retrieval.py                      # Hybrid retrieval (RRF merger)
+│   ├── security.py                       # Input sanitization
+│   ├── sync_engine.py                    # File-level sync operations
+│   ├── team_renderer.py                  # Team conversation rendering
+│   ├── workflow_hooks.py                 # Workflow lifecycle hooks
+│   └── workflow_observer.py              # Workflow event polling
+├── cli/                                   # CLI application
+│   ├── __init__.py
+│   ├── main.py                            # cap root commands and groups
+│   ├── commands.py                        # health, dlq, resume, orch-status
+│   ├── daemon.py                          # Workflow daemon (auto-watch)
+│   ├── lifecycle.py                       # cap init, uninstall, backup, restore
+│   ├── watch.py                           # Workflow watch utilities
+│   └── witness.py                         # cap witness commands
+└── data/                                  # Bundled assets (installed by cap init)
+    ├── agents/                            # 21 specialist agent definitions (.md)
+    └── config.toml.default
 ```
 
 ---
@@ -2283,7 +2365,123 @@ Agents are selected according to this hierarchy:
 
 ---
 
-## 21. Key Architecture Decisions (ADRs)
+## 21. Orchestration Layer (Week 2)
+
+### 21.1 DAG-Based Task Execution (ADR-013)
+
+Workflows decompose into dependency DAGs rather than linear sequences. Agents execute in parallel where dependency edges allow.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Workflow DAG Example                         │
+│                                                                  │
+│     ┌──────────┐                                                │
+│     │  Plan    │                                                │
+│     └────┬─────┘                                                │
+│          │                                                       │
+│    ┌─────┼──────────┬──────────┐                                │
+│    ▼     ▼          ▼          ▼                                │
+│ ┌──────┐ ┌────────┐ ┌────────┐ ┌──────┐    ← Wave 1 (parallel) │
+│ │Secur.│ │Infra   │ │CI/CD   │ │Docs  │                        │
+│ └──┬───┘ └───┬────┘ └───┬────┘ └──────┘                        │
+│    │         │           │                                       │
+│    └─────────┼───────────┘                                       │
+│              ▼                                                    │
+│        ┌──────────┐                         ← Wave 2 (depends   │
+│        │  Deploy  │                            on Infra + CI/CD) │
+│        └────┬─────┘                                              │
+│             ▼                                                    │
+│        ┌──────────┐                         ← Wave 3 (depends   │
+│        │  Review  │                            on all above)     │
+│        └──────────┘                                              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key properties:**
+- Frontier computation identifies all nodes with satisfied dependencies
+- Concurrency-aware scheduling respects slot weights (opus=3, sonnet=1, haiku=0.5)
+- Partial failures block only downstream dependents; independent branches continue
+- Dynamic re-planning can append nodes mid-execution (append-only)
+
+### 21.2 Consensus Protocol (ADR-014)
+
+Agent disagreements are resolved through domain-weighted authority scoring:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Conflict Resolution Flow                    │
+│                                                              │
+│  Agent A ──┐                                                │
+│            ├─→ Classify Domain ─→ Lookup Authority Matrix    │
+│  Agent B ──┘                              │                  │
+│                                           ▼                  │
+│                              ┌─────────────────────────┐     │
+│                              │ Gap >= 0.3?             │     │
+│                              └─────────┬───────────────┘     │
+│                                 yes/        \no              │
+│                                ▼              ▼              │
+│                    ┌────────────────┐  ┌──────────────────┐  │
+│                    │ Auto-resolve   │  │ Business impact? │  │
+│                    │ (higher wins)  │  └────────┬─────────┘  │
+│                    └────────────────┘    no/        \yes     │
+│                                        ▼              ▼     │
+│                           ┌────────────────┐  ┌───────────┐ │
+│                           │ Judge (Opus)   │  │ PO Escal. │ │
+│                           │ arbitration    │  │           │ │
+│                           └────────────────┘  └───────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Resolution tiers:**
+1. **Automatic** (gap >= 0.3): Higher authority wins. ~80% of conflicts.
+2. **Judge** (gap < 0.3, not business-impacting): Opus judge with both arguments.
+3. **PO Escalation** (business-impacting or judge indeterminate): Surfaces to user.
+
+### 21.3 Circuit Breakers (ADR-015)
+
+Per-agent-type circuit breakers prevent cascade failures using the half-open pattern:
+
+```
+         ┌───────────────────────────────────────────────┐
+         │                                               │
+         ▼                                               │
+    ┌──────────┐    N failures    ┌──────────┐          │
+    │  CLOSED  │ ───────────────→ │   OPEN   │          │
+    │ (normal) │                  │ (reject  │          │
+    └──────────┘                  │  all)    │          │
+         ▲                        └────┬─────┘          │
+         │                             │                │
+         │ probe succeeds         recovery timeout      │
+         │                             │                │
+    ┌────┴───────┐                     ▼                │
+    │ close      │◄────────── ┌─────────────┐           │
+    └────────────┘  success   │ HALF-OPEN   │──────────┘
+                              │ (1 probe)   │  probe fails
+                              └─────────────┘
+```
+
+**Configuration:** `failure_threshold=3`, `recovery_timeout=60s`, exponential backoff on repeated failures. Breaker state is per `(agent_type, model_tier)` pair. Model-tier fallback (opus -> sonnet) attempted before marking nodes as `circuit_broken`.
+
+### 21.4 Checkpoint-Resume (ADR-016)
+
+Workflow state is persisted at two mandatory points:
+
+| Checkpoint | When | What is Captured |
+|------------|------|------------------|
+| Plan | After DAG construction, before execution | DAG structure, node specs, budget |
+| Agent | After each successful agent completion | DAG state, all outputs, budget remaining, breaker states |
+
+**Resume protocol:**
+1. Load latest checkpoint for workflow
+2. Mark completed nodes (skip re-execution, use stored outputs)
+3. Recompute frontier from DAG state
+4. Continue execution from frontier
+
+This ensures zero wasted tokens on workflow interruption. Typical resume overhead: ~5ms (SQLite read + DAG reconstruction).
+
+---
+
+## 22. Key Architecture Decisions (ADRs)
 
 | Decision | Rationale | Alternatives Rejected |
 |----------|-----------|----------------------|
@@ -2297,6 +2495,14 @@ Agents are selected according to this hierarchy:
 | Click + Rich for CLI | Mature, auto-help, composable, beautiful output | argparse (ugly), Typer (less mature), Fire (too magic) |
 | SSH-only clones | Security best practice, no credentials in URLs | HTTPS (credentials risk), git:// (insecure) |
 | Strict repo_name regex | Prevents path traversal, injection attacks | Permissive parsing (security risk) |
+| ast-grep/tree-sitter for code graph (ADR-017) | Accurate AST-based extraction, metavariable queries, partial-parse tolerance | Regex (fragile), LSP (heavy), raw tree-sitter (no query DSL) |
+| HCL excluded from AST until grammar v1.0 (ADR-017) | Avoids 30% extraction failures on complex HCL | Including HCL (unstable grammar causes crashes) |
+| 5 automatic sync triggers (ADR-018) | Zero manual maintenance, freshness within TTL, non-blocking | Manual-only (stale), file-watch (resource-intensive), sync-on-every-search (latency) |
+| Two-phase BFS for hub nodes (ADR-019) | No lost paths, bounded latency, context-aware expansion | Top-N truncation (loses paths), uniform BFS (hub explosion), random walk (non-deterministic) |
+| DAG-based task decomposition (ADR-013) | 2-3x speedup via parallelism, fine-grained failure isolation | Linear execution (slow), static phases (rigid), actor model (no global view) |
+| Domain-weighted consensus (ADR-014) | 80% auto-resolve, domain expertise respected, deadlock-free | Always-escalate (PO bottleneck), majority vote (expensive), strict hierarchy (domain-inappropriate) |
+| Per-agent-type circuit breakers (ADR-015) | Zero-cost failure rejection, cascade prevention, automatic recovery | Unlimited retries (budget waste), global breaker (over-conservative), kill workflow (over-aggressive) |
+| Checkpoint-resume persistence (ADR-016) | Zero wasted work, crash-safe, budget-efficient | No persistence (restart from scratch), event sourcing (non-deterministic replay), external engine (wrong scale) |
 
 ---
 

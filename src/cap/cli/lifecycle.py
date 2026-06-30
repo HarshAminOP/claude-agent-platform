@@ -14,13 +14,28 @@ After install:
 Before removal:
     cap uninstall         # deregisters MCP servers, removes ~/.claude-platform, restores configs
     cap uninstall --keep-data   # removes config but keeps databases
+
+Cold Start Flow (from CAP System Design v1 Section 10):
+    Phase 0 (0s):   Create directories
+    Phase 1 (0-2s): Create cap.db, migrate, write default config.toml
+    Phase 2 (2-3s): Generate hook scripts, update settings.json with hook entries
+    Phase 3 (3-5s): Quick-index current workspace (README, package.json, etc.)
+    Phase 4 (5-10s): Register MCP servers in settings.json
+    Phase 5 (bg):   Queue full AST index for next session_start
+    Phase 6:        Health check (DB, hooks syntax, MCP configs)
+    Phase 7:        Print success summary with next steps
 """
 
+import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from importlib.resources import files as pkg_files
 from pathlib import Path
@@ -193,9 +208,27 @@ def _get_claude_md_content() -> str:
 _CLAUDE_MD_FALLBACK = """\
 # Claude Code — Global Instructions
 
+<!-- STOP. READ THIS FIRST. DO NOT SKIP. -->
+
+## HARD RULE: DELEGATE, DO NOT IMPLEMENT
+
+**If YOUR response (the outer session) would contain more than 20 lines of code, STOP. You are doing it wrong.**
+
+This rule applies to the outer Claude session only. Subagents spawned by the orchestrator ARE allowed to write unlimited code — that is their job.
+
+You are a delegation layer. Your ONLY job is to call:
+```
+Agent({ subagent_type: "orchestrator", description: "...", prompt: "..." })
+```
+The orchestrator has a full engineering team. YOU do not write code.
+
+---
+
 ## MANDATORY BEHAVIOR — READ BEFORE ANYTHING ELSE
 
-1. **You MUST use the Agent tool with `subagent_type` for any non-trivial task.** Without `subagent_type`, you get a generic agent. Valid values: `dev`, `devops`, `security`, `sre`, `orchestrator`, `code-review`, `Explore`, `test`, `docs`, `optimization`, `cicd`, `aws-architect`.
+1. **ALL non-trivial tasks go to the orchestrator agent.** Delegate immediately:
+   `Agent({ subagent_type: "orchestrator", prompt: "<task description>" })`
+   Only exception: pure search → `Agent({ subagent_type: "Explore", prompt: "..." })`
 
 2. **You MUST call session_record after every significant action.** Load via ToolSearch first:
    ```
@@ -216,20 +249,26 @@ _CLAUDE_MD_FALLBACK = """\
 
 **These rules are AUTOMATIC. Apply the correct orchestration pattern on EVERY task.**
 
-### Agent Routing (use this EVERY time)
+### Default Routing
 
-| Work type | Exact tool call |
-|-----------|----------------|
-| Writing/changing code | `Agent({ subagent_type: "dev", prompt: "..." })` |
-| Infrastructure/Terraform/K8s | `Agent({ subagent_type: "devops", prompt: "..." })` |
-| Security review/IAM | `Agent({ subagent_type: "security", prompt: "..." })` |
-| Monitoring/alerting/SLOs | `Agent({ subagent_type: "sre", prompt: "..." })` |
-| Multiple concerns | `Agent({ subagent_type: "orchestrator", prompt: "..." })` |
-| Code review | `Agent({ subagent_type: "code-review", prompt: "..." })` |
-| Research across repos | `Agent({ subagent_type: "Explore", prompt: "..." })` |
-| Simple question | Answer directly (no agent needed) |
+**Every non-trivial task → orchestrator.** No exceptions, no routing decisions.
 
-**CRITICAL: Always pass `subagent_type`.** The agents in `~/.claude/agents/` have specialized system prompts and domain expertise.
+```
+Agent({
+  subagent_type: "orchestrator",
+  description: "Short task summary",
+  prompt: "Full task description. Include file paths, context, acceptance criteria."
+})
+```
+
+The orchestrator will internally spawn: dev, devops, security, sre, code-review, test, optimization, docs, cicd, or aws-architect agents as needed.
+
+**You do NOT need to figure out which specialist to use.** That's the orchestrator's job.
+
+Only bypass the orchestrator for:
+- Trivial 1-line fixes (do inline)
+- Quick lookups / status checks (do inline)
+- Pure code search (`Agent({ subagent_type: "Explore", prompt: "..." })`)
 
 NEVER write more than 20 lines of code yourself. Delegate.
 
@@ -391,6 +430,21 @@ _CAP_MCP_PERMISSIONS = [
     "mcp__cap-ast__ast_search",
     "mcp__cap-ast__ast_match",
     "mcp__cap-ast__ast_refactor",
+    # Code Intelligence server tools
+    "mcp__cap-code-intel__code_structure",
+    "mcp__cap-code-intel__code_dependents",
+    "mcp__cap-code-intel__code_trace",
+    "mcp__cap-code-intel__blast_radius",
+    "mcp__cap-code-intel__code_search",
+    "mcp__cap-code-intel__reindex",
+    # Orchestrator server tools
+    "mcp__cap-orchestrator__cap_route",
+    "mcp__cap-orchestrator__cap_plan",
+    "mcp__cap-orchestrator__cap_execute",
+    "mcp__cap-orchestrator__cap_resume",
+    "mcp__cap-orchestrator__cap_status",
+    "mcp__cap-orchestrator__cap_dlq_list",
+    "mcp__cap-orchestrator__cap_health",
 ]
 
 
@@ -423,6 +477,80 @@ def _install_settings_permissions() -> bool:
     return True
 
 
+def _build_hooks_config() -> dict:
+    """Build the hooks configuration dict dynamically using the current Python path.
+
+    Hook scripts are generated at ~/.claude/pretool.py and ~/.claude/posttool.py.
+    This function builds hook entries that invoke those scripts with the correct
+    Python interpreter path, ensuring they work regardless of how Claude Code
+    was installed (uv, pipx, system python, etc.).
+    """
+    # Use python3 (not sys.executable) for portability — hooks run in user shell
+    # where python3 resolves via PATH. sys.executable may point to a venv-specific
+    # binary that doesn't exist after uv tool install.
+    python_cmd = "python3"
+    pretool_script = "~/.claude/pretool.py"
+    posttool_script = "~/.claude/posttool.py"
+
+    # PreToolUse: enforcement reminder + record tool start
+    pre_tool_matchers = ["Edit", "Write", "NotebookEdit"]
+    pre_tool_entries = []
+    for matcher in pre_tool_matchers:
+        pre_tool_entries.append({
+            "matcher": matcher,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": (
+                        f'{python_cmd} {pretool_script} '
+                        '<<< \'{"tool_name": "' + matcher + '"}\' 2>/dev/null; '
+                        'echo \'REMINDER: If writing >20 lines of code, '
+                        'STOP and delegate to Agent({ subagent_type: "orchestrator" }). '
+                        "Only 1-line fixes are allowed inline.'"
+                    ),
+                }
+            ],
+        })
+
+    # PostToolUse: record tool completion for health tracking
+    post_tool_matchers = ["Agent", "Bash", "Edit", "Write"]
+    post_tool_entries = []
+    for matcher in post_tool_matchers:
+        post_tool_entries.append({
+            "matcher": matcher,
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": (
+                        f'{python_cmd} {posttool_script} '
+                        '<<< \'{"tool_name": "' + matcher + '", "success": true}\' 2>/dev/null'
+                    ),
+                }
+            ],
+        })
+
+    return {
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": (
+                            "mkdir -p ~/.claude-platform/data && "
+                            'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) session_active workspace=$(pwd)" '
+                            ">> ~/.claude-platform/data/session_activity.log"
+                        ),
+                    }
+                ],
+            }
+        ],
+        "PreToolUse": pre_tool_entries,
+        "PostToolUse": post_tool_entries,
+    }
+
+
+# Legacy static config (kept for backward compat with tests that import it)
 _CAP_HOOKS = {
     "Stop": [
         {
@@ -438,6 +566,34 @@ _CAP_HOOKS = {
                 }
             ],
         }
+    ],
+    "PreToolUse": [
+        {
+            "matcher": "Edit",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": (
+                        'echo \'REMINDER: If you are writing more than 20 lines of code, '
+                        "STOP and delegate to Agent({ subagent_type: \"orchestrator\" }) "
+                        "instead. Only 1-line fixes are allowed inline.'"
+                    ),
+                }
+            ],
+        },
+        {
+            "matcher": "Write",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": (
+                        'echo \'REMINDER: If you are creating implementation files, '
+                        "STOP and delegate to Agent({ subagent_type: \"orchestrator\" }) "
+                        "instead. Only trivial files are allowed inline.'"
+                    ),
+                }
+            ],
+        },
     ],
     "PostToolUse": [
         {
@@ -458,7 +614,11 @@ _CAP_HOOKS = {
 
 
 def _install_hooks() -> bool:
-    """Add CAP hooks to settings.json. Returns True if modified."""
+    """Add CAP hooks to settings.json. Returns True if modified.
+
+    Uses _build_hooks_config() for the dynamic config (correct Python path
+    and script locations). Falls back gracefully if scripts don't exist yet.
+    """
     settings_path = _settings_json_path()
 
     if settings_path.exists():
@@ -470,29 +630,165 @@ def _install_hooks() -> bool:
         _claude_dir().mkdir(parents=True, exist_ok=True)
         settings = {}
 
+    # Use dynamic hook config that references the correct Python interpreter
+    cap_hooks = _build_hooks_config()
+
     hooks = settings.setdefault("hooks", {})
     modified = False
 
-    for event, hook_list in _CAP_HOOKS.items():
+    for event, hook_list in cap_hooks.items():
         if event not in hooks:
             hooks[event] = hook_list
             modified = True
         else:
-            # Check if our hooks are already present (by command content)
-            existing_commands = {
-                h.get("command", "") for entry in hooks[event] for h in entry.get("hooks", [])
+            # Check if our hooks are already present (by matcher)
+            existing_matchers = {
+                entry.get("matcher", "") for entry in hooks[event]
             }
             for hook_entry in hook_list:
-                for h in hook_entry.get("hooks", []):
-                    if h.get("command", "") not in existing_commands:
-                        hooks[event].append(hook_entry)
-                        modified = True
-                        break
+                matcher = hook_entry.get("matcher", "")
+                if matcher not in existing_matchers:
+                    hooks[event].append(hook_entry)
+                    modified = True
 
     if not modified:
         return False
 
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    return True
+
+
+def _generate_hook_scripts(claude_dir: Path, data_dir: Path) -> bool:
+    """Generate pretool.py and posttool.py hook scripts in .claude/ directory.
+
+    These scripts are invoked by Claude Code hooks to record tool usage
+    into the CAP database for health monitoring and session tracking.
+
+    Returns True if scripts were generated.
+    """
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    pretool_path = claude_dir / "pretool.py"
+    posttool_path = claude_dir / "posttool.py"
+
+    if pretool_path.exists() and posttool_path.exists():
+        return False
+
+    db_path = str(data_dir / "platform.db")
+
+    pretool_content = f'''#!/usr/bin/env python3
+"""CAP PreToolUse hook — records tool invocation start.
+
+Generated by `cap init`. DB path: {db_path}
+"""
+import json
+import os
+import sqlite3
+import sys
+import time
+
+DB_PATH = os.environ.get("CAP_ORCHESTRATOR_DB", "{db_path}")
+
+
+def main():
+    """Read hook input from stdin and record tool start event."""
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            return
+        data = json.loads(raw)
+        tool_name = data.get("tool_name", "unknown")
+        session_id = data.get("session_id", os.environ.get("CLAUDE_SESSION_ID", "unknown"))
+
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir:
+            os.makedirs(db_dir, mode=0o700, exist_ok=True)
+
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS tool_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                tool_name TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                metadata TEXT
+            )"""
+        )
+        conn.execute(
+            "INSERT INTO tool_events (session_id, tool_name, event_type, timestamp, metadata) VALUES (?, ?, ?, ?, ?)",
+            (session_id, tool_name, "start", time.time(), json.dumps(data.get("metadata", {{}}))),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Hooks must not break the main flow
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+    posttool_content = f'''#!/usr/bin/env python3
+"""CAP PostToolUse hook — records tool invocation completion.
+
+Generated by `cap init`. DB path: {db_path}
+"""
+import json
+import os
+import sqlite3
+import sys
+import time
+
+DB_PATH = os.environ.get("CAP_ORCHESTRATOR_DB", "{db_path}")
+
+
+def main():
+    """Read hook input from stdin and record tool completion event."""
+    try:
+        raw = sys.stdin.read()
+        if not raw.strip():
+            return
+        data = json.loads(raw)
+        tool_name = data.get("tool_name", "unknown")
+        session_id = data.get("session_id", os.environ.get("CLAUDE_SESSION_ID", "unknown"))
+        success = data.get("success", True)
+
+        db_dir = os.path.dirname(DB_PATH)
+        if db_dir:
+            os.makedirs(db_dir, mode=0o700, exist_ok=True)
+
+        conn = sqlite3.connect(DB_PATH, timeout=5)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS tool_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT,
+                tool_name TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                timestamp REAL NOT NULL,
+                metadata TEXT
+            )"""
+        )
+        event_type = "complete" if success else "failed"
+        conn.execute(
+            "INSERT INTO tool_events (session_id, tool_name, event_type, timestamp, metadata) VALUES (?, ?, ?, ?, ?)",
+            (session_id, tool_name, event_type, time.time(), json.dumps(data.get("metadata", {{}}))),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Hooks must not break the main flow
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+    pretool_path.write_text(pretool_content)
+    posttool_path.write_text(posttool_content)
+    os.chmod(pretool_path, 0o755)
+    os.chmod(posttool_path, 0o755)
     return True
 
 
@@ -651,7 +947,288 @@ def _get_cap_mcp_servers(cap_home: Path, data_dir: Path) -> list[dict]:
             "args": [str(servers_dir / "ast_server.py")],
             "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
         },
+        {
+            "name": "cap-code-intel",
+            "command": python_bin,
+            "args": [str(servers_dir / "code_intel_server.py")],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+        },
+        {
+            "name": "cap-orchestrator",
+            "command": python_bin,
+            "args": [str(servers_dir / "orchestrator_server.py")],
+            "env": [f"CAP_ORCHESTRATOR_DB={data_dir / 'platform.db'}", f"PYTHONPATH={cap_home}"],
+        },
     ]
+
+
+# ── Workspace detection ──────────────────────────────────────────────────────
+
+def _detect_workspace_repos(cwd: Path, max_depth: int = 2) -> list[Path]:
+    """Auto-detect .git repos under CWD (max depth 2). Returns list of repo roots."""
+    repos: list[Path] = []
+
+    # Check if CWD itself is a git repo
+    if (cwd / ".git").exists():
+        repos.append(cwd)
+
+    # Scan children up to max_depth
+    for depth in range(1, max_depth + 1):
+        pattern = "/".join(["*"] * depth) + "/.git"
+        for git_dir in cwd.glob(pattern):
+            if git_dir.is_dir():
+                repos.append(git_dir.parent)
+
+    return sorted(set(repos))
+
+
+# ── Quick index helpers ──────────────────────────────────────────────────────
+
+_QUICK_INDEX_FILES = [
+    "README.md",
+    "README.rst",
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+    "Cargo.toml",
+    "Makefile",
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "tsconfig.json",
+    "terraform.tf",
+    "main.tf",
+]
+
+
+def _quick_index_workspace(data_dir: Path, workspace: Path, repos: list[Path]) -> int:
+    """Quick-index key files from workspace repos into FTS5.
+
+    Returns count of entries indexed.
+    """
+    knowledge_db = data_dir / "knowledge.db"
+    if not knowledge_db.exists():
+        return 0
+
+    conn = sqlite3.connect(str(knowledge_db), timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+
+    indexed = 0
+    for repo in repos:
+        for filename in _QUICK_INDEX_FILES:
+            filepath = repo / filename
+            if not filepath.exists():
+                continue
+            try:
+                content = filepath.read_text(errors="replace")
+                if len(content) > 100_000:
+                    content = content[:100_000]  # Truncate very large files
+
+                content_hash = hashlib.sha256(content.encode()).hexdigest()[:16]
+                entry_uuid = str(uuid.uuid4())
+                workspace_str = str(workspace)
+                source_path = str(filepath)
+                title = f"{repo.name}/{filename}"
+
+                # Check if already indexed (by source_path)
+                existing = conn.execute(
+                    "SELECT id FROM knowledge_entries WHERE source_path = ? AND workspace = ?",
+                    (source_path, workspace_str),
+                ).fetchone()
+                if existing:
+                    continue
+
+                # Determine content_type from filename
+                if filename.endswith(".md") or filename.endswith(".rst"):
+                    content_type = "documentation"
+                elif filename in ("package.json", "pyproject.toml", "go.mod", "Cargo.toml"):
+                    content_type = "manifest"
+                elif filename in ("Makefile", "Dockerfile", "docker-compose.yml", "docker-compose.yaml"):
+                    content_type = "build_config"
+                elif filename in ("tsconfig.json", "terraform.tf", "main.tf"):
+                    content_type = "config"
+                else:
+                    content_type = "file"
+
+                conn.execute(
+                    """INSERT INTO knowledge_entries
+                       (uuid, workspace, source_path, source_type, content_type, title, content, content_hash, metadata)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        entry_uuid,
+                        workspace_str,
+                        source_path,
+                        "quick_index",
+                        content_type,
+                        title,
+                        content,
+                        content_hash,
+                        json.dumps({"repo": repo.name, "filename": filename, "indexed_at": time.time()}),
+                    ),
+                )
+                indexed += 1
+            except (OSError, UnicodeDecodeError):
+                continue
+
+    conn.commit()
+    conn.close()
+    return indexed
+
+
+# ── Baseline corrections ─────────────────────────────────────────────────────
+
+_BASELINE_CORRECTIONS = [
+    {
+        "what_was_wrong": "Using bash grep/find to search for information before checking knowledge base",
+        "what_is_correct": "Always call knowledge_search MCP tool BEFORE using bash grep/find",
+        "category": "information_retrieval",
+    },
+    {
+        "what_was_wrong": "Writing more than 20 lines of code directly instead of delegating",
+        "what_is_correct": "Delegate to Agent({ subagent_type: 'orchestrator' }) for any non-trivial implementation",
+        "category": "delegation",
+    },
+    {
+        "what_was_wrong": "Not recording session events after significant actions",
+        "what_is_correct": "Call session_record after every decision, discovery, or correction",
+        "category": "session_memory",
+    },
+    {
+        "what_was_wrong": "Pushing code without running a code review first",
+        "what_is_correct": "Always run code-review on the diff before any git push or PR creation",
+        "category": "pre_push_review",
+    },
+    {
+        "what_was_wrong": "Running multiple agents writing to the same repo without isolation",
+        "what_is_correct": "Use EnterWorktree to give each parallel-writing agent an isolated working copy",
+        "category": "parallel_writes",
+    },
+]
+
+
+def _load_baseline_corrections(data_dir: Path, workspace: str) -> int:
+    """Load baseline corrections into sessions.db. Returns count loaded."""
+    sessions_db = data_dir / "sessions.db"
+    if not sessions_db.exists():
+        return 0
+
+    conn = sqlite3.connect(str(sessions_db), timeout=5)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=5000")
+
+    loaded = 0
+    for correction in _BASELINE_CORRECTIONS:
+        # Check if already exists
+        existing = conn.execute(
+            "SELECT id FROM corrections WHERE what_was_wrong = ? AND workspace = ?",
+            (correction["what_was_wrong"], workspace),
+        ).fetchone()
+        if existing:
+            continue
+
+        conn.execute(
+            """INSERT INTO corrections (workspace, what_was_wrong, what_is_correct, category)
+               VALUES (?, ?, ?, ?)""",
+            (workspace, correction["what_was_wrong"], correction["what_is_correct"], correction["category"]),
+        )
+        loaded += 1
+
+    conn.commit()
+    conn.close()
+    return loaded
+
+
+# ── Git fetch helper ─────────────────────────────────────────────────────────
+
+def _git_fetch_repos(repos: list[Path], timeout: int = 15) -> dict[str, bool]:
+    """Run `git fetch --all` on detected repos in parallel. Returns {repo_name: success}."""
+    results: dict[str, bool] = {}
+
+    def _fetch_one(repo: Path) -> tuple[str, bool]:
+        try:
+            result = subprocess.run(
+                ["git", "fetch", "--all", "--quiet"],
+                cwd=str(repo),
+                capture_output=True, text=True, timeout=timeout,
+            )
+            return (repo.name, result.returncode == 0)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return (repo.name, False)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {executor.submit(_fetch_one, repo): repo for repo in repos}
+        for future in as_completed(futures, timeout=timeout + 5):
+            try:
+                name, success = future.result()
+                results[name] = success
+            except Exception:
+                results[futures[future].name] = False
+
+    return results
+
+
+# ── Health check ─────────────────────────────────────────────────────────────
+
+def _run_health_check(cap_home: Path, data_dir: Path, claude_dir: Path) -> list[tuple[str, bool, str]]:
+    """Run post-init health checks. Returns list of (check_name, passed, detail)."""
+    checks: list[tuple[str, bool, str]] = []
+
+    # Check 1: Databases exist and are valid SQLite
+    for db_name in ["platform.db", "knowledge.db", "sessions.db", "fleet.db"]:
+        db_path = data_dir / db_name
+        if db_path.exists():
+            try:
+                conn = sqlite3.connect(str(db_path))
+                conn.execute("PRAGMA integrity_check")
+                conn.close()
+                checks.append((f"DB:{db_name}", True, "OK"))
+            except sqlite3.Error as e:
+                checks.append((f"DB:{db_name}", False, str(e)))
+        else:
+            checks.append((f"DB:{db_name}", False, "missing"))
+
+    # Check 2: Hook scripts exist and have valid Python syntax
+    for hook_name in ["pretool.py", "posttool.py"]:
+        hook_path = claude_dir / hook_name
+        if hook_path.exists():
+            try:
+                compile(hook_path.read_text(), str(hook_path), "exec")
+                checks.append((f"Hook:{hook_name}", True, "valid syntax"))
+            except SyntaxError as e:
+                checks.append((f"Hook:{hook_name}", False, f"syntax error: {e}"))
+        else:
+            # Also check hooks subdirectory
+            alt_path = claude_dir / "hooks" / hook_name
+            if alt_path.exists():
+                try:
+                    compile(alt_path.read_text(), str(alt_path), "exec")
+                    checks.append((f"Hook:{hook_name}", True, "valid syntax"))
+                except SyntaxError as e:
+                    checks.append((f"Hook:{hook_name}", False, f"syntax error: {e}"))
+            else:
+                checks.append((f"Hook:{hook_name}", False, "missing"))
+
+    # Check 3: MCP server configs in settings.json
+    settings_path = _settings_json_path()
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+            hooks_config = settings.get("hooks", {})
+            perms = settings.get("permissions", {}).get("allow", [])
+            cap_perms = [p for p in perms if "cap-" in p or "cap_" in p or "workflow" in p]
+            checks.append(("Settings:permissions", len(cap_perms) > 0, f"{len(cap_perms)} CAP permissions"))
+            checks.append(("Settings:hooks", len(hooks_config) > 0, f"{len(hooks_config)} hook events"))
+        except json.JSONDecodeError:
+            checks.append(("Settings:json", False, "invalid JSON"))
+    else:
+        checks.append(("Settings:json", False, "missing"))
+
+    # Check 4: config.toml exists
+    config_path = cap_home / "config.toml"
+    checks.append(("Config:toml", config_path.exists(), "exists" if config_path.exists() else "missing"))
+
+    return checks
 
 
 # ── cap init ──────────────────────────────────────────────────────────────────
@@ -660,40 +1237,75 @@ def _get_cap_mcp_servers(cap_home: Path, data_dir: Path) -> list[dict]:
 @click.option("--minimal", is_flag=True, help="Only create databases + config (no agents/workflows)")
 @click.option("--force", is_flag=True, help="Overwrite existing files")
 @click.option("--skip-mcp", is_flag=True, help="Don't register MCP servers with Claude")
-def init(minimal: bool, force: bool, skip_mcp: bool):
-    """Initialize the CAP platform (run after install)."""
+@click.option("--workspace", type=click.Path(exists=True), default=None, help="Workspace root (default: CWD)")
+@click.option("--skip-fetch", is_flag=True, help="Don't run git fetch on detected repos")
+def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip_fetch: bool):
+    """Initialize the CAP platform (run after install).
+
+    Follows the Cold Start Flow from CAP System Design v1 Section 10:
+    7 phases from directory creation to health-checked readiness in ~10s.
+    """
     from cap.lib.db_init import initialize_all_databases
+
+    t_start = time.time()
 
     cap_home = _cap_home()
     data_dir = cap_home / "data"
     claude_dir = _claude_dir()
+    workspace_path = Path(workspace) if workspace else Path.cwd()
 
     console.print(Panel(
         f"[bold]CAP — Claude Agent Platform[/bold] v0.5.0\n"
-        f"Home: {cap_home}",
+        f"Home: {cap_home}\n"
+        f"Workspace: {workspace_path}",
         box=box.ROUNDED, style="cyan",
     ))
 
     manifest = _load_manifest(cap_home)
 
-    # ── 1. Create directories ─────────────────────────────────────────────
-    console.print("\n[bold]1. Creating directories[/bold]")
-    for d in [cap_home, data_dir, cap_home / "logs", _backups_dir()]:
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 0: Create directories (~/.cap/data, ~/.cap/hooks, ~/.cap/config, ~/.cap/backups)
+    # ══════════════════════════════════════════════════════════════════════════
+    console.print("\n[bold cyan]Phase 0[/bold cyan] [dim](0s)[/dim] — Creating directories")
+    dirs_to_create = [
+        cap_home,
+        data_dir,
+        cap_home / "hooks",
+        cap_home / "config",
+        cap_home / "backups",
+        cap_home / "logs",
+    ]
+    for d in dirs_to_create:
         d.mkdir(parents=True, exist_ok=True)
-    console.print(f"  [green]✓[/green] {cap_home}")
+    console.print(f"  [green]✓[/green] {cap_home} (data, hooks, config, backups, logs)")
 
-    # ── 2. Backup existing user configs ───────────────────────────────────
-    console.print("\n[bold]2. Backing up user configs[/bold]")
+    # Backup existing user configs before any modifications
     backups = _backup_user_configs()
     if backups:
         for label, path in backups.items():
-            console.print(f"  [green]✓[/green] {label} → {Path(path).name}")
+            console.print(f"  [green]✓[/green] Backed up {label} → {Path(path).name}")
         manifest["backups"] = backups
-    else:
-        console.print(f"  [dim]─[/dim] No existing configs to backup")
 
-    # ── 3. Config ─────────────────────────────────────────────────────────
-    console.print("\n[bold]3. Platform configuration[/bold]")
+    # Auto-detect workspace repos
+    console.print(f"\n  [bold]Workspace detection:[/bold] scanning {workspace_path} (max depth 2)")
+    detected_repos = _detect_workspace_repos(workspace_path)
+    if detected_repos:
+        console.print(f"  [green]✓[/green] Found {len(detected_repos)} git repo(s):")
+        for repo in detected_repos[:10]:
+            console.print(f"      {repo.name}/")
+        if len(detected_repos) > 10:
+            console.print(f"      ... and {len(detected_repos) - 10} more")
+    else:
+        console.print(f"  [dim]─[/dim] No git repos detected in workspace")
+
+    t_phase0 = time.time() - t_start
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 1 (0-2s): Create cap.db, run migrate(), write default config.toml
+    # ══════════════════════════════════════════════════════════════════════════
+    console.print(f"\n[bold cyan]Phase 1[/bold cyan] [dim]({t_phase0:.1f}s)[/dim] — Database + config initialization")
+
+    # Config
     config_path = cap_home / "config.toml"
     bundled = _get_bundled_data_path()
 
@@ -701,15 +1313,21 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
         src = bundled / "config.toml.default"
         if src.exists():
             shutil.copy2(src, config_path)
-            console.print(f"  [green]✓[/green] config.toml created")
+            console.print(f"  [green]✓[/green] config.toml written")
         else:
-            console.print(f"  [yellow]![/yellow] Bundled config not found — creating minimal")
-            config_path.write_text('[platform]\nversion = "0.5.0"\nlog_level = "INFO"\n')
+            config_path.write_text(
+                '[platform]\n'
+                'version = "0.5.0"\n'
+                'log_level = "INFO"\n'
+                '\n[workspace]\n'
+                f'root = "{workspace_path}"\n'
+                f'repos_detected = {len(detected_repos)}\n'
+            )
+            console.print(f"  [green]✓[/green] config.toml created (minimal)")
     else:
         console.print(f"  [dim]─[/dim] config.toml exists (use --force to overwrite)")
 
-    # ── 4. Databases ──────────────────────────────────────────────────────
-    console.print("\n[bold]4. Initializing databases[/bold]")
+    # Databases
     initialize_all_databases(data_dir)
     for db_name in ["platform.db", "knowledge.db", "sessions.db", "fleet.db"]:
         db_path = data_dir / db_name
@@ -717,12 +1335,66 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
             os.chmod(db_path, 0o600)
     console.print(f"  [green]✓[/green] 4 databases initialized (WAL mode, 0600 permissions)")
 
-    # ── 5. Agents ─────────────────────────────────────────────────────────
+    t_phase1 = time.time() - t_start
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 2 (2-3s): Generate hook scripts + update settings.json with hook entries
+    # ══════════════════════════════════════════════════════════════════════════
+    console.print(f"\n[bold cyan]Phase 2[/bold cyan] [dim]({t_phase1:.1f}s)[/dim] — Hook generation + enforcement")
+
+    # Generate pretool.py / posttool.py in ~/.claude/hooks/
+    hooks_dir = claude_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hooks_generated = _generate_hook_scripts(claude_dir, data_dir)
+    if hooks_generated:
+        console.print(f"  [green]✓[/green] pretool.py (enforcement) generated")
+        console.print(f"  [green]✓[/green] posttool.py (sync + health tracking) generated")
+    else:
+        console.print(f"  [dim]─[/dim] Hook scripts already exist")
+
+    # Update settings.json with hook entries pointing to the scripts
+    if _install_hooks():
+        console.print(f"  [green]✓[/green] Hook entries added to settings.json (PreToolUse, PostToolUse, Stop)")
+    else:
+        console.print(f"  [dim]─[/dim] Hook entries already configured")
+
+    t_phase2 = time.time() - t_start
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 3 (3-5s): Quick-index current workspace
+    # ══════════════════════════════════════════════════════════════════════════
+    console.print(f"\n[bold cyan]Phase 3[/bold cyan] [dim]({t_phase2:.1f}s)[/dim] — Quick-index workspace")
+
+    if detected_repos:
+        indexed_count = _quick_index_workspace(data_dir, workspace_path, detected_repos)
+        console.print(f"  [green]✓[/green] {indexed_count} files indexed into FTS5 (README, manifests, configs)")
+        console.print(f"  [green]✓[/green] Immediate search capability active")
+    else:
+        # Index CWD directly if no repos detected
+        indexed_count = _quick_index_workspace(data_dir, workspace_path, [workspace_path])
+        if indexed_count > 0:
+            console.print(f"  [green]✓[/green] {indexed_count} files indexed from CWD")
+        else:
+            console.print(f"  [dim]─[/dim] No indexable files found in workspace")
+
+    # Load baseline corrections
+    corrections_loaded = _load_baseline_corrections(data_dir, str(workspace_path))
+    if corrections_loaded > 0:
+        console.print(f"  [green]✓[/green] {corrections_loaded} baseline corrections loaded")
+    else:
+        console.print(f"  [dim]─[/dim] Baseline corrections already present")
+
+    t_phase3 = time.time() - t_start
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 4 (5-10s): Register MCP servers + install agents/workflows/permissions
+    # ══════════════════════════════════════════════════════════════════════════
+    console.print(f"\n[bold cyan]Phase 4[/bold cyan] [dim]({t_phase3:.1f}s)[/dim] — MCP servers + agents + permissions")
+
+    # Agents
     if not minimal:
-        console.print("\n[bold]5. Installing agents[/bold]")
         agents_dir = claude_dir / "agents"
         agents_dir.mkdir(parents=True, exist_ok=True)
-
         agents_src = bundled / "agents"
         installed_agents = []
         if agents_src.exists():
@@ -732,19 +1404,14 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
                     if not dest.exists() or force:
                         shutil.copy2(agent_file, dest)
                         installed_agents.append(agent_file.stem)
-            console.print(f"  [green]✓[/green] {len(installed_agents)} agents → {agents_dir}")
+            console.print(f"  [green]✓[/green] {len(installed_agents)} agents installed")
         else:
             console.print(f"  [yellow]![/yellow] No bundled agents found")
         manifest["installed_agents"] = installed_agents
-    else:
-        console.print("\n[bold]5. Agents[/bold] — skipped (--minimal)")
 
-    # ── 6. Workflows ──────────────────────────────────────────────────────
-    if not minimal:
-        console.print("\n[bold]6. Installing workflows[/bold]")
+        # Workflows
         workflows_dir = claude_dir / "workflows"
         workflows_dir.mkdir(parents=True, exist_ok=True)
-
         workflows_src = bundled / "workflows"
         installed_workflows = []
         if workflows_src.exists():
@@ -754,34 +1421,43 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
                     if not dest.exists() or force:
                         shutil.copy2(wf_file, dest)
                         installed_workflows.append(wf_file.stem)
-            console.print(f"  [green]✓[/green] {len(installed_workflows)} workflows → {workflows_dir}")
+            console.print(f"  [green]✓[/green] {len(installed_workflows)} workflows installed")
         else:
             console.print(f"  [yellow]![/yellow] No bundled workflows found")
         manifest["installed_workflows"] = installed_workflows
     else:
-        console.print("\n[bold]6. Workflows[/bold] — skipped (--minimal)")
+        console.print(f"  [dim]─[/dim] Agents/workflows skipped (--minimal)")
 
-    # ── 7. MCP Servers ────────────────────────────────────────────────────
+    # CLAUDE.md
+    if _install_claude_md(force):
+        console.print(f"  [green]✓[/green] ~/.claude/CLAUDE.md installed")
+    else:
+        console.print(f"  [dim]─[/dim] CLAUDE.md exists (use --force)")
+
+    # Settings permissions
+    if _install_settings_permissions():
+        console.print(f"  [green]✓[/green] {len(_CAP_MCP_PERMISSIONS)} tool permissions → settings.json")
+    else:
+        console.print(f"  [dim]─[/dim] Permissions already configured")
+
+    # MCP Servers (cap-knowledge, cap-session, cap-orchestrator, cap-code-intel, cap-backlog)
     if not skip_mcp:
-        console.print("\n[bold]7. Registering MCP servers[/bold]")
-
-        # Platform servers (AWS, K8s, Terraform) — only if not already present
+        # Platform servers (AWS, K8s, Terraform)
         platform_servers = _get_platform_mcp_servers()
+        platform_registered = 0
         for srv in platform_servers:
             if _mcp_server_exists(srv["name"]):
-                console.print(f"  [dim]─[/dim] {srv['name']} (already registered)")
                 continue
             cmd_args = ["add", srv["name"], "--scope", "user"]
             for var in srv["env"]:
                 cmd_args.extend(["-e", var])
             cmd_args.extend(["--", srv["command"]] + srv["args"])
-            ok = _run_claude_mcp(cmd_args)
-            if ok:
-                console.print(f"  [green]✓[/green] {srv['name']}")
-            else:
-                console.print(f"  [yellow]![/yellow] {srv['name']} — failed")
+            if _run_claude_mcp(cmd_args):
+                platform_registered += 1
+        if platform_registered > 0:
+            console.print(f"  [green]✓[/green] {platform_registered} platform MCP servers registered")
 
-        # CAP servers — always register (remove first if force)
+        # CAP servers
         cap_servers = _get_cap_mcp_servers(cap_home, data_dir)
         registered = []
         for srv in cap_servers:
@@ -791,58 +1467,120 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
             for var in srv["env"]:
                 cmd_args.extend(["-e", var])
             cmd_args.extend(["--", str(srv["command"])] + srv["args"])
-            ok = _run_claude_mcp(cmd_args)
-            if ok:
-                console.print(f"  [green]✓[/green] {srv['name']}")
+            if _run_claude_mcp(cmd_args):
                 registered.append(srv["name"])
-            else:
-                console.print(f"  [yellow]![/yellow] {srv['name']} — failed (register manually with `claude mcp add`)")
+        console.print(f"  [green]✓[/green] {len(registered)} CAP MCP servers registered")
+        if len(registered) < len(cap_servers):
+            failed = len(cap_servers) - len(registered)
+            console.print(f"  [yellow]![/yellow] {failed} server(s) failed — register manually with `claude mcp add`")
         manifest["mcp_servers"] = registered
     else:
-        console.print("\n[bold]7. MCP servers[/bold] — skipped (--skip-mcp)")
+        console.print(f"  [dim]─[/dim] MCP servers skipped (--skip-mcp)")
 
-    # ── 8. CLAUDE.md ─────────────────────────────────────────────────────
-    console.print("\n[bold]8. Installing Claude instructions[/bold]")
-    if _install_claude_md(force):
-        console.print(f"  [green]✓[/green] ~/.claude/CLAUDE.md created")
+    t_phase4 = time.time() - t_start
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 5 (background): Queue full AST index + git fetch
+    # ══════════════════════════════════════════════════════════════════════════
+    console.print(f"\n[bold cyan]Phase 5[/bold cyan] [dim]({t_phase4:.1f}s)[/dim] — Background tasks (non-blocking)")
+
+    # Queue AST index for next session_start
+    ast_queue_path = cap_home / "data" / ".ast_index_pending"
+    if detected_repos:
+        ast_queue_path.write_text(json.dumps({
+            "workspace": str(workspace_path),
+            "repos": [str(r) for r in detected_repos],
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        }))
+        console.print(f"  [green]✓[/green] Full AST index queued for next session_start ({len(detected_repos)} repos)")
     else:
-        console.print(f"  [dim]─[/dim] ~/.claude/CLAUDE.md exists (use --force to overwrite)")
+        console.print(f"  [dim]─[/dim] No repos to queue for AST indexing")
 
-    # ── 9. Settings permissions ───────────────────────────────────────────
-    console.print("\n[bold]9. Configuring MCP tool permissions[/bold]")
-    if _install_settings_permissions():
-        console.print(f"  [green]✓[/green] {len(_CAP_MCP_PERMISSIONS)} tool permissions added to settings.json")
+    # Git fetch --all on detected repos (if network available)
+    if not skip_fetch and detected_repos:
+        console.print(f"  [dim]...[/dim] Running git fetch --all on {len(detected_repos)} repo(s)...")
+        fetch_results = _git_fetch_repos(detected_repos)
+        fetched_ok = sum(1 for v in fetch_results.values() if v)
+        fetched_fail = sum(1 for v in fetch_results.values() if not v)
+        if fetched_ok > 0:
+            console.print(f"  [green]✓[/green] git fetch succeeded on {fetched_ok} repo(s)")
+        if fetched_fail > 0:
+            console.print(f"  [yellow]![/yellow] git fetch failed on {fetched_fail} repo(s) (network unavailable?)")
+    elif skip_fetch:
+        console.print(f"  [dim]─[/dim] git fetch skipped (--skip-fetch)")
+
+    t_phase5 = time.time() - t_start
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 6: Health check — verify DB, hooks syntax, MCP server configs
+    # ══════════════════════════════════════════════════════════════════════════
+    console.print(f"\n[bold cyan]Phase 6[/bold cyan] [dim]({t_phase5:.1f}s)[/dim] — Health check")
+
+    health_results = _run_health_check(cap_home, data_dir, claude_dir)
+    passed = sum(1 for _, ok, _ in health_results if ok)
+    failed = sum(1 for _, ok, _ in health_results if not ok)
+
+    if failed == 0:
+        console.print(f"  [green]✓[/green] All {passed} checks passed")
     else:
-        console.print(f"  [dim]─[/dim] Permissions already configured")
+        console.print(f"  [green]✓[/green] {passed} checks passed")
+        console.print(f"  [yellow]![/yellow] {failed} checks failed:")
+        for name, ok, detail in health_results:
+            if not ok:
+                console.print(f"      [red]✗[/red] {name}: {detail}")
 
-    # ── 10. Hooks ────────────────────────────────────────────────────────
-    console.print("\n[bold]10. Installing session & agent hooks[/bold]")
-    if _install_hooks():
-        console.print(f"  [green]✓[/green] Stop + PostToolUse hooks added to settings.json")
-    else:
-        console.print(f"  [dim]─[/dim] Hooks already configured")
+    t_phase6 = time.time() - t_start
 
-    # ── 11. Save manifest ─────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # PHASE 7: Save manifest + print success summary
+    # ══════════════════════════════════════════════════════════════════════════
+
+    # Save manifest
     manifest["version"] = "0.5.0"
     manifest["cap_home"] = str(cap_home)
     manifest["python"] = sys.executable
+    manifest["workspace"] = str(workspace_path)
+    manifest["repos_detected"] = len(detected_repos)
     manifest["installed_at"] = datetime.now(timezone.utc).isoformat()
+    manifest["init_duration_s"] = round(t_phase6, 2)
     _save_manifest(cap_home, manifest)
 
-    # ── Summary ───────────────────────────────────────────────────────────
+    t_total = time.time() - t_start
+
+    # Summary
+    console.print(f"\n[bold cyan]Phase 7[/bold cyan] [dim]({t_phase6:.1f}s)[/dim] — Complete")
     console.print("\n" + "─" * 60)
-    console.print(Panel(
-        "[bold green]CAP initialized successfully![/bold green]\n\n"
-        "[bold]Next steps:[/bold]\n"
-        "  [cyan]cap sync --workspace ~/path/to/code[/cyan]  — Index your codebase\n"
-        "  [cyan]cap status[/cyan]                           — Platform overview\n"
-        "  [cyan]cap doctor[/cyan]                           — Health check\n"
-        "\n[bold]In Claude Code:[/bold]\n"
-        "  Reload window (Cmd+Shift+P → Reload) to pick up new MCP servers.\n"
-        "  Then ask anything — Claude will use knowledge_search automatically.\n"
-        "\n[bold]Safety:[/bold]\n"
-        f"  Config backups stored in {_backups_dir()}\n"
+
+    summary_lines = [
+        "[bold green]CAP initialized successfully![/bold green]",
+        f"  Total time: {t_total:.1f}s | Repos: {len(detected_repos)} | Files indexed: {indexed_count}",
+        "",
+        "[bold]What's ready now:[/bold]",
+        "  - FTS5 search across workspace README/manifests/configs",
+        "  - Hook enforcement active (delegation reminders)",
+        "  - Session memory + corrections loaded",
+        f"  - {len(manifest.get('mcp_servers', []))} MCP servers registered",
+        "",
+        "[bold]Queued for next session:[/bold]",
+        "  - Full AST index (tree-sitter parse of all source files)",
+        "  - Relationship graph (calls, imports, extends)",
+        "",
+        "[bold]Next steps:[/bold]",
+        "  [cyan]cap status[/cyan]              — Platform overview",
+        "  [cyan]cap doctor[/cyan]              — Detailed health check",
+        "  [cyan]cap sync[/cyan]                — Trigger full workspace sync now",
+        "",
+        "[bold]In Claude Code:[/bold]",
+        "  Reload window (Cmd+Shift+P → Reload) to pick up new MCP servers.",
+        "  Then ask anything — Claude will use knowledge_search automatically.",
+        "",
+        "[bold]Safety:[/bold]",
+        f"  Config backups stored in {_backups_dir()}",
         "  Run [cyan]cap uninstall[/cyan] to cleanly restore original configs.",
+    ]
+
+    console.print(Panel(
+        "\n".join(summary_lines),
         box=box.ROUNDED,
     ))
 
@@ -955,7 +1693,7 @@ def uninstall(keep_data: bool, yes: bool):
 
     # CLAUDE.md — remove only if the file is entirely CAP-generated
     claude_md = _claude_dir() / "CLAUDE.md"
-    if claude_md.exists() and claude_md.read_text().startswith(_CLAUDE_MD_CONTENT[:120]):
+    if claude_md.exists() and claude_md.read_text().startswith(_CLAUDE_MD_FALLBACK[:120]):
         claude_md.unlink()
         console.print(f"  [green]✓[/green] ~/.claude/CLAUDE.md removed (was CAP-generated)")
     else:

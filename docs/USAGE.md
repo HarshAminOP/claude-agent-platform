@@ -2,20 +2,21 @@
 
 ## How CAP Works (30-Second Overview)
 
-CAP (Claude Agent Platform) runs as **4 MCP servers** alongside Claude Code. They activate automatically during Claude sessions -- no manual triggering required.
+CAP (Claude Agent Platform) runs as **9 MCP servers** alongside Claude Code. They activate automatically during Claude sessions -- no manual triggering required.
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    Your Claude Code Session                    │
-│                                                              │
-│   cap-knowledge    cap-session    cap-workflow    cap-fleet   │
-│   (retrieval)      (memory)       (orchestration) (health)   │
-│        │                │               │              │     │
-│        └────────────────┴───────────────┴──────────────┘     │
-│                              │                               │
-│                     ~/.claude-platform/data/                  │
-│              knowledge.db  sessions.db  platform.db           │
-└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                      Your Claude Code Session                          │
+│                                                                      │
+│  cap-orchestrator  cap-knowledge  cap-session  cap-workflow           │
+│  cap-fleet         cap-backlog    cap-code-intel                      │
+│  cap-ast           cap-diagram                                        │
+│       │                │              │              │                │
+│       └────────────────┴──────────────┴──────────────┘                │
+│                              │                                        │
+│                     ~/.claude-platform/data/                           │
+│       platform.db  knowledge.db  sessions.db  fleet.db  backlog.db   │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 **Three things to know:**
@@ -272,6 +273,45 @@ You will almost never interact with this directly. If something feels broken, `c
 | `cap fleet status` | Check if all MCP servers are running | Shows PID, health, restart count |
 | `cap fleet health-check` | Force immediate health probe | Finds dead processes, updates status |
 | `cap fleet discover` | After adding new MCP servers to config | Finds unmanaged servers in `.claude.json` |
+
+### Orchestration & Reliability
+
+| Command | When to use | Example |
+|---------|-------------|---------|
+| `cap health` | Agent health dashboard (state, failure rate, circuit breakers) | `cap health --agent-type devops` |
+| `cap dlq` | Inspect dead-letter queue (failed tasks) | `cap dlq` |
+| `cap resume` | Resume a failed/paused workflow | `cap resume <workflow-id>` |
+| `cap orch-status` | Orchestrator status and routing stats | `cap orch-status` |
+
+### Integrity & Audit
+
+| Command | When to use | Example |
+|---------|-------------|---------|
+| `cap witness status` | Show witnessed files with hash validity | `cap witness status -w .` |
+| `cap witness --accept-risk` | Force-accept stale/failed witness stamps | When you need to bypass stale stamps |
+
+### Backlog & Governance
+
+| Command | When to use | Example |
+|---------|-------------|---------|
+| `cap backlog list` | View pending tasks | `cap backlog list --status in_progress` |
+| `cap backlog stats` | Backlog completion stats | Shows total, in-progress, blocked |
+| `cap decisions list` | View pending decision cards | `cap decisions list --status pending` |
+| `cap conflicts list` | View inter-agent conflicts | `cap conflicts list --status open` |
+
+### Advanced Operations
+
+| Command | When to use | Example |
+|---------|-------------|---------|
+| `cap dashboard` | Real-time TUI status dashboard | `cap dashboard --poll 2` |
+| `cap drift check` | Terraform drift detection | `cap drift check /path/to/tf-workspace` |
+| `cap git ingest` | Ingest git blame + PR discussions | `cap git ingest -w /path/to/repo` |
+| `cap embed` | Generate embeddings for queued entries | `cap embed --profile my-aws-profile` |
+| `cap passthrough` | Temporarily bypass enforcement (max 5 min) | `cap passthrough -w . --reason "testing"` |
+| `cap eval run` | Run quality evaluation suites | `cap eval run --suite retrieval` |
+| `cap eval list` | List available evaluation suites | Shows suite names and case counts |
+| `cap init` | First-time setup (databases, agents, MCP servers) | `cap init` or `cap init --force` |
+| `cap uninstall` | Remove CAP cleanly | `cap uninstall --yes` or `cap uninstall --keep-data --yes` |
 
 ---
 
@@ -661,16 +701,23 @@ cap doctor --fix --yes
 
 | Component | Database | What it does |
 |-----------|----------|--------------|
+| cap-orchestrator | cap.db | Complexity routing, agent delegation, learning |
 | cap-knowledge | knowledge.db + LanceDB | Hybrid search (keyword + semantic + graph) |
 | cap-session | sessions.db | Cross-session memory, corrections, learnings |
 | cap-workflow | platform.db | Workflow orchestration, budget enforcement |
-| cap-fleet | platform.db (read) | MCP server health monitoring, auto-restart |
+| cap-fleet | fleet.db | MCP server health monitoring, auto-restart |
+| cap-backlog | backlog.db | Task queue, decisions, conflicts, autonomy |
+| cap-code-intel | knowledge.db (read) | Code intelligence, blast radius analysis |
+| cap-ast | — (stateless) | AST-level code search via ast-grep |
+| cap-diagram | — (stateless) | Diagram rendering |
 
 | Database | Writer | Readers |
 |----------|--------|---------|
 | platform.db | workflow server | all servers |
-| knowledge.db | knowledge server | all servers |
+| knowledge.db | knowledge server | code-intel, all servers |
 | sessions.db | session server | all servers |
+| fleet.db | fleet server | all servers |
+| backlog.db | backlog server | all servers |
 
 Cross-server communication uses the **inbox pattern**: if server A needs to write to server B's database, it drops a JSONL file in `~/.claude-platform/inbox/<server-b>/`, which server B polls and processes. This eliminates WAL contention entirely.
 
@@ -687,8 +734,8 @@ cap status
 What `cap init` does:
 1. Creates `~/.claude-platform/` with correct permissions (0700)
 2. Initializes all SQLite databases (0600 permissions)
-3. Installs 14 agent definitions and 10 workflow scripts
-4. Registers 4 MCP servers with Claude Code
+3. Installs 21 agent definitions and 10 workflow scripts
+4. Registers 9 MCP servers with Claude Code
 5. Backs up existing configs before any modifications
 
 After install, sync your first workspace:

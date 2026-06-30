@@ -4,17 +4,17 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-agent-platform"
-version = "0.5.0"
-description = "AI agent platform for Claude Code — hybrid retrieval, workflow orchestration, team simulation, and session memory"
+version = "1.0.0"
+description = "Claude Agent Platform — multi-agent orchestration, hybrid retrieval, workflow engine, and session memory for Claude Code"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
     { name = "MOIA Platform Engineering" },
 ]
-keywords = ["claude", "ai", "agents", "mcp", "platform"]
+keywords = ["claude", "ai", "agents", "mcp", "platform", "orchestration", "retrieval"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -29,10 +29,11 @@ dependencies = [
     "boto3>=1.34",
     "pyarrow>=14.0",
     "pydantic>=2.0",
-    "tomli>=2.0",
+    "tomli>=2.0;python_version<'3.11'",
     "tomli-w>=1.0",
     "click>=8.0",
     "rich>=13.0",
+    "tree-sitter>=0.21",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +46,15 @@ dev = [
 
 [project.scripts]
 cap = "cap.cli.main:cli"
+cap-orchestrator = "cap.servers.orchestrator_server:main"
+cap-code-intel = "cap.servers.code_intel_server:main"
+cap-knowledge = "cap.servers.knowledge_server:main"
+cap-session = "cap.servers.session_server:main"
+cap-backlog = "cap.servers.backlog_server:main"
+cap-fleet = "cap.servers.fleet_server:main"
+cap-diagram = "cap.servers.diagram_server:main"
+cap-workflow = "cap.servers.workflow_server:main"
+cap-ast = "cap.servers.ast_server:main"
 
 [project.urls]
 Homepage = "https://github.com/moia-dev/claude-agent-platform"
@@ -53,6 +63,8 @@ Issues = "https://github.com/moia-dev/claude-agent-platform/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cap"]
+
+[tool.hatch.build.targets.wheel.shared-data]
 
 [tool.hatch.build.targets.sdist]
 include = [

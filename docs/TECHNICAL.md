@@ -10,14 +10,14 @@ Claude Agent Platform
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](pyproject.toml)
 [![MCP](https://img.shields.io/badge/protocol-MCP%201.0-purple.svg)](https://modelcontextprotocol.io)
 
 ---
 
 **Claude Agent Platform (CAP)** is an AI agent orchestration layer that gives Claude Code a persistent brain, hybrid search, budget-controlled workflows, and the illusion of a full engineering team working in parallel.
 
-> Three sentences: CAP augments Claude Code CLI with hybrid knowledge retrieval (keyword + semantic + graph), session memory that persists learnings across conversations, and workflow orchestration that simulates a coordinated engineering team — all exposed via 4 MCP servers that Claude discovers automatically.
+> Three sentences: CAP augments Claude Code CLI with hybrid knowledge retrieval (keyword + semantic + graph), session memory that persists learnings across conversations, and workflow orchestration that simulates a coordinated engineering team — all exposed via 9 MCP servers that Claude discovers automatically.
 
 ---
 
@@ -37,42 +37,51 @@ That's it. Claude Code will auto-discover the MCP servers on next launch.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
-│                            Claude Code CLI (Host)                                │
+│                            Claude Code (Host Process)                            │
 │                                                                                 │
-│   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│   │  Workflow     │  │  Knowledge   │  │   Session    │  │    Fleet     │      │
-│   │  Engine      │  │   Server     │  │   Server     │  │   Manager    │      │
-│   │              │  │              │  │              │  │              │      │
-│   │  budget ctl  │  │  hybrid srch │  │  memory      │  │  health mon  │      │
-│   │  team sim    │  │  FTS5+vec+   │  │  learnings   │  │  auto-restart│      │
-│   │  kill/signal │  │  graph+RRF   │  │  corrections │  │  discovery   │      │
-│   └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
-│          │                  │                  │                  │              │
-│   ┌──────┴──────────────────┴──────────────────┴──────────────────┴──────┐      │
-│   │                         cap.lib (shared)                             │      │
-│   │                                                                      │      │
-│   │  retrieval.py ─ embeddings.py ─ graph.py ─ models.py ─ security.py  │      │
-│   │  team_renderer.py ─ api_gateway.py ─ workflow_hooks.py ─ config.py  │      │
-│   └──────────────────────────────┬───────────────────────────────────────┘      │
-│                                  │                                               │
-│   ┌──────────────────────────────┴───────────────────────────────────────┐      │
-│   │                         Storage Layer                                 │      │
-│   │                                                                       │      │
-│   │  ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐     │      │
-│   │  │platform.db │  │knowledge.db│  │sessions.db │  │ fleet.db   │     │      │
-│   │  │            │  │            │  │            │  │            │     │      │
-│   │  │ workflows  │  │ entries    │  │ learnings  │  │ servers    │     │      │
-│   │  │ budgets    │  │ fts5 index │  │ corrections│  │ events     │     │      │
-│   │  │ runs       │  │ graph nodes│  │ decisions  │  │ health     │     │      │
-│   │  │ cost track │  │ graph edges│  │ confidence │  │ processes  │     │      │
-│   │  └────────────┘  └────────────┘  └────────────┘  └────────────┘     │      │
-│   │                                                                       │      │
-│   │  ┌────────────────────────┐  ┌────────────────────────────────┐      │      │
-│   │  │  LanceDB (vectors)     │  │  AWS Bedrock Titan V2          │      │      │
-│   │  │  local, serverless     │  │  1024-dim embeddings           │      │      │
-│   │  │  cosine similarity     │  │  $0.02 / 1M tokens             │      │      │
-│   │  └────────────────────────┘  └────────────────────────────────┘      │      │
-│   └───────────────────────────────────────────────────────────────────────┘      │
+│   ┌─────────────────────────────────────────────────────────────────────┐      │
+│   │  Hooks Layer (short-lived, per-tool-call)                            │      │
+│   │  pretool.py   exit(2) = HARD BLOCK   [enforcement + delegation]     │      │
+│   │  posttool.py  exit(0) always         [sync triggers + state]        │      │
+│   └──────────────────────────────┬──────────────────────────────────────┘      │
+│                                  │ allowed                                      │
+│   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                        │
+│   │  cap-        │  │  cap-        │  │  cap-        │                        │
+│   │  orchestrator│  │  memory      │  │  code-intel  │                        │
+│   │  (MCP)       │  │  (MCP)       │  │  (MCP)       │                        │
+│   │              │  │              │  │              │                        │
+│   │  routing     │  │  3-tier mem  │  │  AST queries │                        │
+│   │  delegation  │  │  scoring     │  │  blast radius│                        │
+│   │  learning    │  │  eviction    │  │  graph trav. │                        │
+│   └──────┬───────┘  └──────┬───────┘  └──────┬───────┘                        │
+│          │                  │                  │                                │
+│   ┌──────┴──────────────────┴──────────────────┴──────┐                        │
+│   │              Module Layer (src/cap/)                │                        │
+│   │                                                    │                        │
+│   │  orchestration/   memory/        enforcement/      │                        │
+│   │   router.py        scorer.py      passthrough.py   │                        │
+│   │   context.py       manager.py                      │                        │
+│   │   scratchpad.py    eviction.py   learning/         │                        │
+│   │                    consolidation  engine.py        │                        │
+│   │  cost/            runtime/        integrity/       │                        │
+│   │   tracker.py       offline.py     witness.py       │                        │
+│   │                                                    │                        │
+│   │  db.py (unified SQLite, WAL mode)                  │                        │
+│   └────────────────────────┬───────────────────────────┘                        │
+│                            │                                                    │
+│   ┌────────────────────────┴───────────────────────────────────────┐            │
+│   │                      Storage Layer                              │            │
+│   │                                                                 │            │
+│   │  ┌─────────────────────────────────────────────────────────┐   │            │
+│   │  │  ~/.cap/cap.db  (single unified SQLite, WAL mode)       │   │            │
+│   │  │                                                         │   │            │
+│   │  │  memory_active + memory_fts (FTS5)  │  routing_decisions│   │            │
+│   │  │  memory_archive (zstd compressed)   │  cost_ledger      │   │            │
+│   │  │  memory_working (per session)       │  sessions         │   │            │
+│   │  │  enforcement_edits + violations     │  passthrough      │   │            │
+│   │  │  agent_contexts                     │                   │   │            │
+│   │  └─────────────────────────────────────────────────────────┘   │            │
+│   └─────────────────────────────────────────────────────────────────┘            │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -187,16 +196,17 @@ Cost by Model (this month)
   haiku      $0.82  ( 5%)  █░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
 ```
 
-### 5. Zero-Config MCP Servers
+### 5. MCP Servers + Hooks
 
-Four MCP servers that integrate seamlessly — Claude Code discovers them automatically:
+Three MCP servers (long-lived) and two hook scripts (short-lived, per-tool-call) that integrate seamlessly:
 
-| Server | Database | Capabilities |
-|--------|----------|-------------|
-| `cap-knowledge` | knowledge.db | Hybrid search, add/update entries, graph queries |
-| `cap-session` | sessions.db | Store/recall learnings, corrections, decisions |
-| `cap-workflow` | platform.db | Start/stop/signal workflows, budget enforcement |
-| `cap-fleet` | fleet.db | Health monitoring, auto-restart, server discovery |
+| Component | Type | Database | Capabilities |
+|-----------|------|----------|-------------|
+| `cap-orchestrator` | MCP Server | `~/.cap/cap.db` | Routing, delegation, checkpoint, learning |
+| `cap-memory` | MCP Server | `~/.cap/cap.db` | 3-tier memory CRUD, search, scoring, eviction |
+| `cap-code-intel` | MCP Server | `~/.cap/cap.db` | AST queries, graph traversal, blast radius |
+| `pretool.py` | PreToolUse Hook | `~/.cap/cap.db` | Hard enforcement (exit 2), delegation tracking |
+| `posttool.py` | PostToolUse Hook | `~/.cap/cap.db` | Sync triggers, state updates |
 
 ### 6. Evaluation Framework
 
@@ -231,14 +241,15 @@ Security Boundary Tests
 
 | Dimension | Without CAP | With CAP |
 |-----------|-------------|----------|
-| **Knowledge** | Re-reads files every session, no memory | Persistent hybrid index, sub-200ms retrieval |
-| **Memory** | Forgets corrections, repeats mistakes | Reinforced learnings with confidence decay |
-| **Workflows** | Single-shot prompts, no coordination | Multi-phase pipelines with team simulation |
+| **Enforcement** | Advisory CLAUDE.md (~60% compliance) | Hard blocking via PreToolUse exit(2) (100% compliance) |
+| **Memory** | Flat tables, unbounded, no lifecycle | 3-tier scored memory with eviction + consolidation |
+| **Routing** | Binary (trivial or full orchestration) | 3-tier adaptive (INLINE/LIGHTWEIGHT/FULL) with learning |
+| **Database** | 4 separate DBs, inbox pattern | Single unified cap.db with WAL concurrent reads |
 | **Cost** | Unbounded token usage, no visibility | Per-workflow budgets, monthly caps, kill switch |
-| **MCP Servers** | Manual restart on crash | Auto-health-check, restart with backoff |
+| **Knowledge** | Re-reads files every session | Persistent hybrid index, sub-200ms retrieval |
 | **Search** | `grep` / `find` on raw files | 3-channel fusion with graph traversal |
-| **Security** | Hope for the best | Eval suite, path traversal blocking, input validation |
-| **Observability** | None | Live workflow progress, cost dashboards |
+| **Security** | Hope for the best | Eval suite, enforcement audit trail, input validation |
+| **Observability** | None | Live workflow progress, cost dashboards, routing analytics |
 
 ---
 
@@ -264,29 +275,33 @@ Security Boundary Tests
 ```bash
 $ cap status
 
-Claude Agent Platform v0.5.0
+Claude Agent Platform v1.0.0
 ────────────────────────────
-  Config:    ~/.claude-platform/config.toml
-  Data:      ~/.claude-platform/data/
+  Config:    ~/.cap/config.toml
+  Database:  ~/.cap/cap.db
 
-  Databases
-  ─────────
-    platform.db    ✓  2.1 MB   (workflows: 47, budget_entries: 312)
-    knowledge.db   ✓  8.4 MB   (entries: 1,247, graph_nodes: 892, fts5: synced)
-    sessions.db    ✓  1.3 MB   (learnings: 89, corrections: 34, decisions: 21)
-    fleet.db       ✓  0.4 MB   (servers: 4, healthy: 4)
+  Database (unified, WAL mode)
+  ────────────────────────────
+    cap.db         ✓  12.8 MB  (WAL: 1.2 MB)
+    memory_active:   247 entries (composite_score avg: 0.62)
+    memory_archive:   89 entries (compressed)
+    enforcement:     12 violations this session
+    routing:        156 decisions (learning: active, accuracy: 84%)
 
   MCP Servers
   ───────────
-    cap-knowledge     ● running   pid:48201   uptime: 2h 14m
-    cap-session       ● running   pid:48202   uptime: 2h 14m
-    cap-workflow      ● running   pid:48203   uptime: 2h 14m
-    cap-fleet         ● running   pid:48204   uptime: 2h 14m
+    cap-orchestrator  ● running   pid:48201   uptime: 2h 14m
+    cap-memory        ● running   pid:48202   uptime: 2h 14m
+    cap-code-intel    ● running   pid:48203   uptime: 2h 14m
 
-  Bedrock
-  ───────
-    Region: eu-central-1   Model: amazon.titan-embed-text-v2:0
-    Status: ✓ authenticated   Cost today: $0.12
+  Hooks
+  ─────
+    pretool.py        ✓ registered   (enforcement: enabled)
+    posttool.py       ✓ registered   (sync: enabled)
+
+  Enforcement
+  ───────────
+    Mode: active   Passthrough: inactive   Violations today: 3
 ```
 
 </details>
@@ -367,41 +382,61 @@ cap doctor --db knowledge             # Check specific database
 ```
 claude-agent-platform/
 ├── src/cap/
+│   ├── __init__.py
 │   ├── py.typed                # PEP 561 type marker
+│   ├── db.py                   # Unified SQLite (WAL mode), migrations, get_db()
+│   ├── hooks/                  # Claude Code hook scripts (short-lived per tool call)
+│   │   ├── __init__.py
+│   │   ├── pretool.py         # PreToolUse: exit(2) = HARD BLOCK, enforcement logic
+│   │   └── posttool.py        # PostToolUse: sync triggers, state updates
+│   ├── enforcement/            # Enforcement bypass and state management
+│   │   ├── __init__.py
+│   │   └── passthrough.py     # Temporary bypass (5min TTL, max 3/hr, fully logged)
+│   ├── memory/                 # 3-tier memory system (Working/Active/Archive)
+│   │   ├── __init__.py
+│   │   ├── scorer.py          # 4-weight composite scoring (recency/importance/relevance/frequency)
+│   │   ├── manager.py         # Store/recall/search memory entries across tiers
+│   │   ├── eviction.py        # Background eviction daemon (score < 0.15 → archive)
+│   │   └── consolidation.py   # Cross-session dedup, cluster merging
+│   ├── orchestration/          # Complexity routing and multi-agent delegation
+│   │   ├── __init__.py
+│   │   ├── router.py          # 3-tier adaptive routing (INLINE/LIGHTWEIGHT/FULL)
+│   │   ├── context.py         # Inter-agent context passing protocol (ContextFrame)
+│   │   └── scratchpad.py      # Inter-agent artifact sharing (temp files + refs)
+│   ├── learning/               # Self-improvement from routing outcomes
+│   │   ├── __init__.py
+│   │   └── engine.py          # Record outcomes, recalculate thresholds, adapt
+│   ├── cost/                   # Budget enforcement and tracking
+│   │   ├── __init__.py
+│   │   └── tracker.py         # Token usage, cost estimates, budget checks
+│   ├── runtime/                # Environment detection and mode switching
+│   │   ├── __init__.py
+│   │   └── offline.py         # Network/budget state detection, graceful degradation
+│   ├── integrity/              # Audit and verification
+│   │   ├── __init__.py
+│   │   └── witness.py         # Cryptographic audit trail for enforcement actions
+│   ├── mcp/                    # MCP servers (stdio JSON-RPC, long-lived)
+│   │   ├── __init__.py
+│   │   ├── orchestrator.py    # Orchestration tools (route, delegate, checkpoint)
+│   │   ├── memory.py          # Memory tools (store, recall, search, evict)
+│   │   └── code_intel.py      # Code tools (structure, dependents, blast radius)
 │   ├── cli/                    # Click + Rich CLI application
+│   │   ├── __init__.py
 │   │   ├── main.py            # All cap commands
-│   │   ├── lifecycle.py       # Init, uninstall, backup/restore
-│   │   ├── daemon.py          # Background workflow daemon
-│   │   └── watch.py           # Live workflow tail
-│   ├── lib/                    # Shared library
-│   │   ├── retrieval.py       # 3-channel hybrid search + RRF fusion
-│   │   ├── embeddings.py      # Bedrock Titan V2 async client
-│   │   ├── graph.py           # Knowledge graph (BFS traversal)
-│   │   ├── models.py          # Data models + pricing constants
-│   │   ├── team_renderer.py   # Rich team simulation renderer
-│   │   ├── api_gateway.py     # Concurrency + rate limiting
-│   │   ├── hooks.py           # Lifecycle hooks system (correction_injection, tool_restriction, budget_check)
-│   │   ├── repo_resolver.py   # GitHub auto-resolution engine
-│   │   ├── security.py        # Input validation, path traversal prevention, repo_name validation
-│   │   ├── config.py          # TOML config loader
-│   │   ├── db_init.py         # Database initialization
-│   │   └── db_maintenance.py  # Vacuum, WAL checkpoint, integrity
-│   ├── servers/                # MCP servers (stdio JSON-RPC)
-│   │   ├── knowledge_server.py
-│   │   ├── session_server.py
-│   │   ├── workflow_server.py
-│   │   └── fleet_server.py
+│   │   └── init.py            # cap init (DB setup, hook generation, MCP registration)
 │   ├── eval/                   # Evaluation framework
 │   │   ├── framework.py       # EvalSuite, metrics, scoring, reports
 │   │   ├── cli.py             # cap eval commands
 │   │   └── suites/            # retrieval, session, security, workflow
 │   └── data/                   # Bundled in wheel (installed by cap init)
-│       ├── agents/            # 21 specialist agent definitions (.md) — 5 Opus, 14 Sonnet, 2 Haiku with output contracts
-│       ├── workflows/         # 10 workflow pipelines (.js)
+│       ├── agents/            # 21 specialist agent definitions (.md)
 │       └── config.toml.default
 ├── tests/
 │   ├── test_retrieval.py       # Retrieval quality + degradation tests
-│   └── test_graph.py           # Knowledge graph traversal tests
+│   ├── test_graph.py           # Knowledge graph traversal tests
+│   ├── test_enforcement.py     # Hook enforcement + passthrough tests
+│   ├── test_memory.py          # 3-tier memory scoring + eviction tests
+│   └── test_routing.py         # Adaptive routing decision tests
 ├── docs/
 │   ├── INSTALL.md              # Installation & credentials
 │   ├── USAGE.md                # Usage scenarios
@@ -409,7 +444,7 @@ claude-agent-platform/
 │   ├── DISTRIBUTION.md         # Build & share
 │   ├── TECHNICAL.md            # This file
 │   ├── ARCHITECTURE.md         # System design
-│   └── adr/                    # Architecture Decision Records
+│   └── adr/                    # Architecture Decision Records (ADR-001 through ADR-012)
 ├── pyproject.toml              # Build config (hatchling)
 ├── LICENSE                     # MIT
 └── .gitignore
@@ -453,25 +488,37 @@ cap doctor
 
 ## Configuration
 
-CAP uses `~/.claude-platform/config.toml`:
+CAP uses `~/.cap/config.toml`:
 
 ```toml
 [platform]
 workspace = "moia-dev"
 
-[embeddings]
-model_id = "amazon.titan-embed-text-v2:0"
-dimensions = 1024
-region = "eu-central-1"
+[database]
+path = "~/.cap/cap.db"       # Unified SQLite database
+wal_mode = true              # Concurrent reads via WAL
+busy_timeout_ms = 5000       # Wait on write contention
+
+[memory]
+working_budget_tokens = 15000     # Hard cap for working memory
+eviction_threshold = 0.15         # Score below this → archive
+stale_days = 90                   # No access → mark stale
+consolidation_on_session_end = true
+
+[routing]
+inline_threshold = 0.3            # Below this → INLINE tier
+full_threshold = 0.65             # Above this → FULL tier
+learning_batch_size = 50          # Decisions before recalculation
+
+[enforcement]
+enabled = true
+max_undelegated_files = 3         # Block at this count
+passthrough_ttl_seconds = 300     # 5-minute bypass
+passthrough_max_per_hour = 3      # Rate limit
 
 [budget]
 monthly_cap_usd = 50.0
 default_workflow_budget_tokens = 500000
-
-[fleet]
-health_check_interval_s = 60
-auto_restart = true
-max_restart_attempts = 3
 ```
 
 ---

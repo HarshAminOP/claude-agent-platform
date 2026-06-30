@@ -105,7 +105,7 @@ def _status_color(status: str) -> str:
 # ── Root group ─────────────────────────────────────────────────────────────────
 
 @click.group()
-@click.version_option(version="0.5.0")
+@click.version_option(version="1.0.0")
 def cli():
     """CAP — Claude Agent Platform"""
     pass
@@ -122,6 +122,17 @@ cli.add_command(restore)
 from cap.eval.cli import eval_group
 cli.add_command(eval_group)
 
+# Register orchestration commands
+from cap.cli.commands import health, dlq, resume, orchestrator_status
+cli.add_command(health)
+cli.add_command(dlq)
+cli.add_command(resume)
+cli.add_command(orchestrator_status, name="orch-status")
+
+# Register witness commands
+from cap.cli.witness import witness
+cli.add_command(witness)
+
 
 # ── cap status ─────────────────────────────────────────────────────────────────
 
@@ -135,7 +146,7 @@ def status():
     data_dir = config.data_dir
 
     console.print(Panel(
-        f"[bold cyan]CAP — Claude Agent Platform[/bold cyan]  [dim]v0.5.0[/dim]\n"
+        f"[bold cyan]CAP — Claude Agent Platform[/bold cyan]  [dim]v1.0.0[/dim]\n"
         f"[dim]Home:[/dim] {config.home}\n"
         f"[dim]Data:[/dim] {data_dir}",
         title="Platform",
@@ -291,6 +302,51 @@ def status():
             console.print(f"[yellow]Budget: could not query ({exc})[/yellow]")
     else:
         console.print("[dim]Budget: platform DB not initialized[/dim]")
+
+    # ── Trust Levels ──────────────────────────────────────────────────────────
+    cap_db_path = Path(os.path.expanduser("~/.cap/cap.db"))
+    if cap_db_path.exists():
+        try:
+            conn = sqlite3.connect(str(cap_db_path))
+            conn.execute("PRAGMA busy_timeout=2000")
+            trust_rows = conn.execute(
+                "SELECT agent_type, action_type, trust_score, success_count, failure_count "
+                "FROM trust_levels ORDER BY trust_score DESC LIMIT 10"
+            ).fetchall()
+            conn.close()
+            if trust_rows:
+                trust_table = Table(title="Trust Levels", box=box.SIMPLE_HEAD, show_edge=False)
+                trust_table.add_column("Agent", style="bold")
+                trust_table.add_column("Action")
+                trust_table.add_column("Trust", justify="right")
+                trust_table.add_column("Success", justify="right")
+                trust_table.add_column("Failure", justify="right")
+                for row in trust_rows:
+                    score = row[2] if isinstance(row, (tuple, list)) else row["trust_score"]
+                    t_color = "green" if score >= 0.7 else ("yellow" if score >= 0.4 else "red")
+                    trust_table.add_row(
+                        row[0], row[1],
+                        f"[{t_color}]{score:.2f}[/{t_color}]",
+                        str(row[3]), str(row[4]),
+                    )
+                console.print(trust_table)
+        except Exception:
+            pass
+
+    # ── Mode ──────────────────────────────────────────────────────────────────
+    try:
+        from cap.db import get_db as _get_cap_db, migrate as _cap_migrate
+        cap_conn = _get_cap_db(str(cap_db_path))
+        _cap_migrate(cap_conn)
+        from cap.cost.tracker import CostTracker
+        tracker = CostTracker(cap_conn)
+        budget_info = tracker.budget_check()
+        mode = budget_info["mode"]
+        mode_color = {"online": "green", "degraded": "yellow", "offline": "red"}.get(mode, "white")
+        console.print(f"\n[bold]Mode:[/bold] [{mode_color}]{mode}[/{mode_color}]")
+        cap_conn.close()
+    except Exception:
+        pass
 
 
 # ── cap doctor ─────────────────────────────────────────────────────────────────
@@ -1316,6 +1372,41 @@ def budget_status():
         console.print(t)
 
 
+@budget.command("raise")
+@click.argument("amount", type=float)
+def budget_raise(amount: float):
+    """Raise the daily budget cap (in USD)."""
+    from cap.db import get_db, migrate as _migrate
+
+    db_path = os.environ.get("CAP_ORCHESTRATOR_DB", os.path.expanduser("~/.cap/cap.db"))
+    db = get_db(db_path)
+    _migrate(db)
+
+    # Get current cap
+    row = db.execute(
+        "SELECT value FROM runtime_state WHERE key = 'daily_budget_usd'"
+    ).fetchone()
+    current_cap = float(row[0]) if row else 5.0
+
+    new_cap = current_cap + amount
+    if new_cap <= 0:
+        console.print("[red]Budget cap cannot be zero or negative.[/red]")
+        raise SystemExit(1)
+
+    import time as _time
+    db.execute(
+        "INSERT OR REPLACE INTO runtime_state (key, value, updated_at) VALUES (?, ?, ?)",
+        ("daily_budget_usd", str(new_cap), _time.time()),
+    )
+    db.commit()
+
+    console.print(
+        f"[green]Daily budget raised[/green]\n"
+        f"  Previous: ${current_cap:.2f}\n"
+        f"  New:      ${new_cap:.2f}  (+${amount:.2f})"
+    )
+
+
 # ── cap sync ───────────────────────────────────────────────────────────────────
 
 @cli.command()
@@ -2168,6 +2259,46 @@ def drift_check(workspace: str, profile: str, auto_task: bool, json_out: bool):
         console.print(f"[green]No drift[/green] in {workspace} ({report.duration_seconds:.1f}s)")
     else:
         console.print(f"[red]Error[/red] (exit {report.plan_exit_code}): {report.plan_stderr[:200]}")
+
+
+# ── cap passthrough ───────────────────────────────────────────────────────────
+
+@cli.command()
+@click.option("--workspace", "-w", default=".", help="Workspace path")
+@click.option("--ttl", "-t", type=int, default=300, show_default=True, help="Time-to-live in seconds")
+@click.option("--reason", "-r", default="", help="Reason for enabling passthrough")
+@click.option("--disable", "do_disable", is_flag=True, help="Disable passthrough immediately")
+@click.option("--check", "do_check", is_flag=True, help="Check if passthrough is active")
+def passthrough(workspace: str, ttl: int, reason: str, do_disable: bool, do_check: bool):
+    """Temporarily bypass enforcement (max 5 min, max 3/hour)."""
+    from cap.enforcement.passthrough import enable as pt_enable, check as pt_check, disable as pt_disable
+
+    workspace = _resolve_workspace(workspace)
+
+    if do_check:
+        active = pt_check(workspace)
+        if active:
+            console.print(f"[green]Passthrough ACTIVE[/green] for {workspace}")
+        else:
+            console.print(f"[dim]Passthrough inactive for {workspace}[/dim]")
+        return
+
+    if do_disable:
+        pt_disable(workspace)
+        console.print(f"[yellow]Passthrough disabled[/yellow] for {workspace}")
+        return
+
+    result = pt_enable(workspace, ttl=ttl, reason=reason)
+    if "error" in result:
+        console.print(f"[red]{result['error']}[/red]")
+        raise SystemExit(1)
+
+    console.print(
+        f"[green]Passthrough enabled[/green] for {workspace}\n"
+        f"  Expires in: [cyan]{result['expires_in']}s[/cyan]\n"
+        + (f"  Reason: {result['reason']}\n" if result.get('reason') else "")
+        + f"  [dim]Enforcement is paused. Max 3 activations per hour.[/dim]"
+    )
 
 
 # ── Entrypoint ─────────────────────────────────────────────────────────────────

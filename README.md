@@ -14,7 +14,7 @@ CAP transforms Claude from a single chat session into a **persistent, budget-awa
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.5.0-blue?style=for-the-badge)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue?style=for-the-badge)](pyproject.toml)
 
 <br>
 
@@ -153,7 +153,7 @@ No more "I left it running overnight and it burned $200." CAP makes that impossi
 
 ### Self-Managing Infrastructure
 
-CAP runs 4 background servers that extend Claude's capabilities. You never need to think about them:
+CAP runs 9 background servers that extend Claude's capabilities. You never need to think about them:
 
 - Automatic health checks every 30 seconds
 - Self-restart on failure with exponential backoff
@@ -174,7 +174,7 @@ If something fails, it fixes itself. If something can't be fixed, it tells you w
 |:--|:----------|:-------------|
 | **Agents** | 21 specialists | 5 running Opus (architecture, security, optimization, system, orchestrator), 14 on Sonnet (devops, cicd, dev, sre, code-review, docs, test, teacher, dev, etc.), 2 on Haiku (basic CLI, helper) — all with output contracts and rejection criteria |
 | **Workflows** | 10 pipelines | New service setup, incident response, security audit, cost optimization, architecture review, repo health, deployment impact, security hardening, session memory, system evolution |
-| **Servers** | 15 MCP servers | 6 CAP core (knowledge, session, workflow, fleet, backlog, AST) + 9 platform (AWS docs, IAM, EKS, CloudWatch, Lambda, Pricing, IaC, Kubernetes, Terraform) |
+| **Servers** | 18 MCP servers | 9 CAP core (orchestrator, workflow, knowledge, session, fleet, backlog, code-intel, AST, diagram) + 9 platform (AWS docs, IAM, EKS, CloudWatch, Lambda, Pricing, IaC, Kubernetes, Terraform) |
 | **Backlog** | Persistent task queue | Structured tasks with priority, dependencies, acceptance criteria, atomic claim, and agent-assignable work |
 | **Decisions** | Decision cards | Options with tradeoffs presented to PO; resolution recorded for audit trail |
 | **Conflicts** | Disagreement protocol | When agents disagree, blocking conflicts auto-escalate to PO; advisory logged |

@@ -179,16 +179,21 @@ repo-sync-clean.js          security-hardening.js
 session-observe.js          system-evolve.js
 ```
 
-#### 6. Registers 4 MCP servers with Claude Code
+#### 6. Registers 9 MCP servers with Claude Code
 
 CAP registers its MCP servers via `claude mcp add`:
 
 | Server | Function |
 |--------|----------|
-| `cap-platform` | Workflow engine, budget tracking, event bus |
+| `cap-orchestrator` | Complexity routing, agent delegation |
+| `cap-workflow` | Workflow engine, budget tracking, event bus |
 | `cap-knowledge` | Knowledge graph, semantic search, embeddings, GitHub auto-resolution |
-| `cap-sessions` | Session memory, learnings, corrections |
+| `cap-session` | Session memory, learnings, corrections |
 | `cap-fleet` | Server health, registry, diagnostics |
+| `cap-backlog` | Task queue, decisions, conflicts, progressive autonomy |
+| `cap-code-intel` | Code intelligence, blast radius analysis |
+| `cap-ast` | AST-level code search via ast-grep |
+| `cap-diagram` | Diagram rendering (Mermaid, architecture) |
 
 New MCP tools in v0.5.0:
 - `knowledge_resolve_repo` — GitHub auto-resolution
@@ -376,7 +381,7 @@ CAP registers its MCP servers using `claude mcp add`. If Claude Code is not inst
 | `~/.claude-platform/config.toml` | Platform configuration | ~2 KB | `0644` |
 | `~/.claude-platform/backups/` | Config backups | varies | `0600` |
 | `~/.claude-platform/logs/` | Server logs | varies | `0600` |
-| `~/.claude/agents/*.md` | Agent definitions (14 files) | ~2 KB each | `0644` |
+| `~/.claude/agents/*.md` | Agent definitions (21 files) | ~2 KB each | `0644` |
 | `~/.claude/workflows/*.js` | Workflow scripts (10 files) | ~5 KB each | `0644` |
 
 ### Data growth
@@ -410,7 +415,7 @@ This completely removes CAP and restores your original Claude Code configuration
 
 | Step | Action | Effect |
 |------|--------|--------|
-| 1 | Deregisters MCP servers | Runs `claude mcp remove` for all 4 CAP servers |
+| 1 | Deregisters MCP servers | Runs `claude mcp remove` for all 9 CAP servers |
 | 2 | Removes agent definitions | Deletes CAP-installed files from `~/.claude/agents/` |
 | 3 | Removes workflow scripts | Deletes CAP-installed files from `~/.claude/workflows/` |
 | 4 | Restores original configs | Copies backup `~/.claude.json` and `~/.claude/settings.json` back |
