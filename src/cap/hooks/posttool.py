@@ -128,6 +128,47 @@ def main():
     except Exception:
         pass  # agent_health_events table may not exist yet
 
+    # ── Consume pending sync_triggers (debounced: only if > 5s old) ──────────
+    try:
+        pending_triggers = db.execute(
+            """SELECT id, trigger_type, detail FROM sync_triggers
+               WHERE timestamp <= ?
+               ORDER BY timestamp LIMIT 20""",
+            (now - 5,)
+        ).fetchall()
+
+        if pending_triggers:
+            # Determine workspace: use CWD as fallback
+            workspace = os.getcwd()
+
+            # Import SyncEngine and run incremental sync
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+            from cap.sync.engine import SyncEngine
+            SyncEngine(workspace, db).incremental_sync(workspace)
+
+            # Delete consumed triggers
+            trigger_ids = [str(row[0]) for row in pending_triggers]
+            db.execute(
+                f"DELETE FROM sync_triggers WHERE id IN ({','.join('?' * len(trigger_ids))})",
+                trigger_ids,
+            )
+            db.commit()
+    except Exception:
+        pass  # sync failures must never crash the hook
+
+    # ── Edit/Write: re-index code symbols for edited file ────────────────────
+    if tool_name in ("Edit", "Write"):
+        try:
+            edited_file = ""
+            if isinstance(tool_input, dict):
+                edited_file = tool_input.get("file_path", "")
+            if edited_file and os.path.isfile(edited_file):
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+                from cap.code_intel.indexer import index_file
+                index_file(edited_file, db)
+        except Exception:
+            pass  # indexing failures must never crash the hook
+
     sys.exit(0)
 
 

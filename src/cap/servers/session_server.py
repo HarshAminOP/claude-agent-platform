@@ -293,6 +293,22 @@ async def _handle_start(args: dict):
         (workspace, config.session.max_decisions_loaded)
     ).fetchall()
 
+    # Trigger sync on session start so agents never work with stale data.
+    # Only run for new sessions to avoid duplicate work on session reuse.
+    sync_result = {}
+    if is_new:
+        try:
+            from cap.sync.engine import SyncEngine
+            sync_result = SyncEngine(workspace, db).on_session_start(workspace)
+            logger.info(
+                "Session sync complete: fetched=%s behind=%d reindexed=%d",
+                sync_result.get("fetched"),
+                sync_result.get("behind_count", 0),
+                sync_result.get("files_reindexed", 0),
+            )
+        except Exception as e:
+            logger.warning("Session sync failed (non-fatal): %s", e)
+
     return [TextContent(type="text", text=json.dumps({
         "session_id": session_id,
         "is_new": is_new,
@@ -304,6 +320,7 @@ async def _handle_start(args: dict):
             "learnings": len(learnings),
             "decisions": len(decisions),
         },
+        "sync": sync_result,
     }))]
 
 

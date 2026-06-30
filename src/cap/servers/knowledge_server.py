@@ -496,6 +496,66 @@ async def _handle_sync(args: dict):
     # Invalidate search cache — synced content may affect results
     _cache_clear()
 
+    # Auto-embed: if sync queued new embeddings, kick off a processing pass now
+    # rather than waiting for the background loop's next 30-second tick.
+    # Failures (rate limits, offline Bedrock) are silently tolerated — items
+    # stay in the queue and will be picked up by _process_embedding_queue().
+    embeddings_processed = 0
+    if stats.embeddings_queued and stats.embeddings_queued > 0:
+        try:
+            pending = db.execute(
+                """SELECT eq.id, eq.entry_id, ke.content, ke.uuid, eq.attempts
+                   FROM embedding_queue eq
+                   JOIN knowledge_entries ke ON ke.id = eq.entry_id
+                   WHERE eq.status = 'pending' AND eq.attempts < eq.max_attempts
+                   ORDER BY eq.created_at LIMIT 25"""
+            ).fetchall()
+
+            if pending:
+                texts = [row[2][:config.bedrock.embedding_max_input_tokens * 4] for row in pending]
+                vectors = await embedding_client.embed_batch(texts)
+
+                for row, vector in zip(pending, vectors):
+                    eq_id, entry_id, _, entry_uuid, attempts = row
+                    if vector is not None:
+                        if vectors_table is not None:
+                            entry = db.execute(
+                                "SELECT content_type, title, source_path, workspace FROM knowledge_entries WHERE id = ?",
+                                (entry_id,)
+                            ).fetchone()
+                            vectors_table.add([{
+                                "id": entry_uuid,
+                                "vector": vector,
+                                "workspace": entry[3],
+                                "content_type": entry[0],
+                                "title": entry[1],
+                                "source_path": entry[2] or "",
+                                "chunk_index": 0,
+                                "created_at": _now(),
+                            }])
+                        db.execute(
+                            "UPDATE embedding_queue SET status = 'done', processed_at = ? WHERE id = ?",
+                            (_now(), eq_id)
+                        )
+                        db.execute(
+                            "UPDATE knowledge_entries SET embedding_status = 'embedded' WHERE id = ?",
+                            (entry_id,)
+                        )
+                        embeddings_processed += 1
+                    else:
+                        new_attempts = attempts + 1
+                        status = "failed" if new_attempts >= 3 else "pending"
+                        db.execute(
+                            "UPDATE embedding_queue SET attempts = ?, status = ? WHERE id = ?",
+                            (new_attempts, status, eq_id)
+                        )
+
+                db.commit()
+                logger.info("Post-sync embedding: processed %d/%d items", embeddings_processed, len(pending))
+        except Exception as e:
+            # Rate limit or Bedrock offline — leave items in queue for background loop
+            logger.warning("Post-sync embedding failed (non-fatal, queue retained): %s", e)
+
     return [TextContent(type="text", text=json.dumps({
         "status": "complete" if not stats.errors else "complete_with_errors",
         "workspace": workspace,
@@ -507,6 +567,7 @@ async def _handle_sync(args: dict):
         "files_unchanged": stats.files_unchanged,
         "graph_edges": stats.graph_edges_created,
         "embeddings_queued": stats.embeddings_queued,
+        "embeddings_processed": embeddings_processed,
         "errors": stats.errors[:5] if stats.errors else [],
     }))]
 
