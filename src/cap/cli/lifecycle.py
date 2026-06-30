@@ -178,8 +178,63 @@ def _restore_user_configs() -> dict[str, bool]:
 
 # ── CLAUDE.md ────────────────────────────────────────────────────────────────
 
-_CLAUDE_MD_CONTENT = """\
+def _get_claude_md_content() -> str:
+    """Load CLAUDE.md template from the bundled data package."""
+    template_path = _get_bundled_data_path() / "claude_md_template.md"
+    if template_path.exists():
+        return template_path.read_text()
+    # Fallback: use the currently installed CLAUDE.md if available
+    existing = _claude_dir() / "CLAUDE.md"
+    if existing.exists():
+        return existing.read_text()
+    return _CLAUDE_MD_FALLBACK
+
+
+_CLAUDE_MD_FALLBACK = """\
 # Claude Code — Global Instructions
+
+## MANDATORY BEHAVIOR — READ BEFORE ANYTHING ELSE
+
+1. **You MUST use the Agent tool for any non-trivial task.** A "non-trivial task" is anything that takes more than a single file edit or a quick lookup. If you find yourself about to write more than 20 lines of code, STOP and delegate to a specialist agent instead.
+
+2. **You MUST call session_record after every significant action.** This includes: decisions made, corrections received, discoveries found. Load the tool via ToolSearch first:
+   ```
+   ToolSearch({ query: "select:mcp__cap-session__session_record" })
+   ```
+   Then call:
+   ```
+   mcp__cap-session__session_record({ event_type: "decision", content: "...", workspace: "<cwd>" })
+   ```
+
+3. **You MUST call knowledge_search BEFORE using bash grep/find.** No exceptions.
+
+4. **You are a Product Owner interface, NOT an engineer.** Your job is to:
+   - Understand what the user wants
+   - Delegate to specialist agents (dev, devops, security, sre, etc.)
+   - Review their output
+   - Report results
+   You do NOT write code directly unless it's a 1-line fix.
+
+---
+
+## Auto-Orchestration Rules
+
+**These rules are AUTOMATIC. Apply the correct orchestration pattern on EVERY task.**
+
+### Agent Routing (use this EVERY time)
+
+Ask yourself: "What kind of work is this?"
+- Writing/changing code → spawn `dev` agent
+- Infrastructure/Terraform/K8s → spawn `devops` agent
+- Security review/IAM → spawn `security` agent
+- Monitoring/alerting/SLOs → spawn `sre` agent
+- Multiple concerns → spawn `orchestrator` agent
+- Simple question → answer directly (no agent needed)
+- Research across repos → spawn `Explore` agent
+
+NEVER write more than 20 lines of code yourself. Delegate.
+
+---
 
 ## Security
 
@@ -219,7 +274,7 @@ ToolSearch({ query: "select:mcp__cap-knowledge__knowledge_search" })
 
 Step 2 — Call the tool:
 ```
-mcp__cap-knowledge__knowledge_search({ query: "your search terms", workspace: "<workspace-path>" })
+mcp__cap-knowledge__knowledge_search({ query: "your search terms" })
 ```
 
 Full retrieval priority:
@@ -230,11 +285,22 @@ Full retrieval priority:
 
 **NEVER skip straight to bash.** The knowledge base is faster and more complete than filesystem traversal.
 
-## Session Memory
+## Session Memory (MANDATORY — every session)
 
-- Use `session_start` at the beginning of complex work
-- Use `session_record` to persist decisions and learnings during work
-- Use `session_feedback` when the user corrects you — it persists across sessions
+Step 1: Load session tools at conversation start:
+```
+ToolSearch({ query: "select:mcp__cap-session__session_start,mcp__cap-session__session_record,mcp__cap-session__session_feedback" })
+```
+
+Step 2: Start or resume session:
+```
+mcp__cap-session__session_start({ workspace: "<current working directory>" })
+```
+
+Step 3: Record events throughout the conversation:
+- After any decision: `session_record({ event_type: "decision", content: "...", workspace: "..." })`
+- After user correction: `session_feedback({ what_was_wrong: "...", what_is_correct: "...", workspace: "..." })`
+- After discovery: `session_record({ event_type: "discovery", content: "...", workspace: "..." })`
 
 ## What NOT to do
 
@@ -254,7 +320,7 @@ def _install_claude_md(force: bool = False) -> bool:
         return False
 
     claude_dir.mkdir(parents=True, exist_ok=True)
-    claude_md.write_text(_CLAUDE_MD_CONTENT)
+    claude_md.write_text(_get_claude_md_content())
     return True
 
 
@@ -352,6 +418,79 @@ def _install_settings_permissions() -> bool:
             added += 1
 
     if added == 0:
+        return False
+
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+    return True
+
+
+_CAP_HOOKS = {
+    "Stop": [
+        {
+            "matcher": "",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": (
+                        "mkdir -p ~/.claude-platform/data && "
+                        'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) session_active workspace=$(pwd)" '
+                        ">> ~/.claude-platform/data/session_activity.log"
+                    ),
+                }
+            ],
+        }
+    ],
+    "PostToolUse": [
+        {
+            "matcher": "Agent",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": (
+                        "mkdir -p ~/.claude-platform/data && "
+                        'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) agent_dispatched workspace=$(pwd)" '
+                        ">> ~/.claude-platform/data/agent_activity.log"
+                    ),
+                }
+            ],
+        }
+    ],
+}
+
+
+def _install_hooks() -> bool:
+    """Add CAP hooks to settings.json. Returns True if modified."""
+    settings_path = _settings_json_path()
+
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except json.JSONDecodeError:
+            settings = {}
+    else:
+        _claude_dir().mkdir(parents=True, exist_ok=True)
+        settings = {}
+
+    hooks = settings.setdefault("hooks", {})
+    modified = False
+
+    for event, hook_list in _CAP_HOOKS.items():
+        if event not in hooks:
+            hooks[event] = hook_list
+            modified = True
+        else:
+            # Check if our hooks are already present (by command content)
+            existing_commands = {
+                h.get("command", "") for entry in hooks[event] for h in entry.get("hooks", [])
+            }
+            for hook_entry in hook_list:
+                for h in hook_entry.get("hooks", []):
+                    if h.get("command", "") not in existing_commands:
+                        hooks[event].append(hook_entry)
+                        modified = True
+                        break
+
+    if not modified:
         return False
 
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
@@ -677,7 +816,14 @@ def init(minimal: bool, force: bool, skip_mcp: bool):
     else:
         console.print(f"  [dim]─[/dim] Permissions already configured")
 
-    # ── 10. Save manifest ─────────────────────────────────────────────────
+    # ── 10. Hooks ────────────────────────────────────────────────────────
+    console.print("\n[bold]10. Installing session & agent hooks[/bold]")
+    if _install_hooks():
+        console.print(f"  [green]✓[/green] Stop + PostToolUse hooks added to settings.json")
+    else:
+        console.print(f"  [dim]─[/dim] Hooks already configured")
+
+    # ── 11. Save manifest ─────────────────────────────────────────────────
     manifest["version"] = "0.5.0"
     manifest["cap_home"] = str(cap_home)
     manifest["python"] = sys.executable
