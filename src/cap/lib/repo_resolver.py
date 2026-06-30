@@ -42,6 +42,7 @@ def resolve_repo(
     db: sqlite3.Connection | None = None,
     config: GitHubConfig | None = None,
     domain_hint: str | None = None,
+    workspace: str | None = None,
 ) -> dict:
     """Resolve a dependent repo: check locally, clone from GitHub if missing.
 
@@ -50,6 +51,9 @@ def resolve_repo(
         db:           Optional SQLite connection for post-clone sync
         config:       GitHubConfig (loaded from platform config if not provided)
         domain_hint:  Optional subdirectory hint (e.g., "Observability-Alerting")
+        workspace:    Optional clone destination directory. If provided, used as
+                      the base path for cloning. Falls back to config.clone_base_path,
+                      then to CWD.
 
     Returns:
         Dict with keys: status, path, cloned, message
@@ -71,14 +75,13 @@ def resolve_repo(
             "message": "GitHub org not configured. Set [github].org in config.toml",
         }
 
-    clone_base = Path(config.clone_base_path) if config.clone_base_path else None
-    if clone_base is None:
-        return {
-            "status": "error",
-            "path": None,
-            "cloned": False,
-            "message": "clone_base_path not configured. Set [github].clone_base_path in config.toml",
-        }
+    # Determine clone base: workspace param > config.clone_base_path > CWD
+    if workspace:
+        clone_base = Path(workspace)
+    elif config.clone_base_path:
+        clone_base = Path(config.clone_base_path)
+    else:
+        clone_base = Path.cwd()
 
     local_path = _find_local_repo(repo_name, clone_base, domain_hint)
     if local_path:

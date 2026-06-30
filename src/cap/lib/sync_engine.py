@@ -440,38 +440,58 @@ def _generate_repo_summary(
     _upsert_entry(db, workspace, source_path, "text", title, content, content_hash)
 
 
-def _find_all_repos(workspace_path: str) -> list[tuple[str, str]]:
-    """Find all git repos under workspace (up to depth 3). Returns (repo_name, repo_abs_path)."""
-    repos = []
+def _find_all_repos(workspace_path: str, max_repos: int = 200, max_depth: int = 5) -> list[tuple[str, str]]:
+    """Find all git repos under workspace using bounded recursive walk.
+
+    Discovers repos at any depth from 1 to max_depth. Once a .git directory is
+    found, that directory is treated as a repo root and its contents are not
+    descended into further.
+
+    Args:
+        workspace_path: Absolute path to workspace root.
+        max_repos:      Stop searching after this many repos found.
+        max_depth:      Maximum directory depth to search.
+
+    Returns:
+        List of (repo_name, repo_abs_path) for each discovered repo.
+    """
+    repos: list[tuple[str, str]] = []
     ws = str(workspace_path)
-    for depth1 in os.listdir(ws):
-        d1 = os.path.join(ws, depth1)
-        if not os.path.isdir(d1) or depth1.startswith(".") or depth1 in SKIP_DIRS:
+
+    # Directories to skip entirely (in addition to SKIP_DIRS from module level)
+    extra_skip = frozenset({"node_modules", "vendor", "__pycache__", ".venv", "dist", "build"})
+    skip_all = SKIP_DIRS | extra_skip
+
+    for dirpath, dirnames, _filenames in os.walk(ws):
+        # Calculate current depth relative to workspace root
+        rel = os.path.relpath(dirpath, ws)
+        if rel == ".":
+            depth = 0
+        else:
+            depth = rel.count(os.sep) + 1
+
+        # Prune: don't descend deeper than max_depth
+        if depth >= max_depth:
+            dirnames[:] = []
             continue
-        if os.path.isdir(os.path.join(d1, ".git")):
-            repos.append((depth1, d1))
-            continue
-        # Check depth 2 (repos/{team}/{repo})
-        try:
-            for depth2 in os.listdir(d1):
-                d2 = os.path.join(d1, depth2)
-                if not os.path.isdir(d2) or depth2.startswith(".") or depth2 in SKIP_DIRS:
-                    continue
-                if os.path.isdir(os.path.join(d2, ".git")):
-                    repos.append((depth2, d2))
-                    continue
-                # Check depth 3
-                try:
-                    for depth3 in os.listdir(d2):
-                        d3 = os.path.join(d2, depth3)
-                        if not os.path.isdir(d3) or depth3.startswith(".") or depth3 in SKIP_DIRS:
-                            continue
-                        if os.path.isdir(os.path.join(d3, ".git")):
-                            repos.append((depth3, d3))
-                except OSError:
-                    pass
-        except OSError:
-            pass
+
+        # Prune: skip hidden dirs and known noise directories
+        dirnames[:] = [
+            d for d in dirnames
+            if not d.startswith(".") and d not in skip_all
+        ]
+
+        # Check if any immediate subdirectory has a .git (meaning it's a repo)
+        # We iterate over a copy since we may modify dirnames
+        for d in list(dirnames):
+            candidate = os.path.join(dirpath, d)
+            if os.path.isdir(os.path.join(candidate, ".git")):
+                repos.append((d, candidate))
+                # Don't descend into this repo's contents
+                dirnames.remove(d)
+                if len(repos) >= max_repos:
+                    return repos
+
     return repos
 
 
