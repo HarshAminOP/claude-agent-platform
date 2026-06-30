@@ -87,6 +87,8 @@ class SyncStats:
     files_updated: int = 0
     graph_edges_created: int = 0
     embeddings_queued: int = 0
+    structures_indexed: int = 0
+    repo_summaries_generated: int = 0
     errors: list = field(default_factory=list)
 
 
@@ -176,12 +178,17 @@ def sync_workspace(
             stats.files_updated += 1
 
     _update_sync_state(db, workspace, stats)
+
+    # Index directory structures and generate repo summaries
+    _index_directory_structures(db, workspace_path, workspace, stats)
+
     db.commit()
 
     logger.info(
-        "Sync complete: scanned=%d indexed=%d unchanged=%d edges=%d",
+        "Sync complete: scanned=%d indexed=%d unchanged=%d edges=%d structures=%d summaries=%d",
         stats.files_scanned, stats.files_indexed,
         stats.files_unchanged, stats.graph_edges_created,
+        stats.structures_indexed, stats.repo_summaries_generated,
     )
     return stats
 
@@ -311,6 +318,258 @@ def _update_sync_state(db: sqlite3.Connection, workspace: str, stats: SyncStats)
              stats.files_indexed + stats.files_unchanged + stats.files_updated,
              status, json.dumps(stats.errors[:10]) if stats.errors else None)
         )
+
+
+# ── Directory structure indexing ─────────────────────────────────────────────
+
+# Structural directory names to always inspect
+_STRUCTURAL_DIR_NAMES = frozenset({
+    "modules", "services", "apps", "charts", "packages", "cmd", "internal",
+})
+
+# Extension → human-readable category for labeling
+_EXT_LABELS = {
+    ".tf": "Terraform modules",
+    ".go": "Go packages",
+    ".py": "Python packages",
+    ".ts": "TypeScript packages",
+    ".js": "JavaScript packages",
+    ".tsx": "TypeScript packages",
+    ".jsx": "JavaScript packages",
+    ".yaml": "configuration",
+    ".yml": "configuration",
+}
+
+
+def _dominant_ext_label(subdir_path: str) -> str:
+    """Return a human-readable label for the dominant file type found in subdir_path."""
+    counts: dict[str, int] = {}
+    try:
+        for fname in os.listdir(subdir_path):
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in INDEXABLE_EXTENSIONS:
+                counts[ext] = counts.get(ext, 0) + 1
+    except OSError:
+        pass
+    if not counts:
+        return "files"
+    dominant = max(counts, key=lambda e: counts[e])
+    return _EXT_LABELS.get(dominant, "files")
+
+
+def _file_list_for_subdir(subdir_path: str) -> tuple[int, list[str]]:
+    """Return (total_count, list_of_names) for indexable files directly in subdir_path."""
+    names: list[str] = []
+    try:
+        for fname in sorted(os.listdir(subdir_path)):
+            if fname.startswith("."):
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in INDEXABLE_EXTENSIONS or fname.lower() in ("dockerfile", "makefile", "justfile"):
+                names.append(fname)
+    except OSError:
+        pass
+    return len(names), names
+
+
+def _is_structural_dir(dir_path: str, dir_name: str) -> bool:
+    """Return True if dir_path qualifies as a structural directory worth indexing."""
+    if dir_name in _STRUCTURAL_DIR_NAMES:
+        return True
+
+    # Detect any directory at depth 1-2 that contains 3+ subdirs with code files
+    try:
+        subdirs = [
+            e for e in os.listdir(dir_path)
+            if os.path.isdir(os.path.join(dir_path, e))
+            and e not in SKIP_DIRS
+            and not e.startswith(".")
+        ]
+        if len(subdirs) < 3:
+            return False
+        code_subdir_count = 0
+        for sd in subdirs:
+            sd_path = os.path.join(dir_path, sd)
+            for fname in os.listdir(sd_path):
+                ext = os.path.splitext(fname)[1].lower()
+                if ext in INDEXABLE_EXTENSIONS:
+                    code_subdir_count += 1
+                    break
+        return code_subdir_count >= 3
+    except OSError:
+        return False
+
+
+def _generate_repo_summary(
+    db: sqlite3.Connection,
+    repo_path: str,
+    repo_name: str,
+    workspace: str,
+    structural_dirs_info: list[dict],
+) -> None:
+    """Upsert a repo summary entry that lists top-level dirs and structural contents."""
+    lines: list[str] = [f"Repository: {repo_name}", ""]
+
+    # Top-level directory listing
+    try:
+        top_entries = sorted(os.listdir(repo_path))
+        top_dirs = [e for e in top_entries if os.path.isdir(os.path.join(repo_path, e))
+                    and e not in SKIP_DIRS and not e.startswith(".")]
+        top_files = [e for e in top_entries if os.path.isfile(os.path.join(repo_path, e))
+                     and not e.startswith(".")]
+        if top_dirs:
+            lines.append("Top-level directories: " + ", ".join(top_dirs))
+        if top_files:
+            lines.append("Root files: " + ", ".join(top_files[:20]))
+    except OSError:
+        pass
+
+    # Structural dir summaries
+    if structural_dirs_info:
+        lines.append("")
+        lines.append("Provides:")
+        for info in structural_dirs_info:
+            label = info["label"]
+            names = info["subdir_names"]
+            lines.append(f"  {label}: {', '.join(names)}")
+
+    content = "\n".join(lines)
+    content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
+    source_path = f"{repo_name}:summary"
+    title = f"{repo_name} (repo summary)"
+    _upsert_entry(db, workspace, source_path, "text", title, content, content_hash)
+
+
+def _find_all_repos(workspace_path: str) -> list[tuple[str, str]]:
+    """Find all git repos under workspace (up to depth 3). Returns (repo_name, repo_abs_path)."""
+    repos = []
+    ws = str(workspace_path)
+    for depth1 in os.listdir(ws):
+        d1 = os.path.join(ws, depth1)
+        if not os.path.isdir(d1) or depth1.startswith(".") or depth1 in SKIP_DIRS:
+            continue
+        if os.path.isdir(os.path.join(d1, ".git")):
+            repos.append((depth1, d1))
+            continue
+        # Check depth 2 (repos/{team}/{repo})
+        try:
+            for depth2 in os.listdir(d1):
+                d2 = os.path.join(d1, depth2)
+                if not os.path.isdir(d2) or depth2.startswith(".") or depth2 in SKIP_DIRS:
+                    continue
+                if os.path.isdir(os.path.join(d2, ".git")):
+                    repos.append((depth2, d2))
+                    continue
+                # Check depth 3
+                try:
+                    for depth3 in os.listdir(d2):
+                        d3 = os.path.join(d2, depth3)
+                        if not os.path.isdir(d3) or depth3.startswith(".") or depth3 in SKIP_DIRS:
+                            continue
+                        if os.path.isdir(os.path.join(d3, ".git")):
+                            repos.append((depth3, d3))
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    return repos
+
+
+def _index_directory_structures(
+    db: sqlite3.Connection,
+    workspace_path: Path,
+    workspace: str,
+    stats: SyncStats,
+) -> None:
+    """Detect repos and structural dirs; upsert directory-listing entries."""
+    repos = _find_all_repos(str(workspace_path))
+    if not repos:
+        return
+
+    for repo_name, repo_path in repos:
+        structural_dirs_info: list[dict] = []
+
+        # Collect candidate dirs at depth 1 under repo
+        try:
+            repo_entries = os.listdir(repo_path)
+        except OSError:
+            continue
+
+        depth1_dirs = [
+            e for e in repo_entries
+            if os.path.isdir(os.path.join(repo_path, e))
+            and e not in SKIP_DIRS
+            and not e.startswith(".")
+        ]
+
+        # Also include src/* subdirs (depth 2 via src/)
+        src_path = os.path.join(repo_path, "src")
+        if os.path.isdir(src_path):
+            try:
+                for sd in os.listdir(src_path):
+                    sd_full = os.path.join(src_path, sd)
+                    if os.path.isdir(sd_full) and sd not in SKIP_DIRS and not sd.startswith("."):
+                        depth1_dirs.append(f"src/{sd}")
+            except OSError:
+                pass
+
+        for dir_rel in depth1_dirs:
+            dir_abs = os.path.join(repo_path, dir_rel)
+            dir_name = os.path.basename(dir_rel)
+
+            if not _is_structural_dir(dir_abs, dir_name):
+                continue
+
+            # Enumerate immediate subdirectories
+            try:
+                subdirs = sorted([
+                    e for e in os.listdir(dir_abs)
+                    if os.path.isdir(os.path.join(dir_abs, e))
+                    and e not in SKIP_DIRS
+                    and not e.startswith(".")
+                ])
+            except OSError:
+                continue
+
+            if not subdirs:
+                continue
+
+            # Build content lines per subdir
+            subdir_lines: list[str] = []
+            dominant_label = "files"
+            for sd_name in subdirs:
+                sd_abs = os.path.join(dir_abs, sd_name)
+                count, names = _file_list_for_subdir(sd_abs)
+                if count == 0:
+                    continue
+                if count <= 5:
+                    subdir_lines.append(f"- {sd_name}/ ({count} files: {', '.join(names)})")
+                else:
+                    subdir_lines.append(f"- {sd_name}/ ({count} files)")
+                dominant_label = _dominant_ext_label(sd_abs)
+
+            if not subdir_lines:
+                continue
+
+            label = f"{dominant_label} in {dir_rel}/"
+            n = len(subdir_lines)
+            header = f"{dir_rel}/ in {repo_name} contains {n} {dominant_label}:"
+            content = header + "\n" + "\n".join(subdir_lines)
+            content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
+            source_path = f"{repo_name}/{dir_rel}:structure"
+            title = f"{repo_name}/{dir_rel} (structure)"
+
+            _upsert_entry(db, workspace, source_path, "text", title, content, content_hash)
+            stats.structures_indexed += 1
+
+            structural_dirs_info.append({
+                "dir_rel": dir_rel,
+                "label": label,
+                "subdir_names": subdirs,
+            })
+
+        _generate_repo_summary(db, repo_path, repo_name, workspace, structural_dirs_info)
+        stats.repo_summaries_generated += 1
 
 
 # ── Title extraction ─────────────────────────────────────────────────────────
