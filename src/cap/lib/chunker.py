@@ -294,6 +294,10 @@ _EXT_MAP: dict[str, ChunkStrategy] = {
 }
 
 
+# Convenience alias for backward compatibility
+chunk_text = chunk_content
+
+
 def detect_strategy(file_ext: str) -> ChunkStrategy:
     """Return the recommended :class:`ChunkStrategy` for a file extension.
 

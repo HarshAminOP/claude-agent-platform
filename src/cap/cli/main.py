@@ -105,7 +105,7 @@ def _status_color(status: str) -> str:
 # ── Root group ─────────────────────────────────────────────────────────────────
 
 @click.group()
-@click.version_option(version="1.0.0")
+@click.version_option(version="2.0.0")
 def cli():
     """CAP — Claude Agent Platform"""
     pass
@@ -146,8 +146,9 @@ def status():
     config = load_config()
     data_dir = config.data_dir
 
+    from cap import __version__ as cap_version
     console.print(Panel(
-        f"[bold cyan]CAP — Claude Agent Platform[/bold cyan]  [dim]v1.0.0[/dim]\n"
+        f"[bold cyan]CAP — Claude Agent Platform[/bold cyan]  [dim]v{cap_version}[/dim]\n"
         f"[dim]Home:[/dim] {config.home}\n"
         f"[dim]Data:[/dim] {data_dir}",
         title="Platform",

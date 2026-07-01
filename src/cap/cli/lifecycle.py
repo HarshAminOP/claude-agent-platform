@@ -1316,8 +1316,9 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
     claude_dir = _claude_dir()
     workspace_path = _resolve_workspace(workspace)
 
+    from cap import __version__ as cap_version
     console.print(Panel(
-        f"[bold]CAP — Claude Agent Platform[/bold] v0.5.0\n"
+        f"[bold]CAP — Claude Agent Platform[/bold] v{cap_version}\n"
         f"Home: {cap_home}\n"
         f"Workspace: {workspace_path}",
         box=box.ROUNDED, style="cyan",
@@ -1614,7 +1615,7 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
     # ══════════════════════════════════════════════════════════════════════════
 
     # Save manifest
-    manifest["version"] = "0.5.0"
+    manifest["version"] = cap_version
     manifest["cap_home"] = str(cap_home)
     manifest["python"] = sys.executable
     manifest["workspace"] = str(workspace_path)

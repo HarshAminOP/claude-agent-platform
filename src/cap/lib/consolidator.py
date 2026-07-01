@@ -69,6 +69,14 @@ def _classify_failure(last_error: str | None) -> str:
 # ── Main function ─────────────────────────────────────────────────────────────
 
 
+def run_consolidation(
+    db: sqlite3.Connection,
+    sessions_db_path: Optional[Path] = None,
+) -> ConsolidationResult:
+    """Alias for :func:`consolidate` — backward compatibility."""
+    return consolidate(db, sessions_db_path)
+
+
 def consolidate(
     db: sqlite3.Connection,
     sessions_db_path: Optional[Path] = None,

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-agent-platform"
-version = "1.0.0"
+version = "2.0.0"
 description = "Claude Agent Platform — multi-agent orchestration, hybrid retrieval, workflow engine, and session memory for Claude Code"
 readme = "README.md"
 license = "MIT"

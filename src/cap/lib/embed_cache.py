@@ -229,3 +229,7 @@ class PersistentEmbedCache:
             """
         )
         # Commit is deferred to the caller so LRU eviction + insert are atomic.
+
+
+# Backward-compatible alias
+EmbedCache = PersistentEmbedCache
