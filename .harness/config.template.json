@@ -1,42 +1,38 @@
 {
   "_comment": "Template for CAP harness config. Generated config lives at ~/.claude-platform/harness-config.json. Run 'cap init' to configure.",
-  "provider": "aws-bedrock",
+  "provider": "__SET_BY_CAP_INIT__",
   "aws": {
+    "_comment": "Used when provider=aws-bedrock. Profile and region set by 'cap init'.",
     "profile": "__SET_BY_CAP_INIT__",
-    "region": "eu-central-1",
-    "auth_method": "sso-profile"
+    "region": "__SET_BY_CAP_INIT__",
+    "auth_method": "__SET_BY_CAP_INIT__"
   },
   "anthropic": {
     "_comment": "Used when provider=anthropic-api. API key is NEVER stored here — only the env var name.",
     "api_key_env": "ANTHROPIC_API_KEY"
   },
-  "azure": {
-    "_comment": "Used when provider=azure-openai.",
-    "endpoint": "",
-    "api_key_env": "AZURE_OPENAI_API_KEY",
-    "deployments": {
-      "haiku": "claude-haiku",
-      "sonnet": "claude-sonnet",
-      "opus": "claude-opus"
-    }
-  },
   "local": {
     "_comment": "Used when provider=local (Ollama, vLLM, etc.).",
     "base_url": "http://localhost:11434",
     "models": {
-      "haiku": "llama3",
-      "sonnet": "codestral",
-      "opus": "llama3:70b"
+      "haiku": "__SET_BY_CAP_INIT__",
+      "sonnet": "__SET_BY_CAP_INIT__",
+      "opus": "__SET_BY_CAP_INIT__"
     }
   },
   "models": {
-    "haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "opus": "eu.anthropic.claude-opus-4-6-v1"
+    "_comment": "Model IDs are region-specific. Set by 'cap init' model probe.",
+    "haiku": "__SET_BY_CAP_INIT__",
+    "sonnet": "__SET_BY_CAP_INIT__",
+    "opus": "__SET_BY_CAP_INIT__"
   },
   "budget": {
     "daily_limit_usd": 5.0,
-    "alert_threshold_pct": 80
+    "alert_threshold_pct": 80,
+    "per_project": false,
+    "agent_caps": {
+      "_comment": "Per-agent-type daily caps in USD. Example: {\"opus\": 3.0, \"security\": 2.0}. Empty means no per-agent caps."
+    }
   },
   "agent_defaults": {
     "dev": "sonnet",

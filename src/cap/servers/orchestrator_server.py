@@ -55,6 +55,12 @@ server = Server("cap-orchestrator")
 # Module-level singleton for embedding-based routing (lazy-initialized)
 _embedding_router = None
 
+def _default_region() -> str:
+    """Return the default AWS region from harness config."""
+    from cap.lib.harness_config import DEFAULT_AWS_REGION
+    return DEFAULT_AWS_REGION
+
+
 def _now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
@@ -291,7 +297,7 @@ async def _handle_plan(args: dict):
     # Use haiku for planning (fast + cheap)
     executor = ConverseExecutor(
         profile=os.environ.get("AWS_PROFILE"),
-        region=os.environ.get("AWS_DEFAULT_REGION", "eu-central-1"),
+        region=os.environ.get("AWS_DEFAULT_REGION") or _default_region(),
         budget_limit_usd=float(os.environ.get("CAP_DAILY_LIMIT_USD", "5.0")),
     )
 
@@ -486,7 +492,7 @@ async def _handle_execute(args: dict):
     budget_config = config.get("budget", {})
 
     profile = os.environ.get("AWS_PROFILE") or aws_config.get("profile")
-    region = os.environ.get("AWS_DEFAULT_REGION") or aws_config.get("region", "eu-central-1")
+    region = os.environ.get("AWS_DEFAULT_REGION") or aws_config.get("region", _default_region())
     budget_limit = float(os.environ.get("CAP_DAILY_LIMIT_USD", budget_config.get("daily_limit_usd", 5.0)))
 
     # Spawn agent record

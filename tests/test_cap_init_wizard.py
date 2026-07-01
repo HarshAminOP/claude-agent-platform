@@ -167,17 +167,21 @@ class TestSetupWizardNonInteractive:
         assert result["provider"] == "aws-bedrock"
         assert result["aws"]["auth_method"] == "env-vars"
 
-    def test_non_interactive_uses_eu_central_1(self, tmp_path):
-        """Non-interactive should default to eu-central-1."""
+    def test_non_interactive_uses_default_region(self, tmp_path):
+        """Non-interactive should default to us-east-1 (or AWS_DEFAULT_REGION)."""
+        import os
         import cap.cli.lifecycle as lc
         config_dir = tmp_path / ".claude-platform"
         config_dir.mkdir(parents=True)
 
+        env = os.environ.copy()
+        env.pop("AWS_DEFAULT_REGION", None)
         with patch.object(lc, '_detect_aws_profiles', return_value=["my-profile"]):
             with patch.object(Path, 'home', return_value=tmp_path):
-                result = lc._run_setup_wizard(force=True, non_interactive=True)
+                with patch.dict("os.environ", env, clear=True):
+                    result = lc._run_setup_wizard(force=True, non_interactive=True)
 
-        assert result["aws"]["region"] == "eu-central-1"
+        assert result["aws"]["region"] == "us-east-1"
 
     def test_non_interactive_budget_default(self, tmp_path):
         """Non-interactive should default to $5 budget."""
@@ -258,12 +262,10 @@ class TestProviderConstants:
         from cap.cli.lifecycle import (
             PROVIDER_AWS_BEDROCK,
             PROVIDER_ANTHROPIC_API,
-            PROVIDER_AZURE_OPENAI,
             PROVIDER_LOCAL,
         )
         assert PROVIDER_AWS_BEDROCK == "aws-bedrock"
         assert PROVIDER_ANTHROPIC_API == "anthropic-api"
-        assert PROVIDER_AZURE_OPENAI == "azure-openai"
         assert PROVIDER_LOCAL == "local"
 
     def test_auth_method_constants_defined(self):
@@ -279,12 +281,11 @@ class TestProviderConstants:
         assert AUTH_STATIC_CREDENTIALS == "static-credentials"
         assert AUTH_INSTANCE_ROLE == "instance-role"
 
-    def test_provider_model_defaults_all_providers(self):
-        """Each provider should have model defaults."""
+    def test_provider_model_defaults_non_bedrock_providers(self):
+        """Non-bedrock providers should have model defaults in _PROVIDER_MODEL_DEFAULTS."""
         from cap.cli.lifecycle import _PROVIDER_MODEL_DEFAULTS
-        assert "aws-bedrock" in _PROVIDER_MODEL_DEFAULTS
+        # aws-bedrock uses region-aware probe (not in static defaults)
         assert "anthropic-api" in _PROVIDER_MODEL_DEFAULTS
-        assert "azure-openai" in _PROVIDER_MODEL_DEFAULTS
         assert "local" in _PROVIDER_MODEL_DEFAULTS
 
     def test_provider_model_defaults_have_all_tiers(self):
@@ -294,6 +295,15 @@ class TestProviderConstants:
             assert "haiku" in models, f"{provider} missing haiku"
             assert "sonnet" in models, f"{provider} missing sonnet"
             assert "opus" in models, f"{provider} missing opus"
+
+    def test_bedrock_uses_region_aware_defaults(self):
+        """AWS Bedrock models are resolved via get_default_models_for_region."""
+        from cap.lib.model_probe import get_default_models_for_region
+        models = get_default_models_for_region("eu-central-1")
+        assert "haiku" in models
+        assert "sonnet" in models
+        assert "opus" in models
+        assert models["haiku"].startswith("eu.")
 
 
 class TestHarnessConfigBackwardCompat:
@@ -384,41 +394,40 @@ class TestHarnessConfigBackwardCompat:
 class TestProviderFactory:
     """Tests for _create_provider_client factory."""
 
-    def test_aws_bedrock_returns_none(self):
-        """aws-bedrock provider should return None (boto3 managed internally)."""
-        from cap.harness.converse_executor import _create_provider_client
-        config = {"provider": "aws-bedrock", "aws": {"profile": "", "region": "us-east-1"}}
-        result = _create_provider_client(config)
-        assert result is None
+    def test_aws_bedrock_creates_bedrock_converse(self):
+        """aws-bedrock provider should create a ChatBedrockConverse via llm_provider."""
+        from cap.harness.llm_provider import create_llm
+        from unittest.mock import patch, MagicMock
+        mock_bedrock = MagicMock()
+        with patch("langchain_aws.ChatBedrockConverse", return_value=mock_bedrock):
+            config = {"provider": "aws-bedrock", "aws": {"profile": "", "region": "us-east-1", "auth_method": "env-vars"}, "models": {"sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"}}
+            result = create_llm(config, tier="sonnet")
+        assert result is mock_bedrock
 
-    def test_azure_raises_not_implemented(self):
-        """azure-openai should raise NotImplementedError."""
-        from cap.harness.converse_executor import _create_provider_client
-        config = {"provider": "azure-openai", "azure": {"endpoint": ""}}
-        with pytest.raises(NotImplementedError, match="Azure provider coming soon"):
-            _create_provider_client(config)
-
-    def test_local_raises_not_implemented(self):
-        """local provider should raise NotImplementedError."""
-        from cap.harness.converse_executor import _create_provider_client
-        config = {"provider": "local", "local": {"base_url": "http://localhost:11434"}}
-        with pytest.raises(NotImplementedError, match="Local provider coming soon"):
-            _create_provider_client(config)
+    def test_local_provider_creates_ollama(self):
+        """local provider should create a ChatOllama via llm_provider."""
+        from cap.harness.llm_provider import create_llm
+        from unittest.mock import patch, MagicMock
+        mock_ollama = MagicMock()
+        with patch("langchain_ollama.ChatOllama", return_value=mock_ollama):
+            config = {"provider": "local", "local": {"model": "llama3", "base_url": "http://localhost:11434"}, "models": {"sonnet": "llama3"}}
+            result = create_llm(config, tier="sonnet")
+        assert result is mock_ollama
 
     def test_unknown_provider_raises_value_error(self):
         """Unknown provider should raise ValueError."""
-        from cap.harness.converse_executor import _create_provider_client
-        config = {"provider": "unknown-thing"}
+        from cap.harness.llm_provider import create_llm
+        config = {"provider": "unknown-thing", "models": {"sonnet": "x"}}
         with pytest.raises(ValueError, match="Unknown provider"):
-            _create_provider_client(config)
+            create_llm(config, tier="sonnet")
 
     def test_anthropic_raises_when_no_key(self):
         """anthropic-api should raise ValueError when env var is not set."""
-        from cap.harness.converse_executor import _create_provider_client
-        config = {"provider": "anthropic-api", "anthropic": {"api_key_env": "NONEXISTENT_CAP_TEST_KEY"}}
+        from cap.harness.llm_provider import create_llm
+        config = {"provider": "anthropic-api", "anthropic": {"api_key_env": "NONEXISTENT_CAP_TEST_KEY"}, "models": {"sonnet": "claude-sonnet-4-5-20250929"}}
         os.environ.pop("NONEXISTENT_CAP_TEST_KEY", None)
         with pytest.raises(ValueError, match="API key not found"):
-            _create_provider_client(config)
+            create_llm(config, tier="sonnet")
 
 
 class TestConverseExecutorProviderClient:

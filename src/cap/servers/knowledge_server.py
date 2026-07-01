@@ -97,6 +97,54 @@ except ImportError:
     logger.warning("consolidator module not available — auto-consolidation disabled")
     _consolidate = None
 
+try:
+    from cap.lib.harness_config import get_knowledge_config, is_path_under_indexed_root, add_indexed_root
+    from cap.lib.recursive_indexer import index_directory_tree
+    _auto_index_available = True
+except ImportError:
+    logger.warning("recursive_indexer or harness_config not available — auto-index disabled")
+    _auto_index_available = False
+
+# Track workspaces we've already auto-indexed this session to avoid repeats
+_auto_indexed_this_session: set[str] = set()
+
+
+def _maybe_auto_index_workspace(workspace: str | None) -> None:
+    """If workspace is not under any indexed_root and auto_index is enabled, trigger background indexing."""
+    if not _auto_index_available or not workspace or workspace == "all":
+        return
+    if workspace in _auto_indexed_this_session:
+        return
+
+    try:
+        knowledge_cfg = get_knowledge_config()
+        if not knowledge_cfg.get("auto_index_new_workspaces", True):
+            return
+        if is_path_under_indexed_root(workspace):
+            return
+
+        # New workspace detected — trigger indexing
+        logger.info("Auto-detecting new workspace: %s — triggering background indexing", workspace)
+        _auto_indexed_this_session.add(workspace)
+
+        recursive_config = {
+            "data_dir": str(DATA_DIR),
+            "extensions": set(knowledge_cfg.get("file_extensions", [])),
+            "exclude_dirs": set(knowledge_cfg.get("exclude_patterns", [])),
+            "max_file_size_kb": knowledge_cfg.get("max_file_size_kb", 500),
+            "batch_size": 100,
+            "workspace": workspace,
+        }
+
+        stats = index_directory_tree(root=workspace, config=recursive_config)
+        add_indexed_root(workspace)
+        logger.info(
+            "Auto-indexed new workspace %s: %d files, %d repos detected",
+            workspace, stats.get("files_indexed", 0), stats.get("repos_detected", 0),
+        )
+    except Exception as exc:
+        logger.warning("Auto-index of workspace %s failed (non-fatal): %s", workspace, exc)
+
 # --- Consolidation-on-nth-search state ---
 _search_count = 0
 _last_consolidation = 0.0
@@ -343,6 +391,9 @@ async def _handle_search(args: dict):
     workspace = args.get("workspace")
     if workspace == "all":
         workspace = None
+
+    # Auto-detect and index new workspaces
+    _maybe_auto_index_workspace(workspace)
     top_k = args.get("top_k", 10)
     strategy = args.get("strategy", "hybrid")
     scope = args.get("scope", "all")

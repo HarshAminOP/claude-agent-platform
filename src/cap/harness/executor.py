@@ -56,18 +56,30 @@ _CONFIG = _load_config()
 # Model resolution
 # ---------------------------------------------------------------------------
 
-#: Logical name → Bedrock cross-region inference profile ID (eu.*).
-MODEL_ALIASES: dict[str, str] = {
-    "haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "opus": "eu.anthropic.claude-opus-4-6-v1",
-}
+#: Logical name → Bedrock model ID.
+#: Populated from harness-config.json (written by `cap init` model probe).
+#: Falls back to .harness/config.json, then to region-aware defaults.
+def _load_model_aliases() -> dict[str, str]:
+    """Load model aliases from harness config, with fallback to region defaults."""
+    from cap.lib.harness_config import load_harness_config, DEFAULT_AWS_REGION
+    from cap.lib.model_probe import get_default_models_for_region
+    try:
+        harness_cfg = load_harness_config()
+        if "models" in harness_cfg:
+            return dict(harness_cfg["models"])
+        # Derive from configured region
+        region = harness_cfg.get("aws", {}).get("region", DEFAULT_AWS_REGION)
+        return get_default_models_for_region(region)
+    except Exception:
+        pass
+    # Local project config override
+    if "models" in _CONFIG:
+        return dict(_CONFIG["models"])
+    # Final fallback: use region defaults
+    return get_default_models_for_region(DEFAULT_AWS_REGION)
 
-# Override MODEL_ALIASES from config if present
-if "models" in _CONFIG:
-    for _key, _value in _CONFIG["models"].items():
-        if _key in MODEL_ALIASES:
-            MODEL_ALIASES[_key] = _value
+
+MODEL_ALIASES: dict[str, str] = _load_model_aliases()
 
 #: Per-model pricing in USD per 1 000 000 tokens.
 MODEL_PRICING: dict[str, dict[str, float]] = {
@@ -84,6 +96,9 @@ _MODEL_ID_TO_TIER: dict[str, str] = {
     "us.anthropic.claude-haiku": "haiku",
     "us.anthropic.claude-sonnet": "sonnet",
     "us.anthropic.claude-opus": "opus",
+    "ap.anthropic.claude-haiku": "haiku",
+    "ap.anthropic.claude-sonnet": "sonnet",
+    "ap.anthropic.claude-opus": "opus",
     "anthropic.claude-haiku": "haiku",
     "anthropic.claude-sonnet": "sonnet",
     "anthropic.claude-opus": "opus",
@@ -166,10 +181,11 @@ class AgentExecutor:
     def __init__(
         self,
         profile: Optional[str] = None,
-        region: str = "eu-central-1",
+        region: str | None = None,
     ) -> None:
+        from cap.lib.harness_config import DEFAULT_AWS_REGION
         self._profile = profile
-        self._region = region
+        self._region = region or DEFAULT_AWS_REGION
         self._client = None
         self._available: Optional[bool] = None
 

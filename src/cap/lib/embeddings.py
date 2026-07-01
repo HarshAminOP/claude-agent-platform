@@ -64,7 +64,7 @@ class EmbeddingConfig:
     base_delay_s: float = 0.5
     max_delay_s: float = 10.0
     backoff_multiplier: float = 2.0
-    region: str = "eu-central-1"
+    region: str = "us-east-1"
     profile: Optional[str] = None
 
 

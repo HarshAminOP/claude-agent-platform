@@ -1,46 +1,387 @@
-"""CAP background maintenance daemon.
+"""CAP Platform Daemon — long-running asyncio background operator.
 
-Runs periodic housekeeping tasks:
-  1. Knowledge consolidation  (expire, dedup, requeue failed embeddings)
-  2. Stale agent cleanup       (terminate agents idle > max_age_hours)
-  3. Pattern embedding         (bulk-embed un-embedded patterns if available)
-  4. Learning threshold update (correlate session events → routing outcomes)
-  5. Pattern retention         (prune stale patterns if retention module exists)
-  6. Manifest refresh          (rewrite .cap-manifest in cwd)
+Runs periodic housekeeping tasks at independent intervals:
+  1. health_check()       every 60s  — check MCP server PIDs, restart crashed ones
+  2. budget_check()       every 5min — check spend vs limit, pause if exceeded
+  3. reembed_patterns()   every 30min — embed patterns missing embeddings
+  4. cleanup_stale()      every 1hr  — terminate idle agents (>24h)
+  5. compact_vectors()    every 6hr  — optimize LanceDB, prune low-retention patterns
+  6. workspace_detect()   every 60s  — watch pending_workspaces for new paths
+
+Entry point: python -m cap.harness.daemon
+PID file: ~/.claude-platform/run/daemon.pid
+Log file: ~/.claude-platform/logs/daemon.log (rotating, 10MB, 3 backups)
+
+CRITICAL: The daemon is OPTIONAL. CAP works without it. It is for optimization only.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import signal
+import sys
 import time
+from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("cap.harness.daemon")
 
 
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+def _cap_home() -> Path:
+    return Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
+
+
+def _pid_path() -> Path:
+    return _cap_home() / "run" / "daemon.pid"
+
+
+def _log_path() -> Path:
+    return _cap_home() / "logs" / "daemon.log"
+
+
+def _pending_workspaces_path() -> Path:
+    return _cap_home() / "run" / "pending_workspaces"
+
+
+# ---------------------------------------------------------------------------
+# Task intervals (seconds)
+# ---------------------------------------------------------------------------
+
+INTERVAL_HEALTH_CHECK = 60
+INTERVAL_BUDGET_CHECK = 300
+INTERVAL_REEMBED = 1800
+INTERVAL_CLEANUP_STALE = 3600
+INTERVAL_COMPACT_VECTORS = 21600
+INTERVAL_WORKSPACE_DETECT = 60
+
+
+# ---------------------------------------------------------------------------
+# CapDaemon — asyncio-based long-running process
+# ---------------------------------------------------------------------------
+
 class CapDaemon:
-    """Periodic maintenance worker for the CAP platform."""
+    """Async background operator for the CAP platform.
+
+    Schedules independent periodic tasks using asyncio. Each task runs
+    at its own interval and failures in one task do not affect others.
+    """
 
     def __init__(self, interval_seconds: int = 21600) -> None:
+        # Legacy compat: interval_seconds maps to compact_vectors interval
         self.interval = interval_seconds
         self.running = False
         self._last_run: Optional[dict] = None
+        self._start_time: Optional[float] = None
+        self._last_health_check: Optional[str] = None
+        self._server_count: int = 0
+        self._tasks: list[asyncio.Task] = []
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Path helpers
     # ------------------------------------------------------------------
 
     @staticmethod
     def _data_dir() -> Path:
         """Return the configured platform data directory."""
-        from cap.lib.config import load_config
-        return load_config().data_dir
+        try:
+            from cap.lib.config import load_config
+            return load_config().data_dir
+        except Exception:
+            return _cap_home() / "data"
+
+    @staticmethod
+    def _cap_home() -> Path:
+        return _cap_home()
 
     # ------------------------------------------------------------------
-    # Individual task runners (each returns a result dict)
+    # Task 1: Health Check (every 60s)
+    # ------------------------------------------------------------------
+
+    def health_check(self) -> dict:
+        """Check MCP server PIDs, restart crashed ones."""
+        results: dict = {"checked": 0, "alive": 0, "restarted": 0, "errors": []}
+        try:
+            from cap.lib.db_init import init_fleet_db
+            db = init_fleet_db(self._data_dir())
+            rows = db.execute(
+                "SELECT name, pid, status, command, restart_count, max_restarts "
+                "FROM fleet_servers WHERE status IN ('running', 'registered')"
+            ).fetchall()
+
+            now = datetime.now(timezone.utc).isoformat()
+
+            for row in rows:
+                name, pid, status, command, restart_count, max_restarts = row
+                results["checked"] += 1
+
+                if not pid:
+                    continue
+
+                try:
+                    os.kill(pid, 0)
+                    results["alive"] += 1
+                except (ProcessLookupError, PermissionError):
+                    # Process is dead
+                    if status == "running":
+                        max_r = max_restarts or 5
+                        rc = restart_count or 0
+                        if rc < max_r and command:
+                            # Attempt restart
+                            try:
+                                import subprocess
+                                parts = command.split()
+                                proc = subprocess.Popen(
+                                    parts,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    start_new_session=True,
+                                )
+                                db.execute(
+                                    "UPDATE fleet_servers SET pid = ?, restart_count = ?, "
+                                    "last_health_check = ? WHERE name = ?",
+                                    (proc.pid, rc + 1, now, name),
+                                )
+                                db.execute(
+                                    "INSERT INTO fleet_events (server_name, event_type, message) "
+                                    "VALUES (?, 'restarted', ?)",
+                                    (name, f"Daemon auto-restart (attempt {rc + 1})"),
+                                )
+                                results["restarted"] += 1
+                                logger.info("Restarted MCP server %s (PID %d)", name, proc.pid)
+                            except Exception as e:
+                                results["errors"].append(f"restart_{name}: {e}")
+                                db.execute(
+                                    "UPDATE fleet_servers SET status = 'stopped', "
+                                    "last_health_check = ? WHERE name = ?",
+                                    (now, name),
+                                )
+                        else:
+                            db.execute(
+                                "UPDATE fleet_servers SET status = 'stopped', "
+                                "last_health_check = ? WHERE name = ?",
+                                (now, name),
+                            )
+                    else:
+                        db.execute(
+                            "UPDATE fleet_servers SET last_health_check = ? WHERE name = ?",
+                            (now, name),
+                        )
+
+            db.commit()
+            self._server_count = results["checked"]
+            self._last_health_check = now
+        except Exception as exc:
+            results["errors"].append(str(exc))
+            logger.warning("health_check failed: %s", exc)
+
+        return results
+
+    # ------------------------------------------------------------------
+    # Task 2: Budget Check (every 5 min)
+    # ------------------------------------------------------------------
+
+    def budget_check(self) -> dict:
+        """Check spend vs daily limit. Pause if exceeded."""
+        try:
+            from cap.lib.harness_config import load_harness_config
+            from cap.lib.budget_manager import (
+                init_budget_log_table, get_today_spend, is_budget_paused, pause_budget,
+            )
+            import sqlite3
+
+            harness_cfg = load_harness_config()
+            budget_cfg = harness_cfg.get("budget", {})
+            daily_limit = budget_cfg.get("daily_limit_usd", 5.0)
+
+            data_dir = self._data_dir()
+            db = sqlite3.connect(str(data_dir / "platform.db"))
+            db.execute("PRAGMA busy_timeout=2000")
+            init_budget_log_table(db)
+
+            spend_info = get_today_spend(db)
+            today_spend = spend_info["total_spend_usd"]
+            paused = is_budget_paused()
+
+            result = {
+                "daily_limit_usd": daily_limit,
+                "today_spend_usd": today_spend,
+                "percentage": round(today_spend / max(daily_limit, 0.01) * 100, 1),
+                "paused": paused,
+                "action": "none",
+            }
+
+            if today_spend >= daily_limit and not paused:
+                pause_budget(db)
+                result["action"] = "paused"
+                logger.warning(
+                    "Budget exceeded: $%.4f / $%.2f. Operations paused.",
+                    today_spend, daily_limit,
+                )
+
+            db.close()
+            return result
+        except Exception as exc:
+            logger.warning("budget_check failed: %s", exc)
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Task 3: Re-embed Patterns (every 30 min)
+    # ------------------------------------------------------------------
+
+    def reembed_patterns(self) -> dict:
+        """Embed patterns that are missing embeddings."""
+        try:
+            from cap.harness.vector_patterns import PatternEmbedder
+            pe = PatternEmbedder()
+            if pe.is_available:
+                count = pe.bulk_embed_missing(batch_size=50)
+                return {"embedded": count}
+            return {"skipped": "embedder_unavailable"}
+        except Exception as exc:
+            logger.warning("reembed_patterns failed: %s", exc)
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Task 4: Cleanup Stale Agents (every 1 hr)
+    # ------------------------------------------------------------------
+
+    def cleanup_stale(self) -> dict:
+        """Terminate agents idle for more than 24 hours."""
+        try:
+            from cap.harness.agent_store import cleanup_stale
+            count = cleanup_stale(max_age_hours=24)
+            return {"terminated": count}
+        except Exception as exc:
+            logger.warning("cleanup_stale failed: %s", exc)
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Task 5: Compact Vectors (every 6 hr)
+    # ------------------------------------------------------------------
+
+    def compact_vectors(self) -> dict:
+        """Optimize LanceDB and prune low-retention patterns."""
+        results: dict = {"compacted": False, "pruned": 0}
+        try:
+            # Attempt LanceDB compaction
+            vectors_dir = self._data_dir() / "vectors"
+            if vectors_dir.exists():
+                try:
+                    import lancedb
+                    lance_db = lancedb.connect(str(vectors_dir))
+                    table_names = lance_db.table_names()
+                    for tname in table_names:
+                        try:
+                            t = lance_db.open_table(tname)
+                            t.compact_files()
+                            results["compacted"] = True
+                        except Exception:
+                            pass
+                except ImportError:
+                    results["compacted"] = False
+
+            # Prune low-retention patterns
+            try:
+                from cap.harness.retention import prune_stale_patterns
+                pruned = prune_stale_patterns()
+                results["pruned"] = pruned
+            except (ImportError, Exception):
+                pass
+
+            return results
+        except Exception as exc:
+            logger.warning("compact_vectors failed: %s", exc)
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Task 6: Workspace Detection (every 60s)
+    # ------------------------------------------------------------------
+
+    def workspace_detect(self) -> dict:
+        """Watch pending_workspaces file and trigger background index."""
+        results: dict = {"new_workspaces": 0, "indexed": 0}
+        try:
+            pending_path = _pending_workspaces_path()
+            if not pending_path.exists():
+                return results
+
+            content = pending_path.read_text().strip()
+            if not content:
+                return results
+
+            paths = [p.strip() for p in content.splitlines() if p.strip()]
+            results["new_workspaces"] = len(paths)
+
+            # Clear the file immediately
+            pending_path.write_text("")
+
+            # Check which paths need indexing
+            from cap.lib.config import load_config
+            from cap.lib.db_init import init_knowledge_db
+
+            config = load_config()
+            data_dir = config.data_dir
+            db = init_knowledge_db(data_dir)
+
+            for ws_path in paths:
+                ws_path = os.path.abspath(os.path.expanduser(ws_path))
+                if not os.path.isdir(ws_path):
+                    continue
+
+                # Check if already indexed
+                existing = db.execute(
+                    "SELECT COUNT(*) FROM knowledge_entries WHERE workspace = ?",
+                    (ws_path,),
+                ).fetchone()[0]
+
+                if existing == 0:
+                    # Trigger background index
+                    try:
+                        from cap.lib.sync_engine import sync_workspace
+                        sync_workspace(db, ws_path, full=False)
+                        results["indexed"] += 1
+                        logger.info("Indexed new workspace: %s", ws_path)
+                    except Exception as e:
+                        logger.warning("Failed to index workspace %s: %s", ws_path, e)
+
+            return results
+        except Exception as exc:
+            logger.warning("workspace_detect failed: %s", exc)
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Legacy: run_once (backward compat)
+    # ------------------------------------------------------------------
+
+    def run_once(self) -> dict:
+        """Execute all maintenance tasks once and return a summary dict.
+
+        Retained for backward compatibility with existing CLI and tests.
+        """
+        results: dict = {}
+
+        results["consolidation"] = self._run_consolidation()
+        results["stale_agents"] = self._run_stale_cleanup()
+        results["pattern_embedding"] = self._run_pattern_embedding()
+        results["learning"] = self._run_learning()
+        results["retention"] = self._run_retention()
+        results["manifest"] = self._run_manifest()
+
+        self._last_run = results
+        logger.info("Daemon run complete: %s", json.dumps(results, default=str))
+        return results
+
+    # ------------------------------------------------------------------
+    # Legacy internal task runners (backward compat for tests)
     # ------------------------------------------------------------------
 
     def _run_consolidation(self) -> dict:
@@ -55,25 +396,10 @@ class CapDaemon:
             return {"error": str(exc)}
 
     def _run_stale_cleanup(self) -> dict:
-        try:
-            from cap.harness.agent_store import cleanup_stale
-            count = cleanup_stale(max_age_hours=24)
-            return {"terminated": count}
-        except Exception as exc:
-            logger.warning("stale agent cleanup failed: %s", exc)
-            return {"error": str(exc)}
+        return self.cleanup_stale()
 
     def _run_pattern_embedding(self) -> dict:
-        try:
-            from cap.harness.vector_patterns import PatternEmbedder
-            pe = PatternEmbedder()
-            if pe.is_available:
-                count = pe.bulk_embed_missing(batch_size=50)
-                return {"embedded": count}
-            return {"skipped": "embedder_unavailable"}
-        except Exception as exc:
-            logger.warning("pattern embedding failed: %s", exc)
-            return {"error": str(exc)}
+        return self.reembed_patterns()
 
     def _run_learning(self) -> dict:
         try:
@@ -81,7 +407,6 @@ class CapDaemon:
             from cap.lib.db_init import init_sessions_db, init_knowledge_db
             data_dir = self._data_dir()
             sdb = init_sessions_db(data_dir)
-            # routing_db lives in knowledge.db (routing_decisions table)
             pdb = init_knowledge_db(data_dir)
             r = compute_thresholds_from_session_events(sdb, pdb)
             return r
@@ -110,40 +435,207 @@ class CapDaemon:
             return {"error": str(exc)}
 
     # ------------------------------------------------------------------
+    # Async scheduling
+    # ------------------------------------------------------------------
+
+    async def _periodic_task(self, name: str, func, interval: int) -> None:
+        """Run func every interval seconds, logging errors."""
+        while self.running:
+            try:
+                result = await asyncio.get_event_loop().run_in_executor(None, func)
+                logger.debug("Task %s completed: %s", name, result)
+            except Exception as exc:
+                logger.error("Task %s error: %s", name, exc)
+            await asyncio.sleep(interval)
+
+    async def _run_async(self) -> None:
+        """Main async loop — schedules all periodic tasks."""
+        self.running = True
+        self._start_time = time.time()
+
+        # Immediate health check on startup
+        logger.info("Running initial health check...")
+        self.health_check()
+
+        # Schedule periodic tasks
+        self._tasks = [
+            asyncio.create_task(
+                self._periodic_task("health_check", self.health_check, INTERVAL_HEALTH_CHECK)
+            ),
+            asyncio.create_task(
+                self._periodic_task("budget_check", self.budget_check, INTERVAL_BUDGET_CHECK)
+            ),
+            asyncio.create_task(
+                self._periodic_task("reembed_patterns", self.reembed_patterns, INTERVAL_REEMBED)
+            ),
+            asyncio.create_task(
+                self._periodic_task("cleanup_stale", self.cleanup_stale, INTERVAL_CLEANUP_STALE)
+            ),
+            asyncio.create_task(
+                self._periodic_task("compact_vectors", self.compact_vectors, INTERVAL_COMPACT_VECTORS)
+            ),
+            asyncio.create_task(
+                self._periodic_task("workspace_detect", self.workspace_detect, INTERVAL_WORKSPACE_DETECT)
+            ),
+        ]
+
+        # Wait until stopped
+        try:
+            while self.running:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            for task in self._tasks:
+                task.cancel()
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+
+    # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def run_once(self) -> dict:
-        """Execute all maintenance tasks once and return a summary dict."""
-        results: dict = {}
-
-        results["consolidation"] = self._run_consolidation()
-        results["stale_agents"] = self._run_stale_cleanup()
-        results["pattern_embedding"] = self._run_pattern_embedding()
-        results["learning"] = self._run_learning()
-        results["retention"] = self._run_retention()
-        results["manifest"] = self._run_manifest()
-
-        self._last_run = results
-        logger.info("Daemon run complete: %s", json.dumps(results, default=str))
-        return results
-
     def start(self) -> None:
-        """Run maintenance in a loop until SIGTERM/SIGINT."""
+        """Run the daemon in the current process (blocking)."""
         self.running = True
-        signal.signal(signal.SIGTERM, lambda *_: setattr(self, "running", False))
-        signal.signal(signal.SIGINT, lambda *_: setattr(self, "running", False))
-        logger.info("Daemon starting (interval=%ds)", self.interval)
 
-        while self.running:
-            self.run_once()
-            # Sleep in short chunks so we can respond to the stop flag quickly.
-            elapsed = 0
-            while elapsed < self.interval and self.running:
-                time.sleep(min(10, self.interval - elapsed))
-                elapsed += 10
+        def _stop_handler(*_):
+            self.running = False
+
+        signal.signal(signal.SIGTERM, _stop_handler)
+        signal.signal(signal.SIGINT, _stop_handler)
+
+        logger.info("CAP Daemon starting (PID %d)", os.getpid())
+        try:
+            asyncio.run(self._run_async())
+        except KeyboardInterrupt:
+            pass
+        logger.info("CAP Daemon stopped")
+
+    def stop(self) -> None:
+        """Signal the daemon to stop."""
+        self.running = False
 
     @property
     def last_run(self) -> Optional[dict]:
         """Result dict from the most recent run_once() call, or None."""
         return self._last_run
+
+    @property
+    def uptime_seconds(self) -> float:
+        """Seconds since daemon started, or 0 if not started."""
+        if self._start_time is None:
+            return 0.0
+        return time.time() - self._start_time
+
+    def status_info(self) -> dict:
+        """Return current daemon status for the CLI."""
+        pid_path = _pid_path()
+        pid = None
+        if pid_path.exists():
+            try:
+                pid = int(pid_path.read_text().strip())
+            except (ValueError, OSError):
+                pass
+
+        return {
+            "pid": pid,
+            "running": self.running,
+            "uptime_seconds": self.uptime_seconds,
+            "server_count": self._server_count,
+            "last_health_check": self._last_health_check,
+        }
+
+
+# ---------------------------------------------------------------------------
+# PID file management
+# ---------------------------------------------------------------------------
+
+def write_pid() -> None:
+    """Write current process PID to the daemon PID file."""
+    pid_path = _pid_path()
+    pid_path.parent.mkdir(parents=True, exist_ok=True)
+    pid_path.write_text(str(os.getpid()))
+
+
+def remove_pid() -> None:
+    """Remove the daemon PID file."""
+    pid_path = _pid_path()
+    if pid_path.exists():
+        pid_path.unlink(missing_ok=True)
+
+
+def read_pid() -> Optional[int]:
+    """Read the daemon PID from the PID file. Returns None if not found."""
+    pid_path = _pid_path()
+    if not pid_path.exists():
+        return None
+    try:
+        return int(pid_path.read_text().strip())
+    except (ValueError, OSError):
+        return None
+
+
+def is_daemon_running() -> bool:
+    """Check if the daemon process is alive."""
+    pid = read_pid()
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Logging setup
+# ---------------------------------------------------------------------------
+
+def setup_logging() -> None:
+    """Configure rotating file logging for the daemon."""
+    log_path = _log_path()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    handler = RotatingFileHandler(
+        str(log_path),
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=3,
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+
+    root_logger = logging.getLogger("cap")
+    root_logger.addHandler(handler)
+    root_logger.setLevel(logging.INFO)
+
+    # Also log to stderr for foreground runs
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    root_logger.addHandler(stderr_handler)
+
+
+# ---------------------------------------------------------------------------
+# Entry point: python -m cap.harness.daemon
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    """Entry point for the daemon process."""
+    setup_logging()
+    write_pid()
+    logger.info("Daemon PID %d written to %s", os.getpid(), _pid_path())
+
+    try:
+        daemon = CapDaemon()
+        daemon.start()
+    finally:
+        remove_pid()
+        logger.info("Daemon PID file removed")
+
+
+if __name__ == "__main__":
+    main()

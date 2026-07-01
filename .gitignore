@@ -56,3 +56,4 @@ uv.lock
 
 # CAP harness (generated config excluded, template tracked)
 .harness/config.json
+harness-config.json

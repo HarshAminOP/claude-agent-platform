@@ -6,8 +6,8 @@ then triggers an incremental knowledge sync to index its contents.
 
 Config lives in [github] section of config.toml:
     [github]
-    org = "moia-dev"
-    clone_base_path = "/Users/you/VWITS/MOIA/moia-dev-master"
+    org = "your-github-org"
+    clone_base_path = "/path/to/your/workspace"
     use_ssh = true
     auto_clone_on_missing_dep = true
     max_auto_clones_per_session = 10

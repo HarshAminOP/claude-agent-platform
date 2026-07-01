@@ -283,7 +283,7 @@ NEVER write more than 20 lines of code yourself. Delegate.
 
 ## AWS Access
 
-- Run `aws sso login --sso-session moia` to authenticate.
+- Run `aws sso login --sso-session <your-sso-session>` to authenticate.
 - Ask which AWS profile/role to use before first AWS CLI call in a session.
 - Default to read-only profile if none specified.
 - Pass `--profile <name>` explicitly on every call.
@@ -1293,22 +1293,12 @@ AUTH_ENV_VARS = "env-vars"
 AUTH_STATIC_CREDENTIALS = "static-credentials"
 AUTH_INSTANCE_ROLE = "instance-role"
 
-# Default model IDs per provider
+# Default model IDs per provider (non-Bedrock only; Bedrock uses region-aware probe)
 _PROVIDER_MODEL_DEFAULTS = {
-    PROVIDER_AWS_BEDROCK: {
-        "haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-        "sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-        "opus": "eu.anthropic.claude-opus-4-6-v1",
-    },
     PROVIDER_ANTHROPIC_API: {
         "haiku": "claude-haiku-4-5-20251001",
         "sonnet": "claude-sonnet-4-5-20250929",
         "opus": "claude-opus-4-6-20250918",
-    },
-    PROVIDER_AZURE_OPENAI: {
-        "haiku": "claude-haiku",
-        "sonnet": "claude-sonnet",
-        "opus": "claude-opus",
     },
     PROVIDER_LOCAL: {
         "haiku": "llama3",
@@ -1393,7 +1383,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
     console.print("\n[bold cyan]Setup Wizard[/bold cyan] — Configuring CAP for your environment\n")
 
     # ── Step 1: LLM Provider Selection ───────────────────────────────────────
-    provider_choices = [PROVIDER_AWS_BEDROCK, PROVIDER_ANTHROPIC_API, PROVIDER_AZURE_OPENAI, PROVIDER_LOCAL]
+    provider_choices = [PROVIDER_AWS_BEDROCK, PROVIDER_ANTHROPIC_API, PROVIDER_LOCAL]
 
     if non_interactive:
         provider = PROVIDER_AWS_BEDROCK
@@ -1401,8 +1391,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         console.print("[bold]LLM Provider:[/bold]")
         console.print(f"  [cyan]1[/cyan]. aws-bedrock (default) — Claude via AWS Bedrock")
         console.print(f"  [cyan]2[/cyan]. anthropic-api — Direct Anthropic API")
-        console.print(f"  [cyan]3[/cyan]. azure-openai — Azure OpenAI Service")
-        console.print(f"  [cyan]4[/cyan]. local — Local model (Ollama, vLLM, etc.)")
+        console.print(f"  [cyan]3[/cyan]. local — Local model (Ollama, vLLM, etc.)")
         console.print()
         choice = click.prompt(
             "Select LLM provider (number or name)",
@@ -1419,7 +1408,6 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
     # ── Step 2: Provider-specific configuration ──────────────────────────────
     aws_config: dict = {}
     anthropic_config: dict = {}
-    azure_config: dict = {}
     local_config: dict = {}
 
     if provider == PROVIDER_AWS_BEDROCK:
@@ -1429,7 +1417,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         if non_interactive:
             auth_method = AUTH_ENV_VARS
             aws_profile = ""
-            aws_region = "eu-central-1"
+            aws_region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
         else:
             console.print("\n[bold]AWS Authentication Method:[/bold]")
             console.print(f"  [cyan]1[/cyan]. sso-profile — AWS SSO profile from ~/.aws/config")
@@ -1502,13 +1490,64 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
             else:
                 aws_profile = ""
 
-            aws_region = click.prompt("AWS region", default="eu-central-1")
+            aws_region = click.prompt("AWS region", default=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
 
         aws_config = {
             "profile": aws_profile,
             "region": aws_region,
             "auth_method": auth_method,
         }
+
+        # ── Model Probe: test which models are accessible ──────────────────
+        from cap.lib.model_probe import (
+            create_bedrock_client,
+            get_default_models_for_region,
+            probe_all_models,
+            region_prefix,
+        )
+
+        if non_interactive:
+            # Non-interactive: use region-based defaults directly (no Bedrock calls)
+            bedrock_models = get_default_models_for_region(aws_region)
+            console.print(f"\n  [dim]Non-interactive: using region-based defaults for {aws_region}[/dim]")
+        else:
+            # Interactive: probe models to find what actually works
+            console.print("\n[bold]Testing model access...[/bold]")
+            try:
+                bedrock_client = create_bedrock_client(
+                    region=aws_region,
+                    profile=aws_profile,
+                    auth_method=auth_method,
+                )
+
+                def _probe_progress(model_id: str, success: bool):
+                    icon = "[green]OK[/green]" if success else "[red]FAIL[/red]"
+                    console.print(f"  {icon}  {model_id}")
+
+                bedrock_models = probe_all_models(
+                    client=bedrock_client,
+                    region=aws_region,
+                    progress_callback=_probe_progress,
+                )
+
+                if not bedrock_models:
+                    console.print("  [yellow]No models responded. Using region defaults.[/yellow]")
+                    bedrock_models = get_default_models_for_region(aws_region)
+                else:
+                    # Report assigned tiers
+                    for tier, model_id in bedrock_models.items():
+                        console.print(f"  [green]Assigned[/green] {tier} = {model_id}")
+                    # Fill missing tiers with defaults
+                    defaults = get_default_models_for_region(aws_region)
+                    for tier in ("haiku", "sonnet", "opus"):
+                        if tier not in bedrock_models:
+                            bedrock_models[tier] = defaults[tier]
+                            console.print(f"  [yellow]Fallback[/yellow] {tier} = {defaults[tier]} (not probed)")
+
+            except Exception as exc:
+                console.print(f"  [yellow]Probe failed:[/yellow] {exc}")
+                console.print("  [dim]Using region-based defaults.[/dim]")
+                bedrock_models = get_default_models_for_region(aws_region)
 
     elif provider == PROVIDER_ANTHROPIC_API:
         if non_interactive:
@@ -1529,30 +1568,6 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         anthropic_config = {
             "api_key_env": api_key_env,
         }
-
-    elif provider == PROVIDER_AZURE_OPENAI:
-        if non_interactive:
-            azure_config = {
-                "endpoint": "",
-                "api_key_env": "AZURE_OPENAI_API_KEY",
-                "deployments": {"haiku": "claude-haiku", "sonnet": "claude-sonnet", "opus": "claude-opus"},
-            }
-        else:
-            console.print("\n[bold]Azure OpenAI Configuration:[/bold]")
-            endpoint = click.prompt("Azure OpenAI endpoint URL", default="")
-            api_key_env = click.prompt(
-                "Environment variable name for Azure API key",
-                default="AZURE_OPENAI_API_KEY",
-            )
-            console.print("\n  [dim]Enter deployment names for each model tier:[/dim]")
-            deploy_haiku = click.prompt("  Haiku deployment name", default="claude-haiku")
-            deploy_sonnet = click.prompt("  Sonnet deployment name", default="claude-sonnet")
-            deploy_opus = click.prompt("  Opus deployment name", default="claude-opus")
-            azure_config = {
-                "endpoint": endpoint,
-                "api_key_env": api_key_env,
-                "deployments": {"haiku": deploy_haiku, "sonnet": deploy_sonnet, "opus": deploy_opus},
-            }
 
     elif provider == PROVIDER_LOCAL:
         if non_interactive:
@@ -1586,7 +1601,10 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
     )
 
     # ── Build config ─────────────────────────────────────────────────────────
-    models = _PROVIDER_MODEL_DEFAULTS.get(provider, _PROVIDER_MODEL_DEFAULTS[PROVIDER_AWS_BEDROCK])
+    if provider == PROVIDER_AWS_BEDROCK:
+        models = bedrock_models  # Set by probe or region defaults above
+    else:
+        models = _PROVIDER_MODEL_DEFAULTS.get(provider, {"haiku": "", "sonnet": "", "opus": ""})
 
     config: dict = {
         "provider": provider,
@@ -1610,14 +1628,12 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         config["aws"] = aws_config
     elif provider == PROVIDER_ANTHROPIC_API:
         config["anthropic"] = anthropic_config
-    elif provider == PROVIDER_AZURE_OPENAI:
-        config["azure"] = azure_config
     elif provider == PROVIDER_LOCAL:
         config["local"] = local_config
 
     # Backward compat: always include aws section (may be empty for non-bedrock)
     if "aws" not in config:
-        config["aws"] = {"profile": "", "region": "eu-central-1", "auth_method": ""}
+        config["aws"] = {"profile": "", "region": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"), "auth_method": ""}
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2) + "\n")
@@ -1629,11 +1645,9 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         console.print(f"  Auth Method:  [cyan]{aws_config.get('auth_method', '')}[/cyan]")
         if aws_config.get("profile"):
             console.print(f"  AWS Profile:  [cyan]{aws_config['profile']}[/cyan]")
-        console.print(f"  Region:       [cyan]{aws_config.get('region', 'eu-central-1')}[/cyan]")
+        console.print(f"  Region:       [cyan]{aws_config.get('region', 'us-east-1')}[/cyan]")
     elif provider == PROVIDER_ANTHROPIC_API:
         console.print(f"  API Key Env:  [cyan]${anthropic_config.get('api_key_env', 'ANTHROPIC_API_KEY')}[/cyan]")
-    elif provider == PROVIDER_AZURE_OPENAI:
-        console.print(f"  Endpoint:     [cyan]{azure_config.get('endpoint', '')}[/cyan]")
     elif provider == PROVIDER_LOCAL:
         console.print(f"  Base URL:     [cyan]{local_config.get('base_url', '')}[/cyan]")
     console.print(f"  Daily Budget: [cyan]${daily_budget:.2f}[/cyan]")
@@ -1808,21 +1822,68 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
     t_phase2 = time.time() - t_start
 
     # ══════════════════════════════════════════════════════════════════════════
-    # PHASE 3 (3-5s): Quick-index current workspace
+    # PHASE 3 (3-5s): Quick-index + recursive index workspace
     # ══════════════════════════════════════════════════════════════════════════
-    console.print(f"\n[bold cyan]Phase 3[/bold cyan] [dim]({t_phase2:.1f}s)[/dim] — Quick-index workspace")
+    console.print(f"\n[bold cyan]Phase 3[/bold cyan] [dim]({t_phase2:.1f}s)[/dim] — Index workspace")
 
     if detected_repos:
         indexed_count = _quick_index_workspace(data_dir, workspace_path, detected_repos)
-        console.print(f"  [green]✓[/green] {indexed_count} files indexed into FTS5 (README, manifests, configs)")
-        console.print(f"  [green]✓[/green] Immediate search capability active")
+        console.print(f"  [green]✓[/green] {indexed_count} files quick-indexed into FTS5 (README, manifests, configs)")
     else:
         # Index CWD directly if no repos detected
         indexed_count = _quick_index_workspace(data_dir, workspace_path, [workspace_path])
         if indexed_count > 0:
-            console.print(f"  [green]✓[/green] {indexed_count} files indexed from CWD")
+            console.print(f"  [green]✓[/green] {indexed_count} files quick-indexed from CWD")
         else:
-            console.print(f"  [dim]─[/dim] No indexable files found in workspace")
+            console.print(f"  [dim]─[/dim] No indexable files found in workspace (quick-index)")
+
+    # Recursive indexing — scans entire directory tree
+    from cap.lib.recursive_indexer import index_directory_tree
+    from cap.lib.harness_config import add_indexed_root, get_knowledge_config
+
+    knowledge_config = get_knowledge_config()
+
+    def _progress_cb(msg: str, done: int, total: int) -> None:
+        if total > 0:
+            pct = int(done / total * 100) if total > 0 else 0
+            console.print(f"  [dim]...[/dim] {msg} ({pct}%)")
+        else:
+            console.print(f"  [dim]...[/dim] {msg}")
+
+    try:
+        recursive_config = {
+            "data_dir": str(data_dir),
+            "extensions": set(knowledge_config.get("file_extensions", [])),
+            "exclude_dirs": set(knowledge_config.get("exclude_patterns", [])),
+            "max_file_size_kb": knowledge_config.get("max_file_size_kb", 500),
+            "batch_size": 100,
+            "workspace": str(workspace_path),
+        }
+        recursive_stats = index_directory_tree(
+            root=workspace_path,
+            config=recursive_config,
+            progress_callback=_progress_cb,
+        )
+        console.print(
+            f"  [green]✓[/green] Recursive index: {recursive_stats['files_indexed']} files indexed, "
+            f"{recursive_stats['repos_detected']} repos, "
+            f"{recursive_stats['graph_nodes_created']} graph nodes"
+        )
+        if recursive_stats.get("files_skipped_size", 0) > 0:
+            console.print(f"  [dim]─[/dim] {recursive_stats['files_skipped_size']} files skipped (too large)")
+
+        # Add workspace root to indexed_roots in harness config
+        add_indexed_root(str(workspace_path))
+        console.print(f"  [green]✓[/green] Workspace root added to knowledge.indexed_roots")
+
+    except Exception as exc:
+        console.print(f"  [yellow]![/yellow] Recursive indexing failed: {exc}")
+        console.print(f"  [dim]─[/dim] Quick-index results remain available")
+        # Ensure indexed_count reflects the quick-index only
+        recursive_stats = {"files_indexed": 0}
+
+    # Add recursive index count to total
+    indexed_count += recursive_stats.get("files_indexed", 0)
 
     # Load baseline corrections
     corrections_loaded = _load_baseline_corrections(data_dir, str(workspace_path))

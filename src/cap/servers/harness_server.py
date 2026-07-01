@@ -59,6 +59,13 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
+
+def _default_region() -> str:
+    """Return the default AWS region from harness config."""
+    from cap.lib.harness_config import DEFAULT_AWS_REGION
+    return DEFAULT_AWS_REGION
+
+
 # ---------------------------------------------------------------------------
 # Globals
 # ---------------------------------------------------------------------------
@@ -113,7 +120,7 @@ def _get_executor() -> AgentExecutor:
     if _executor is None:
         _executor = AgentExecutor(
             profile=os.environ.get("AWS_PROFILE"),
-            region=os.environ.get("AWS_DEFAULT_REGION", "eu-central-1"),
+            region=os.environ.get("AWS_DEFAULT_REGION") or _default_region(),
         )
     return _executor
 
@@ -996,7 +1003,7 @@ async def _handle_execute(args: dict):
 
         converse_executor = ConverseExecutor(
             profile=os.environ.get("AWS_PROFILE"),
-            region=os.environ.get("AWS_DEFAULT_REGION", "eu-central-1"),
+            region=os.environ.get("AWS_DEFAULT_REGION") or _default_region(),
             budget_limit_usd=_DAILY_LIMIT_USD,
         )
 

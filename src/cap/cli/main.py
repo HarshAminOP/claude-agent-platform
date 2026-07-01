@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1346,101 +1347,208 @@ def budget():
 
 
 @budget.command("status")
-def budget_status():
-    """Show monthly budget and spend."""
+@click.option("--workspace", "-w", default=None, help="Show per-project budget (if per_project enabled)")
+def budget_status(workspace: str | None):
+    """Show today's spend, remaining, top consumers, active/paused state."""
     from cap.lib.config import load_config
-    from cap.lib.db_init import init_platform_db
+    from cap.lib.harness_config import load_harness_config
+    from cap.lib.budget_manager import (
+        init_budget_log_table, get_today_spend, get_top_consumers, is_budget_paused,
+    )
 
     config = load_config()
+    harness_cfg = load_harness_config()
     data_dir = config.data_dir
-    cap_usd = config.budget.monthly_cap_usd
-    warn_threshold = config.budget.warning_threshold
+    budget_cfg = harness_cfg.get("budget", {})
+    daily_limit = budget_cfg.get("daily_limit_usd", 5.0)
+    agent_caps = budget_cfg.get("agent_caps", {})
+    per_project = budget_cfg.get("per_project", False)
 
-    with console.status("[cyan]Loading budget data…[/cyan]"):
-        try:
-            db = init_platform_db(data_dir)
-            now = datetime.now(timezone.utc)
-            period = now.strftime("%Y-%m")
+    resolved_ws = _resolve_workspace(workspace) if workspace else None
 
-            # Current month total
-            row = db.execute(
-                "SELECT SUM(total_cost_usd), SUM(input_tokens), SUM(output_tokens), SUM(embedding_tokens) "
-                "FROM budget_ledger WHERE period = ?",
-                (period,),
-            ).fetchone()
-            monthly_spend = row[0] or 0.0
-            input_tokens = row[1] or 0
-            output_tokens = row[2] or 0
-            embedding_tokens = row[3] or 0
+    try:
+        db = sqlite3.connect(str(data_dir / "platform.db"))
+        db.execute("PRAGMA busy_timeout=2000")
+        init_budget_log_table(db)
 
-            # Per-model breakdown
-            by_model = db.execute(
-                "SELECT model, SUM(total_cost_usd), SUM(input_tokens), SUM(output_tokens) "
-                "FROM budget_ledger WHERE period = ? GROUP BY model ORDER BY SUM(total_cost_usd) DESC",
-                (period,),
-            ).fetchall()
+        ws_filter = resolved_ws if per_project else None
+        spend_info = get_today_spend(db, workspace=ws_filter)
+        top_consumers = get_top_consumers(db, n=5, workspace=ws_filter)
+    except Exception as exc:
+        console.print(f"[red]Query failed: {exc}[/red]")
+        raise SystemExit(1)
 
-            # Last 6 months history
-            history = db.execute(
-                "SELECT period, SUM(total_cost_usd) FROM budget_ledger "
-                "GROUP BY period ORDER BY period DESC LIMIT 6"
-            ).fetchall()
-
-            # Running workflows cost estimate
-            running = db.execute(
-                "SELECT COUNT(*), SUM(tokens_used) FROM workflows WHERE status = 'running'"
-            ).fetchall()[0]
-            running_count = running[0] or 0
-            running_tokens = running[1] or 0
-        except Exception as exc:
-            console.print(f"[red]Query failed: {exc}[/red]")
-            raise SystemExit(1)
-
-    pct = round(monthly_spend / max(cap_usd, 0.01) * 100, 1)
-    color = "green" if pct < 60 else ("yellow" if pct < warn_threshold * 100 else "red")
-    remaining = max(cap_usd - monthly_spend, 0.0)
+    today_spend = spend_info["total_spend_usd"]
+    remaining = max(daily_limit - today_spend, 0.0)
+    pct = round(today_spend / max(daily_limit, 0.01) * 100, 1)
+    color = "green" if pct < 60 else ("yellow" if pct < 80 else "red")
+    paused = is_budget_paused()
+    state = "[red]PAUSED[/red]" if paused else "[green]ACTIVE[/green]"
 
     console.print(Panel(
-        f"Period:          [bold]{period}[/bold]\n"
-        f"Spend:           [bold][{color}]${monthly_spend:.4f}[/{color}][/bold] / ${cap_usd:.2f}  ({pct}%)\n"
+        f"Date:            [bold]{spend_info['date']}[/bold]\n"
+        f"State:           {state}\n"
+        f"Today's spend:   [bold][{color}]${today_spend:.4f}[/{color}][/bold] / ${daily_limit:.2f}  ({pct}%)\n"
         f"Remaining:       [cyan]${remaining:.4f}[/cyan]\n"
-        f"Warning at:      ${cap_usd * warn_threshold:.2f}  ({int(warn_threshold * 100)}%)\n"
-        f"Kill on exceed:  {'[red]yes[/red]' if config.budget.kill_on_exceed else '[dim]no[/dim]'}\n"
-        f"\nTokens (this month):\n"
-        f"  Input:         {input_tokens:,}\n"
-        f"  Output:        {output_tokens:,}\n"
-        f"  Embeddings:    {embedding_tokens:,}\n"
-        + (f"\nRunning workflows: [cyan]{running_count}[/cyan]  (~{running_tokens:,} tokens in-flight)" if running_count else ""),
+        f"Executions:      {spend_info['execution_count']}\n"
+        f"Per-project:     {'enabled' if per_project else 'disabled'}"
+        + (f"\nWorkspace:       {resolved_ws}" if resolved_ws else ""),
         title="Budget Status",
         box=box.ROUNDED,
     ))
 
-    if by_model:
-        t = Table(title="Cost by Model", box=box.SIMPLE_HEAD, show_edge=False)
-        t.add_column("Model", style="bold")
-        t.add_column("Cost (USD)", justify="right")
-        t.add_column("Input Tokens", justify="right")
-        t.add_column("Output Tokens", justify="right")
-        for row in by_model:
-            model, cost, inp, out = row
-            t.add_row(model, f"${cost:.4f}", f"{inp:,}", f"{out:,}")
+    if top_consumers:
+        t = Table(title="Top 5 Consumers (today)", box=box.SIMPLE_HEAD, show_edge=False)
+        t.add_column("Agent Type", style="bold")
+        t.add_column("Spend (USD)", justify="right")
+        t.add_column("Executions", justify="right")
+        t.add_column("Cap", justify="right")
+        for c in top_consumers:
+            cap_val = agent_caps.get(c["agent_type"])
+            cap_str = f"${cap_val:.2f}" if cap_val else "[dim]none[/dim]"
+            t.add_row(c["agent_type"], f"${c['spend_usd']:.4f}", str(c["executions"]), cap_str)
         console.print(t)
 
-    if history:
-        t = Table(title="Monthly History", box=box.SIMPLE_HEAD, show_edge=False)
-        t.add_column("Period", style="bold")
-        t.add_column("Spend (USD)", justify="right")
-        t.add_column("% of Cap", justify="right")
-        for row in history:
-            hist_period, hist_cost = row
-            hist_pct = round((hist_cost or 0) / max(cap_usd, 0.01) * 100, 1)
-            hist_color = "green" if hist_pct < 60 else ("yellow" if hist_pct < warn_threshold * 100 else "red")
-            t.add_row(
-                hist_period,
-                f"${hist_cost:.4f}" if hist_cost else "$0.0000",
-                f"[{hist_color}]{hist_pct}%[/{hist_color}]",
-            )
+    if agent_caps:
+        t = Table(title="Per-Agent-Type Caps", box=box.SIMPLE_HEAD, show_edge=False)
+        t.add_column("Agent Type", style="bold")
+        t.add_column("Daily Cap (USD)", justify="right")
+        for agent, cap in sorted(agent_caps.items()):
+            t.add_row(agent, f"${cap:.2f}")
         console.print(t)
+
+
+@budget.command("history")
+@click.option("--days", "-d", type=int, default=7, show_default=True, help="Number of days")
+@click.option("--workspace", "-w", default=None, help="Filter to workspace")
+def budget_history(days: int, workspace: str | None):
+    """Show daily spend totals for the last 7 days."""
+    from cap.lib.config import load_config
+    from cap.lib.harness_config import load_harness_config
+    from cap.lib.budget_manager import init_budget_log_table, get_history
+
+    config = load_config()
+    harness_cfg = load_harness_config()
+    data_dir = config.data_dir
+    budget_cfg = harness_cfg.get("budget", {})
+    daily_limit = budget_cfg.get("daily_limit_usd", 5.0)
+    per_project = budget_cfg.get("per_project", False)
+
+    resolved_ws = _resolve_workspace(workspace) if workspace else None
+
+    try:
+        db = sqlite3.connect(str(data_dir / "platform.db"))
+        db.execute("PRAGMA busy_timeout=2000")
+        init_budget_log_table(db)
+
+        ws_filter = resolved_ws if per_project else None
+        history = get_history(db, days=days, workspace=ws_filter)
+    except Exception as exc:
+        console.print(f"[red]Query failed: {exc}[/red]")
+        raise SystemExit(1)
+
+    if not history:
+        console.print("[dim]No budget history found.[/dim]")
+        return
+
+    t = Table(title=f"Budget History (last {days} days)", box=box.SIMPLE_HEAD, show_edge=False)
+    t.add_column("Date", style="bold")
+    t.add_column("Spend (USD)", justify="right")
+    t.add_column("% of Limit", justify="right")
+    t.add_column("Executions", justify="right")
+
+    for entry in history:
+        spend = entry["total_spend_usd"]
+        pct = round(spend / max(daily_limit, 0.01) * 100, 1)
+        hist_color = "green" if pct < 60 else ("yellow" if pct < 80 else "red")
+        t.add_row(
+            entry["date"],
+            f"${spend:.4f}",
+            f"[{hist_color}]{pct}%[/{hist_color}]",
+            str(entry["execution_count"]),
+        )
+
+    console.print(t)
+
+
+@budget.command("pause")
+def budget_pause():
+    """Pause all budget spending — blocks new executions."""
+    from cap.lib.config import load_config
+    from cap.lib.budget_manager import pause_budget, is_budget_paused
+
+    if is_budget_paused():
+        console.print("[yellow]Budget is already paused.[/yellow]")
+        return
+
+    config = load_config()
+    data_dir = config.data_dir
+
+    try:
+        db = sqlite3.connect(str(data_dir / "platform.db"))
+        db.execute("PRAGMA busy_timeout=2000")
+        pause_budget(db)
+        db.close()
+    except Exception as exc:
+        console.print(f"[red]Pause failed: {exc}[/red]")
+        raise SystemExit(1)
+
+    console.print("[red]Budget PAUSED[/red] — all new executions will be blocked.")
+    console.print("[dim]Run 'cap budget resume' to resume operations.[/dim]")
+
+
+@budget.command("resume")
+def budget_resume():
+    """Resume budget operations — allows executions again."""
+    from cap.lib.config import load_config
+    from cap.lib.budget_manager import resume_budget, is_budget_paused
+
+    if not is_budget_paused():
+        console.print("[yellow]Budget is not paused.[/yellow]")
+        return
+
+    config = load_config()
+    data_dir = config.data_dir
+
+    try:
+        db = sqlite3.connect(str(data_dir / "platform.db"))
+        db.execute("PRAGMA busy_timeout=2000")
+        resume_budget(db)
+        db.close()
+    except Exception as exc:
+        console.print(f"[red]Resume failed: {exc}[/red]")
+        raise SystemExit(1)
+
+    console.print("[green]Budget RESUMED[/green] — executions are allowed again.")
+
+
+@budget.command("reset")
+@click.option("--workspace", "-w", default=None, help="Reset specific workspace only")
+@click.option("--yes", "confirm", is_flag=True, help="Skip confirmation")
+def budget_reset(workspace: str | None, confirm: bool):
+    """Reset today's spend counter."""
+    from cap.lib.config import load_config
+    from cap.lib.budget_manager import reset_today
+
+    if not confirm:
+        if not click.confirm("Reset today's budget counter? This cannot be undone."):
+            return
+
+    config = load_config()
+    data_dir = config.data_dir
+    resolved_ws = _resolve_workspace(workspace) if workspace else None
+
+    try:
+        db = sqlite3.connect(str(data_dir / "platform.db"))
+        db.execute("PRAGMA busy_timeout=2000")
+        reset_today(db, workspace=resolved_ws)
+        db.close()
+    except Exception as exc:
+        console.print(f"[red]Reset failed: {exc}[/red]")
+        raise SystemExit(1)
+
+    scope = f"workspace {resolved_ws}" if resolved_ws else "all workspaces"
+    console.print(f"[green]Budget counter reset[/green] for today ({scope}).")
 
 
 @budget.command("raise")
@@ -1565,7 +1673,7 @@ def github():
 
 
 @github.command("config")
-@click.option("--org", "-o", default=None, help="GitHub org name (e.g., moia-dev)")
+@click.option("--org", "-o", default=None, help="GitHub org name (e.g., your-org)")
 @click.option("--clone-path", "-p", default=None, help="Base path for cloned repos")
 @click.option("--ssh", "use_ssh", is_flag=True, default=None, help="Use SSH protocol")
 @click.option("--https", "use_https", is_flag=True, default=None, help="Use HTTPS protocol")
@@ -2366,21 +2474,213 @@ def passthrough(workspace: str, ttl: int, reason: str, do_disable: bool, do_chec
 
 # ── cap daemon ────────────────────────────────────────────────────────────────
 
-@cli.command("daemon")
-@click.option("--interval", default=21600, type=int, show_default=True, help="Seconds between maintenance runs")
-@click.option("--once", is_flag=True, help="Run once and exit")
-def daemon_cmd(interval: int, once: bool):
-    """Run CAP background maintenance daemon."""
-    import json as _json
-    from cap.harness.daemon import CapDaemon
+@cli.group("daemon", invoke_without_command=True)
+@click.pass_context
+def daemon_group(ctx):
+    """CAP background daemon management."""
+    if ctx.invoked_subcommand is None:
+        # Default: show status
+        ctx.invoke(daemon_status_cmd)
 
-    d = CapDaemon(interval_seconds=interval)
+
+@daemon_group.command("status")
+def daemon_status_cmd():
+    """Show daemon status: PID, uptime, server count, last health check."""
+    from cap.harness.daemon import read_pid, is_daemon_running, _pid_path, _log_path
+
+    pid = read_pid()
+    running = is_daemon_running()
+
+    if not running:
+        if pid:
+            console.print(f"[yellow]Daemon is NOT running[/yellow] (stale PID {pid})")
+        else:
+            console.print("[dim]Daemon is not running.[/dim]")
+        console.print(f"[dim]Start with: cap daemon start[/dim]")
+        return
+
+    # Read uptime from PID file mtime
+    pid_path = _pid_path()
+    uptime_str = "unknown"
+    if pid_path.exists():
+        import time as _time
+        started = pid_path.stat().st_mtime
+        elapsed = _time.time() - started
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        uptime_str = f"{hours}h {minutes}m"
+
+    console.print(Panel(
+        f"[bold]PID:[/bold]              {pid}\n"
+        f"[bold]Status:[/bold]           [green]running[/green]\n"
+        f"[bold]Uptime:[/bold]           {uptime_str}\n"
+        f"[bold]PID file:[/bold]         {pid_path}\n"
+        f"[bold]Log file:[/bold]         {_log_path()}",
+        title="CAP Daemon",
+        box=box.ROUNDED,
+    ))
+
+
+@daemon_group.command("start")
+@click.option("--foreground", "-f", is_flag=True, help="Run in foreground (don't daemonize)")
+@click.option("--once", is_flag=True, help="Run all tasks once and exit")
+def daemon_start_cmd(foreground: bool, once: bool):
+    """Start the daemon if not already running."""
+    import json as _json
+    import subprocess
+    from cap.harness.daemon import CapDaemon, is_daemon_running, read_pid
+
     if once:
+        d = CapDaemon()
         results = d.run_once()
         click.echo(_json.dumps(results, indent=2, default=str))
+        return
+
+    if is_daemon_running():
+        pid = read_pid()
+        console.print(f"[yellow]Daemon is already running (PID {pid})[/yellow]")
+        return
+
+    if foreground:
+        console.print("[bold]Starting daemon in foreground...[/bold] (Ctrl+C to stop)")
+        from cap.harness.daemon import main as daemon_main
+        daemon_main()
     else:
-        click.echo(f"CAP daemon starting (interval={interval}s). Ctrl+C to stop.")
-        d.start()
+        # Start as background process
+        import sys as _sys
+        cmd = [_sys.executable, "-m", "cap.harness.daemon"]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        # Give it a moment to write PID
+        import time as _time
+        _time.sleep(1)
+
+        if proc.poll() is None:
+            console.print(f"[green]Daemon started[/green] (PID {proc.pid})")
+        else:
+            console.print(f"[red]Daemon failed to start[/red] (exit code {proc.returncode})")
+            raise SystemExit(1)
+
+
+@daemon_group.command("stop")
+def daemon_stop_cmd():
+    """Stop the running daemon (SIGTERM + wait)."""
+    import time as _time
+    from cap.harness.daemon import read_pid, is_daemon_running, remove_pid
+
+    pid = read_pid()
+    if not pid or not is_daemon_running():
+        console.print("[dim]Daemon is not running.[/dim]")
+        if pid:
+            remove_pid()
+        return
+
+    # Send SIGTERM
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError) as e:
+        console.print(f"[red]Failed to stop daemon: {e}[/red]")
+        remove_pid()
+        return
+
+    # Wait for process to exit (max 10s)
+    console.print(f"[dim]Sending SIGTERM to PID {pid}...[/dim]")
+    for _ in range(20):
+        try:
+            os.kill(pid, 0)
+            _time.sleep(0.5)
+        except ProcessLookupError:
+            break
+    else:
+        # Force kill
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    remove_pid()
+    console.print(f"[green]Daemon stopped[/green] (was PID {pid})")
+
+
+@daemon_group.command("restart")
+@click.pass_context
+def daemon_restart_cmd(ctx):
+    """Restart the daemon (stop + start)."""
+    ctx.invoke(daemon_stop_cmd)
+    import time as _time
+    _time.sleep(1)
+    ctx.invoke(daemon_start_cmd, foreground=False, once=False)
+
+
+@daemon_group.command("logs")
+@click.option("--lines", "-n", type=int, default=50, show_default=True, help="Number of lines to show")
+@click.option("--follow", "-f", "follow_flag", is_flag=True, help="Follow log output")
+def daemon_logs_cmd(lines: int, follow_flag: bool):
+    """Tail the daemon log file."""
+    import subprocess
+    from cap.harness.daemon import _log_path
+
+    log_file = _log_path()
+    if not log_file.exists():
+        console.print(f"[dim]No log file found at {log_file}[/dim]")
+        return
+
+    if follow_flag:
+        console.print(f"[dim]Following {log_file} (Ctrl+C to stop)...[/dim]")
+        try:
+            subprocess.run(["tail", "-f", "-n", str(lines), str(log_file)])
+        except KeyboardInterrupt:
+            pass
+    else:
+        try:
+            result = subprocess.run(
+                ["tail", "-n", str(lines), str(log_file)],
+                capture_output=True, text=True,
+            )
+            if result.stdout:
+                console.print(result.stdout)
+            else:
+                console.print("[dim]Log file is empty.[/dim]")
+        except Exception as exc:
+            console.print(f"[red]Failed to read log: {exc}[/red]")
+
+
+@daemon_group.command("install")
+def daemon_install_cmd():
+    """Install daemon as OS service (LaunchAgent/systemd)."""
+    from cap.cli.daemon_service import install_service, is_service_installed
+
+    if is_service_installed():
+        console.print("[yellow]Service is already installed.[/yellow]")
+        return
+
+    try:
+        path = install_service()
+        console.print(f"[green]Service installed:[/green] {path}")
+        console.print("[dim]The daemon will start on login and auto-restart on crash.[/dim]")
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        raise SystemExit(1)
+
+
+@daemon_group.command("uninstall")
+def daemon_uninstall_cmd():
+    """Uninstall the daemon OS service."""
+    from cap.cli.daemon_service import uninstall_service, is_service_installed
+
+    if not is_service_installed():
+        console.print("[dim]Service is not installed.[/dim]")
+        return
+
+    removed = uninstall_service()
+    if removed:
+        console.print("[green]Service uninstalled.[/green]")
+    else:
+        console.print("[yellow]Could not uninstall service.[/yellow]")
 
 
 # ── Entrypoint ─────────────────────────────────────────────────────────────────

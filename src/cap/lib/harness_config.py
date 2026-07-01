@@ -12,6 +12,27 @@ import json
 import os
 from pathlib import Path
 
+#: Default AWS region used as a last-resort fallback when no config exists.
+#: Overridden by: harness-config.json > AWS_DEFAULT_REGION env var.
+DEFAULT_AWS_REGION = "us-east-1"
+
+
+def _default_knowledge_config() -> dict:
+    """Return default knowledge indexing configuration."""
+    return {
+        "indexed_roots": [],
+        "exclude_patterns": [
+            "node_modules", ".git", "__pycache__", "dist", "build",
+            ".terraform", ".venv", "venv", "vendor", "target",
+        ],
+        "auto_index_new_workspaces": True,
+        "file_extensions": [
+            ".py", ".ts", ".js", ".tf", ".yaml", ".yml", ".json", ".md",
+            ".toml", ".sh", ".go", ".java", ".rs", ".hcl",
+        ],
+        "max_file_size_kb": 500,
+    }
+
 
 def load_harness_config() -> dict:
     """Load the harness config, falling back to sensible defaults.
@@ -28,18 +49,26 @@ def load_harness_config() -> dict:
         # Backward compat: if no auth_method in aws section, assume sso-profile
         if "aws" in config and "auth_method" not in config["aws"]:
             config["aws"]["auth_method"] = "sso-profile"
+        # Ensure knowledge config is present (added in v0.6)
+        if "knowledge" not in config:
+            config["knowledge"] = _default_knowledge_config()
         return config
 
-    # Fallback defaults — used when cap init hasn't been run yet
+    # Fallback defaults — used when cap init hasn't been run yet.
+    # Model IDs are derived from region using the model_probe module.
+    from cap.lib.model_probe import get_default_models_for_region
+
+    default_region = DEFAULT_AWS_REGION
     return {
         "provider": "aws-bedrock",
-        "aws": {"profile": "", "region": "eu-central-1", "auth_method": "env-vars"},
-        "models": {
-            "haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-            "opus": "eu.anthropic.claude-opus-4-6-v1",
+        "aws": {"profile": "", "region": default_region, "auth_method": "env-vars"},
+        "models": get_default_models_for_region(default_region),
+        "budget": {
+            "daily_limit_usd": 5.0,
+            "alert_threshold_pct": 80,
+            "per_project": False,
+            "agent_caps": {},
         },
-        "budget": {"daily_limit_usd": 5.0, "alert_threshold_pct": 80},
         "agent_defaults": {
             "dev": "sonnet", "devops": "sonnet", "security": "opus",
             "code-review": "opus", "sre": "sonnet", "test": "sonnet",
@@ -53,6 +82,7 @@ def load_harness_config() -> dict:
             "default_max_tokens": 8192,
             "temperature": 0.7,
         },
+        "knowledge": _default_knowledge_config(),
     }
 
 
@@ -77,3 +107,52 @@ def get_anthropic_api_key(config: dict | None = None) -> str | None:
     anthropic_cfg = config.get("anthropic", {})
     env_var = anthropic_cfg.get("api_key_env", "ANTHROPIC_API_KEY")
     return os.environ.get(env_var)
+
+
+def get_knowledge_config(config: dict | None = None) -> dict:
+    """Get the knowledge indexing configuration section.
+
+    Returns dict with keys: indexed_roots, exclude_patterns,
+    auto_index_new_workspaces, file_extensions, max_file_size_kb.
+    """
+    if config is None:
+        config = load_harness_config()
+    return config.get("knowledge", _default_knowledge_config())
+
+
+def add_indexed_root(root_path: str, config: dict | None = None) -> bool:
+    """Add a root path to knowledge.indexed_roots if not already present.
+
+    Persists the change to harness-config.json. Returns True if added.
+    """
+    config_path = Path.home() / ".claude-platform" / "harness-config.json"
+    if config is None:
+        config = load_harness_config()
+
+    knowledge = config.setdefault("knowledge", _default_knowledge_config())
+    indexed_roots = knowledge.setdefault("indexed_roots", [])
+
+    # Normalize path
+    normalized = str(Path(root_path).resolve())
+    if normalized in indexed_roots:
+        return False
+
+    indexed_roots.append(normalized)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+    return True
+
+
+def is_path_under_indexed_root(path: str, config: dict | None = None) -> bool:
+    """Check if a given path is under any of the configured indexed_roots."""
+    if config is None:
+        config = load_harness_config()
+
+    knowledge = config.get("knowledge", _default_knowledge_config())
+    indexed_roots = knowledge.get("indexed_roots", [])
+
+    normalized = str(Path(path).resolve())
+    for root in indexed_roots:
+        if normalized.startswith(root):
+            return True
+    return False

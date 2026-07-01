@@ -835,7 +835,7 @@ class TestConverseExecutorBudget:
         ex = _make_executor(client)
 
         call_count = [0]
-        def budget_check_side_effect():
+        def budget_check_side_effect(**kwargs):
             call_count[0] += 1
             if call_count[0] > 1:
                 return "daily budget exceeded"

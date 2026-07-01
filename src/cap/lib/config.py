@@ -12,7 +12,7 @@ except ImportError:
 
 @dataclass
 class BedrockConfig:
-    region: str = "eu-central-1"
+    region: str = "us-east-1"
     profile: str | None = None
     embedding_model: str = "amazon.titan-embed-text-v2:0"
     embedding_dimensions: int = 1024

@@ -34,12 +34,12 @@ class TestOrchestrateE2E:
         assert decision.complexity_score >= 0
 
     def test_executor_model_resolution(self):
-        """Model aliases should resolve to correct EU Bedrock IDs."""
+        """Model aliases should resolve to region-prefixed Bedrock IDs."""
         from cap.harness.executor import _resolve_model, MODEL_ALIASES
 
-        assert "eu.anthropic" in MODEL_ALIASES["haiku"]
-        assert "eu.anthropic" in MODEL_ALIASES["sonnet"]
-        assert "eu.anthropic" in MODEL_ALIASES["opus"]
+        assert "anthropic.claude-haiku" in MODEL_ALIASES["haiku"]
+        assert "anthropic.claude-sonnet" in MODEL_ALIASES["sonnet"]
+        assert "anthropic.claude-opus" in MODEL_ALIASES["opus"]
 
         assert _resolve_model("haiku") == MODEL_ALIASES["haiku"]
         assert _resolve_model("sonnet") == MODEL_ALIASES["sonnet"]

@@ -1,28 +1,34 @@
-"""Multi-turn Converse executor with tool use support.
+"""Multi-turn Converse executor using LangGraph for agent loop orchestration.
 
-Supports multiple LLM providers:
-- aws-bedrock: Bedrock Converse API (default)
-- anthropic-api: Direct Anthropic Messages API
-- azure-openai: Azure OpenAI (not yet implemented)
-- local: Local models via OpenAI-compatible API (not yet implemented)
+Supports multiple LLM providers via LangChain:
+- aws-bedrock: ChatBedrockConverse (default)
+- anthropic-api: ChatAnthropic (direct Anthropic Messages API)
+- local: ChatOllama (local models via Ollama)
 
-Uses the Bedrock Converse API for multi-turn conversations where agents
-can call tools (file_read, bash_exec, knowledge_search) iteratively
-until they produce a final answer.
+Uses a LangGraph StateGraph for the agent loop:
+START -> model_call -> check_tool_use -> [tool_node | END]
+
+Budget enforcement after each model call. Max iterations from config (default 15).
 """
 
 import json
 import logging
 import os
-import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Annotated, Callable, Optional, Sequence, TypedDict
 
-import boto3
-from botocore.exceptions import ClientError, NoCredentialsError, NoRegionError
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
+from langchain_core.language_models.chat_models import BaseChatModel
+from langgraph.graph import END, StateGraph
 
 logger = logging.getLogger("cap.harness.converse_executor")
 
@@ -37,7 +43,7 @@ BACKOFF_MULTIPLIER = 4.0  # Multiplier per retry
 DEFAULT_MAX_TOKENS = 8192
 TOOL_OUTPUT_MAX_CHARS = 50_000  # Truncate tool outputs to prevent token explosion
 
-# Model aliases (same as executor.py — import from there)
+# Model aliases (same as executor.py -- import from there)
 from cap.harness.executor import (
     MODEL_ALIASES,
     MODEL_PRICING,
@@ -77,30 +83,21 @@ def load_agent_system_prompt(agent_type: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Tool Definitions (Bedrock Converse format)
+# Legacy Tool Definitions (kept for backward compat imports)
 # ---------------------------------------------------------------------------
 
 TOOL_DEFINITIONS = [
     {
         "toolSpec": {
             "name": "file_read",
-            "description": "Read the contents of a file at the given absolute path. Returns the file content as text.",
+            "description": "Read the contents of a file at the given absolute path.",
             "inputSchema": {
                 "json": {
                     "type": "object",
                     "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute file path to read",
-                        },
-                        "offset": {
-                            "type": "integer",
-                            "description": "Line number to start reading from (0-indexed). Optional.",
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of lines to read. Optional.",
-                        },
+                        "path": {"type": "string", "description": "Absolute file path to read"},
+                        "offset": {"type": "integer", "description": "Line number to start reading from"},
+                        "limit": {"type": "integer", "description": "Maximum number of lines to read"},
                     },
                     "required": ["path"],
                 }
@@ -110,19 +107,13 @@ TOOL_DEFINITIONS = [
     {
         "toolSpec": {
             "name": "bash_exec",
-            "description": "Execute a bash command and return stdout/stderr. Use for running tests, linting, searching, or any CLI operation. Commands have a 60-second timeout.",
+            "description": "Execute a bash command and return stdout/stderr.",
             "inputSchema": {
                 "json": {
                     "type": "object",
                     "properties": {
-                        "command": {
-                            "type": "string",
-                            "description": "The bash command to execute",
-                        },
-                        "cwd": {
-                            "type": "string",
-                            "description": "Working directory for the command. Optional.",
-                        },
+                        "command": {"type": "string", "description": "The bash command to execute"},
+                        "cwd": {"type": "string", "description": "Working directory"},
                     },
                     "required": ["command"],
                 }
@@ -132,20 +123,13 @@ TOOL_DEFINITIONS = [
     {
         "toolSpec": {
             "name": "knowledge_search",
-            "description": "Search the CAP knowledge base for relevant information about repos, services, patterns, and conventions.",
+            "description": "Search the CAP knowledge base.",
             "inputSchema": {
                 "json": {
                     "type": "object",
                     "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Search query",
-                        },
-                        "scope": {
-                            "type": "string",
-                            "enum": ["all", "code", "config", "doc"],
-                            "description": "Scope to search within. Default: all",
-                        },
+                        "query": {"type": "string", "description": "Search query"},
+                        "scope": {"type": "string", "enum": ["all", "code", "config", "doc"]},
                     },
                     "required": ["query"],
                 }
@@ -156,114 +140,41 @@ TOOL_DEFINITIONS = [
 
 
 # ---------------------------------------------------------------------------
-# Tool Execution
+# Legacy tool execution functions (kept for backward compat imports)
 # ---------------------------------------------------------------------------
 
 def _execute_file_read(input_data: dict) -> str:
     """Read a file and return its content."""
-    path = input_data.get("path", "")
-    if not path or not os.path.isabs(path):
-        return f"Error: path must be absolute. Got: {path!r}"
-
-    if not os.path.exists(path):
-        return f"Error: file not found: {path}"
-
-    if not os.path.isfile(path):
-        return f"Error: not a regular file: {path}"
-
-    try:
-        content = Path(path).read_text(encoding="utf-8", errors="replace")
-        offset = input_data.get("offset", 0)
-        limit = input_data.get("limit")
-
-        lines = content.splitlines(keepends=True)
-        if offset and offset > 0:
-            lines = lines[offset:]
-        if limit and limit > 0:
-            lines = lines[:limit]
-
-        result = "".join(lines)
-        if len(result) > TOOL_OUTPUT_MAX_CHARS:
-            result = result[:TOOL_OUTPUT_MAX_CHARS] + "\n... [truncated]"
-        return result
-    except Exception as exc:
-        return f"Error reading file: {exc}"
+    from cap.harness.agent_tools import FileReadTool
+    tool = FileReadTool()
+    return tool._run(
+        path=input_data.get("path", ""),
+        offset=input_data.get("offset", 0),
+        limit=input_data.get("limit", 0),
+    )
 
 
 def _execute_bash(input_data: dict) -> str:
     """Execute a bash command with timeout."""
-    command = input_data.get("command", "")
-    if not command:
-        return "Error: command is required"
-
-    cwd = input_data.get("cwd")
-    if cwd and not os.path.isdir(cwd):
-        return f"Error: working directory does not exist: {cwd}"
-
-    # Security: block obviously dangerous commands
-    dangerous = ["rm -rf /", "mkfs", "dd if=", "> /dev/sd", ":(){ :|:& };:"]
-    lower_cmd = command.lower()
-    for d in dangerous:
-        if d in lower_cmd:
-            return f"Error: blocked dangerous command pattern: {d}"
-
-    try:
-        result = subprocess.run(
-            ["bash", "-c", command],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            cwd=cwd,
-        )
-        output = ""
-        if result.stdout:
-            output += result.stdout
-        if result.stderr:
-            output += f"\n[stderr]\n{result.stderr}"
-        if result.returncode != 0:
-            output += f"\n[exit code: {result.returncode}]"
-
-        if not output.strip():
-            output = "[no output]"
-
-        if len(output) > TOOL_OUTPUT_MAX_CHARS:
-            output = output[:TOOL_OUTPUT_MAX_CHARS] + "\n... [truncated]"
-        return output
-    except subprocess.TimeoutExpired:
-        return "Error: command timed out after 60 seconds"
-    except Exception as exc:
-        return f"Error executing command: {exc}"
+    from cap.harness.agent_tools import BashExecTool
+    tool = BashExecTool(workspace="")
+    return tool._run(
+        command=input_data.get("command", ""),
+        cwd=input_data.get("cwd", ""),
+    )
 
 
 def _execute_knowledge_search(input_data: dict) -> str:
     """Search the knowledge base."""
-    query = input_data.get("query", "")
-    if not query:
-        return "Error: query is required"
-
-    scope = input_data.get("scope", "all")
-
-    try:
-        # Try to use the knowledge search module
-        from cap.knowledge.search import search as kb_search  # type: ignore
-        results = kb_search(query, scope=scope, top_k=5)
-        if not results:
-            return "No results found."
-
-        output_parts = []
-        for r in results[:5]:
-            title = r.get("title", "untitled")
-            preview = r.get("content_preview", r.get("content", ""))[:300]
-            source = r.get("source_path", "unknown")
-            output_parts.append(f"## {title}\nSource: {source}\n{preview}\n")
-        return "\n---\n".join(output_parts)
-    except ImportError:
-        return "Knowledge base not available (module not found)"
-    except Exception as exc:
-        return f"Knowledge search error: {exc}"
+    from cap.harness.agent_tools import KnowledgeSearchTool
+    tool = KnowledgeSearchTool()
+    return tool._run(
+        query=input_data.get("query", ""),
+        scope=input_data.get("scope", "all"),
+    )
 
 
-# Tool dispatcher
+# Tool dispatcher (legacy compat)
 TOOL_HANDLERS: dict[str, Callable[[dict], str]] = {
     "file_read": _execute_file_read,
     "bash_exec": _execute_bash,
@@ -296,8 +207,8 @@ class ConversationResult:
     total_output_tokens: int
     total_cost_usd: float
     duration_ms: int
-    turns: int  # Number of API calls made
-    tool_calls: list = field(default_factory=list)  # Record of tool invocations
+    turns: int
+    tool_calls: list = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_execution_result(self) -> ExecutionResult:
@@ -316,270 +227,30 @@ class ConversationResult:
 
 
 # ---------------------------------------------------------------------------
-# Provider Abstraction Layer
+# LangGraph State
 # ---------------------------------------------------------------------------
 
-
-class AnthropicProvider:
-    """Thin wrapper translating Converse-style calls to Anthropic Messages API.
-
-    This allows the ConverseExecutor to use the direct Anthropic SDK
-    when configured with provider=anthropic-api. The API key is resolved
-    from an environment variable (never stored in config).
-    """
-
-    def __init__(self, api_key: str) -> None:
-        try:
-            import anthropic
-        except ImportError:
-            raise ImportError(
-                "The 'anthropic' package is required for provider=anthropic-api. "
-                "Install it with: pip install anthropic"
-            )
-        self._client = anthropic.Anthropic(api_key=api_key)
-
-    def converse(
-        self,
-        model_id: str,
-        messages: list,
-        system: list | None = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
-        temperature: float = 0.7,
-        tool_config: dict | None = None,
-    ) -> dict:
-        """Translate a Bedrock Converse-style call to Anthropic Messages API.
-
-        Converts:
-        - system: [{"text": "..."}] -> system="..."
-        - messages: Bedrock format -> Anthropic format
-        - toolConfig: Bedrock format -> Anthropic tools format
-        - Response: Anthropic format -> Bedrock Converse response format
-        """
-        # Build system prompt
-        system_text = None
-        if system:
-            system_text = "\n".join(s.get("text", "") for s in system)
-
-        # Convert messages from Bedrock to Anthropic format
-        anthropic_messages = self._convert_messages_to_anthropic(messages)
-
-        # Convert tool config
-        tools = None
-        if tool_config and "tools" in tool_config:
-            tools = self._convert_tools_to_anthropic(tool_config["tools"])
-
-        # Make the API call
-        kwargs: dict[str, Any] = {
-            "model": model_id,
-            "messages": anthropic_messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        if system_text:
-            kwargs["system"] = system_text
-        if tools:
-            kwargs["tools"] = tools
-
-        response = self._client.messages.create(**kwargs)
-
-        # Convert response back to Bedrock Converse format
-        return self._convert_response_to_converse(response)
-
-    def converse_stream(
-        self,
-        model_id: str,
-        messages: list,
-        system: list | None = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
-        temperature: float = 0.7,
-    ) -> dict:
-        """Streaming call translated to Anthropic streaming API.
-
-        Returns a dict with a 'stream' key containing an iterable of events
-        in Bedrock Converse stream format.
-        """
-        system_text = None
-        if system:
-            system_text = "\n".join(s.get("text", "") for s in system)
-
-        anthropic_messages = self._convert_messages_to_anthropic(messages)
-
-        kwargs: dict[str, Any] = {
-            "model": model_id,
-            "messages": anthropic_messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-        }
-        if system_text:
-            kwargs["system"] = system_text
-
-        # Use streaming
-        with self._client.messages.stream(**kwargs) as stream:
-            events = []
-            text_parts = []
-            for text in stream.text_stream:
-                text_parts.append(text)
-                events.append({
-                    "contentBlockDelta": {
-                        "delta": {"text": text}
-                    }
-                })
-
-            # Get final message for token usage
-            final_message = stream.get_final_message()
-            events.append({
-                "metadata": {
-                    "usage": {
-                        "inputTokens": final_message.usage.input_tokens,
-                        "outputTokens": final_message.usage.output_tokens,
-                    }
-                }
-            })
-
-        return {"stream": events}
-
-    def _convert_messages_to_anthropic(self, messages: list) -> list:
-        """Convert Bedrock Converse messages to Anthropic format."""
-        result = []
-        for msg in messages:
-            role = msg["role"]
-            content = msg.get("content", [])
-
-            if isinstance(content, str):
-                result.append({"role": role, "content": content})
-                continue
-
-            # Convert content blocks
-            anthropic_content = []
-            for block in content:
-                if "text" in block:
-                    anthropic_content.append({"type": "text", "text": block["text"]})
-                elif "toolUse" in block:
-                    tu = block["toolUse"]
-                    anthropic_content.append({
-                        "type": "tool_use",
-                        "id": tu["toolUseId"],
-                        "name": tu["name"],
-                        "input": tu.get("input", {}),
-                    })
-                elif "toolResult" in block:
-                    tr = block["toolResult"]
-                    tool_content = []
-                    for tc in tr.get("content", []):
-                        if "text" in tc:
-                            tool_content.append({"type": "text", "text": tc["text"]})
-                    anthropic_content.append({
-                        "type": "tool_result",
-                        "tool_use_id": tr["toolUseId"],
-                        "content": tool_content,
-                    })
-
-            result.append({"role": role, "content": anthropic_content})
-
-        return result
-
-    def _convert_tools_to_anthropic(self, bedrock_tools: list) -> list:
-        """Convert Bedrock toolConfig tools to Anthropic tools format."""
-        tools = []
-        for tool_def in bedrock_tools:
-            spec = tool_def.get("toolSpec", {})
-            schema = spec.get("inputSchema", {}).get("json", {})
-            tools.append({
-                "name": spec["name"],
-                "description": spec.get("description", ""),
-                "input_schema": schema,
-            })
-        return tools
-
-    def _convert_response_to_converse(self, response: Any) -> dict:
-        """Convert Anthropic Messages response to Bedrock Converse format."""
-        content_blocks = []
-        for block in response.content:
-            if block.type == "text":
-                content_blocks.append({"text": block.text})
-            elif block.type == "tool_use":
-                content_blocks.append({
-                    "toolUse": {
-                        "toolUseId": block.id,
-                        "name": block.name,
-                        "input": block.input,
-                    }
-                })
-
-        # Map stop_reason to Bedrock stopReason
-        stop_reason_map = {
-            "end_turn": "end_turn",
-            "max_tokens": "max_tokens",
-            "tool_use": "tool_use",
-        }
-        stop_reason = stop_reason_map.get(response.stop_reason, "end_turn")
-
-        return {
-            "output": {
-                "message": {
-                    "role": "assistant",
-                    "content": content_blocks,
-                }
-            },
-            "stopReason": stop_reason,
-            "usage": {
-                "inputTokens": response.usage.input_tokens,
-                "outputTokens": response.usage.output_tokens,
-            },
-        }
+def _add_messages(existing: list[BaseMessage], new: list[BaseMessage]) -> list[BaseMessage]:
+    """Reducer that appends new messages to existing list."""
+    return existing + new
 
 
-def _create_provider_client(config: dict | None = None):
-    """Factory method to create the appropriate LLM client based on provider config.
-
-    Returns:
-    - For aws-bedrock: None (ConverseExecutor creates boto3 client internally)
-    - For anthropic-api: AnthropicProvider instance
-    - For azure-openai: raises NotImplementedError
-    - For local: raises NotImplementedError
-
-    Parameters
-    ----------
-    config:
-        Harness config dict. If None, loaded from harness_config.
-    """
-    if config is None:
-        from cap.lib.harness_config import load_harness_config
-        config = load_harness_config()
-
-    provider = config.get("provider", "aws-bedrock")
-
-    if provider == "aws-bedrock":
-        # ConverseExecutor handles boto3 client creation internally
-        return None
-
-    elif provider == "anthropic-api":
-        from cap.lib.harness_config import get_anthropic_api_key
-        api_key = get_anthropic_api_key(config)
-        if not api_key:
-            anthropic_cfg = config.get("anthropic", {})
-            env_var = anthropic_cfg.get("api_key_env", "ANTHROPIC_API_KEY")
-            raise ValueError(
-                f"Anthropic API key not found. Set the ${env_var} environment variable."
-            )
-        return AnthropicProvider(api_key=api_key)
-
-    elif provider == "azure-openai":
-        raise NotImplementedError("Azure provider coming soon")
-
-    elif provider == "local":
-        raise NotImplementedError("Local provider coming soon")
-
-    else:
-        raise ValueError(f"Unknown provider: {provider!r}")
+class AgentState(TypedDict):
+    messages: Annotated[list[BaseMessage], _add_messages]
+    iterations: int
+    total_input_tokens: int
+    total_output_tokens: int
+    tool_calls_log: list[dict]
+    budget_exceeded: bool
+    error: Optional[str]
 
 
 # ---------------------------------------------------------------------------
-# ConverseExecutor
+# ConverseExecutor (LangGraph-based)
 # ---------------------------------------------------------------------------
 
 class ConverseExecutor:
-    """Multi-turn executor using Bedrock Converse API with tool use.
+    """Multi-turn executor using LangGraph StateGraph with LangChain providers.
 
     Parameters
     ----------
@@ -592,22 +263,30 @@ class ConverseExecutor:
     allowed_tools:
         List of tool names the agent is allowed to use.
         None means all tools are available.
+    provider_client:
+        Legacy: pre-configured provider client (for backward compat).
+    config:
+        Harness config dict. If None, loaded from harness_config.
     """
 
     def __init__(
         self,
         profile: Optional[str] = None,
-        region: str = "eu-central-1",
+        region: str | None = None,
         budget_limit_usd: float = 5.0,
         allowed_tools: Optional[list] = None,
         provider_client: Optional[Any] = None,
+        config: Optional[dict] = None,
     ) -> None:
+        from cap.lib.harness_config import DEFAULT_AWS_REGION
         self._profile = profile
-        self._region = region
+        self._region = region or DEFAULT_AWS_REGION
         self._budget_limit_usd = budget_limit_usd
         self._allowed_tools = allowed_tools
         self._client = None
-        self._provider_client = provider_client  # AnthropicProvider or None
+        self._provider_client = provider_client
+        self._llm: Optional[BaseChatModel] = None
+        self._config = config
         self._available: Optional[bool] = None
 
     # ------------------------------------------------------------------
@@ -615,45 +294,56 @@ class ConverseExecutor:
     # ------------------------------------------------------------------
 
     def _get_client(self):
-        """Get the appropriate client based on provider configuration.
-
-        Returns the provider_client if set (for anthropic-api), otherwise
-        returns the boto3 bedrock-runtime client (for aws-bedrock).
-        """
+        """Get the appropriate client based on provider configuration."""
         if self._provider_client is not None:
             return self._provider_client
         return self._client
 
     def _ensure_client(self) -> None:
-        """Create the boto3 Bedrock Runtime client on first use.
+        """Initialize the LLM provider."""
+        if self._available is False:
+            return
 
-        If a provider_client (e.g. AnthropicProvider) was passed at init,
-        we skip boto3 client creation entirely.
-        """
         if self._provider_client is not None:
-            # Provider client already available — no boto3 needed
             self._available = True
             return
 
-        if self._client is not None or self._available is False:
+        if self._llm is not None:
+            self._available = True
             return
 
-        session_kwargs: dict = {"region_name": self._region}
-        if self._profile:
-            session_kwargs["profile_name"] = self._profile
+        if self._client is not None:
+            self._available = True
+            return
 
+        # Try LangChain provider creation
         try:
+            from cap.harness.llm_provider import create_llm
+            if self._config is None:
+                from cap.lib.harness_config import load_harness_config
+                self._config = load_harness_config()
+
+            self._llm = create_llm(self._config, tier="sonnet")
+            self._available = True
+            logger.debug("ConverseExecutor: LangChain LLM initialised")
+        except Exception as exc:
+            logger.debug("ConverseExecutor: LangChain init failed (%s), trying boto3", exc)
+            self._init_boto3_client()
+
+    def _init_boto3_client(self) -> None:
+        """Legacy: Create boto3 Bedrock Runtime client."""
+        try:
+            import boto3
+            from botocore.exceptions import NoCredentialsError, NoRegionError
+
+            session_kwargs: dict = {"region_name": self._region}
+            if self._profile:
+                session_kwargs["profile_name"] = self._profile
+
             session = boto3.Session(**session_kwargs)
             self._client = session.client("bedrock-runtime")
-            logger.debug(
-                "ConverseExecutor: client initialised (region=%s, profile=%s)",
-                self._region,
-                self._profile or "<ambient>",
-            )
-        except (NoCredentialsError, NoRegionError) as exc:
-            logger.warning("ConverseExecutor: credentials unavailable: %s", exc)
-            self._available = False
-        except Exception as exc:  # noqa: BLE001
+            self._available = True
+        except Exception as exc:
             logger.warning("ConverseExecutor: client init failed: %s", exc)
             self._available = False
 
@@ -666,36 +356,112 @@ class ConverseExecutor:
     # Budget check
     # ------------------------------------------------------------------
 
-    def _check_budget(self) -> Optional[str]:
-        """Return error string if budget is exceeded, else None."""
+    def _check_budget(self, agent_type: str = "unknown") -> Optional[str]:
+        """Return error string if budget is exceeded, else None.
+
+        Performs three checks:
+        1. Budget paused flag file (~/.claude-platform/data/budget_paused)
+        2. Daily spend vs daily_limit_usd (via cost_meter/execution_ledger)
+        3. Per-agent-type cap if configured (via budget_manager)
+        """
+        # Check 1: Is budget paused?
+        try:
+            from cap.lib.budget_manager import is_budget_paused
+            if is_budget_paused():
+                return "budget paused — executions blocked. Run 'cap budget resume' to resume."
+        except Exception:
+            pass
+
+        # Check 2: Daily limit via cost_meter (uses execution_ledger — source of truth)
         try:
             from cap.harness.cost_meter import budget_remaining
             remaining = budget_remaining(daily_limit_usd=self._budget_limit_usd)
             if remaining <= 0:
                 return f"daily budget exceeded (limit=${self._budget_limit_usd})"
-        except Exception:  # noqa: BLE001
-            pass  # If cost meter unavailable, don't block
+        except Exception:
+            pass
+
+        # Check 3: Per-agent-type cap (via budget_manager)
+        try:
+            from cap.lib.harness_config import load_harness_config
+            import sqlite3
+
+            harness_cfg = load_harness_config()
+            agent_caps = harness_cfg.get("budget", {}).get("agent_caps", {})
+
+            if agent_type in agent_caps:
+                cap_home = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
+                db_path = cap_home / "data" / "platform.db"
+
+                if db_path.exists():
+                    db = sqlite3.connect(str(db_path))
+                    db.execute("PRAGMA busy_timeout=2000")
+                    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+                    try:
+                        row = db.execute(
+                            """SELECT COALESCE(SUM(cost_usd), 0.0)
+                               FROM execution_ledger
+                               WHERE agent_type = ? AND date(created_at) = ?""",
+                            (agent_type, today),
+                        ).fetchone()
+                        agent_spend = row[0] if row else 0.0
+                    except Exception:
+                        agent_spend = 0.0
+
+                    db.close()
+
+                    cap_limit = agent_caps[agent_type]
+                    if agent_spend >= cap_limit:
+                        return (
+                            f"per-agent cap exceeded for '{agent_type}': "
+                            f"${agent_spend:.4f} spent of ${cap_limit:.2f} cap."
+                        )
+        except Exception:
+            pass
+
         return None
 
     # ------------------------------------------------------------------
-    # Tool config builder
+    # Budget spend recording
+    # ------------------------------------------------------------------
+
+    def _record_budget_spend(self, agent_type: str, cost_usd: float) -> None:
+        """Record execution cost in budget_log after successful execution."""
+        if cost_usd <= 0:
+            return
+        try:
+            from cap.lib.budget_manager import record_budget_spend
+            import sqlite3
+
+            cap_home = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
+            db_path = cap_home / "data" / "platform.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+
+            db = sqlite3.connect(str(db_path))
+            db.execute("PRAGMA busy_timeout=2000")
+            record_budget_spend(db, agent_type, cost_usd)
+            db.close()
+        except Exception:
+            pass  # Best effort — don't block execution on tracking failure
+
+    # ------------------------------------------------------------------
+    # Tool config builder (legacy format for boto3 path)
     # ------------------------------------------------------------------
 
     def _get_tool_config(self) -> Optional[dict]:
-        """Build the toolConfig for the Converse API call."""
+        """Build the toolConfig for the legacy Converse API call."""
         tools = []
         for tool_def in TOOL_DEFINITIONS:
             tool_name = tool_def["toolSpec"]["name"]
             if self._allowed_tools is None or tool_name in self._allowed_tools:
                 tools.append(tool_def)
-
         if not tools:
             return None
-
         return {"tools": tools}
 
     # ------------------------------------------------------------------
-    # Single API call with retry
+    # Single API call with retry (legacy boto3 path)
     # ------------------------------------------------------------------
 
     def _call_converse(
@@ -707,16 +473,7 @@ class ConverseExecutor:
         temperature: float = 0.7,
         tool_config: Optional[dict] = None,
     ) -> dict:
-        """Make a single Converse API call with exponential backoff retry.
-
-        Routes to the appropriate provider:
-        - If provider_client is set (AnthropicProvider), uses its converse() method
-        - Otherwise, uses the boto3 bedrock-runtime client
-
-        Returns the raw API response dict (in Bedrock Converse format regardless of provider).
-        Raises on unrecoverable errors.
-        """
-        # Use provider client if available (e.g. AnthropicProvider)
+        """Make a single Converse API call with retry."""
         if self._provider_client is not None:
             return self._provider_client.converse(
                 model_id=model_id,
@@ -727,7 +484,8 @@ class ConverseExecutor:
                 tool_config=tool_config,
             )
 
-        # Default: boto3 Bedrock Converse API
+        from botocore.exceptions import ClientError
+
         kwargs: dict[str, Any] = {
             "modelId": model_id,
             "messages": messages,
@@ -759,8 +517,97 @@ class ConverseExecutor:
                     continue
                 raise
 
-        # Should not reach here, but just in case
         raise last_error  # type: ignore[misc]
+
+    # ------------------------------------------------------------------
+    # LangGraph-based execution
+    # ------------------------------------------------------------------
+
+    def _build_graph(self, llm: BaseChatModel, tools: list, max_iterations: int) -> StateGraph:
+        """Build the LangGraph StateGraph for the agent loop."""
+        from langchain_core.tools import BaseTool as LCBaseTool
+
+        if tools:
+            llm_with_tools = llm.bind_tools(tools)
+        else:
+            llm_with_tools = llm
+
+        tool_map: dict[str, LCBaseTool] = {t.name: t for t in tools}
+
+        def model_call(state: AgentState) -> dict:
+            messages = state["messages"]
+            response = llm_with_tools.invoke(messages)
+
+            usage = getattr(response, "usage_metadata", None) or {}
+            input_tokens = 0
+            output_tokens = 0
+            if isinstance(usage, dict):
+                input_tokens = usage.get("input_tokens", 0)
+                output_tokens = usage.get("output_tokens", 0)
+
+            return {
+                "messages": [response],
+                "iterations": state["iterations"] + 1,
+                "total_input_tokens": state["total_input_tokens"] + input_tokens,
+                "total_output_tokens": state["total_output_tokens"] + output_tokens,
+            }
+
+        def tool_node(state: AgentState) -> dict:
+            last_message = state["messages"][-1]
+            tool_calls_log = list(state["tool_calls_log"])
+            tool_messages: list[BaseMessage] = []
+
+            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                for tc in last_message.tool_calls:
+                    tool_name = tc["name"]
+                    tool_args = tc["args"]
+                    tool_id = tc["id"]
+
+                    if tool_name in tool_map:
+                        try:
+                            result = tool_map[tool_name].invoke(tool_args)
+                        except Exception as exc:
+                            result = f"Error: {exc}"
+                    else:
+                        result = f"Error: unknown tool '{tool_name}'"
+
+                    if not isinstance(result, str):
+                        result = str(result)
+
+                    if len(result) > TOOL_OUTPUT_MAX_CHARS:
+                        result = result[:TOOL_OUTPUT_MAX_CHARS] + "\n... [truncated]"
+
+                    tool_messages.append(ToolMessage(content=result, tool_call_id=tool_id))
+                    tool_calls_log.append({
+                        "tool": tool_name,
+                        "input": tool_args,
+                        "output_preview": result[:200],
+                        "iteration": state["iterations"],
+                    })
+
+            return {
+                "messages": tool_messages,
+                "tool_calls_log": tool_calls_log,
+            }
+
+        def should_continue(state: AgentState) -> str:
+            if state.get("budget_exceeded"):
+                return "end"
+            if state["iterations"] >= max_iterations:
+                return "end"
+            last_message = state["messages"][-1]
+            if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                return "tools"
+            return "end"
+
+        graph = StateGraph(AgentState)
+        graph.add_node("model_call", model_call)
+        graph.add_node("tool_node", tool_node)
+        graph.set_entry_point("model_call")
+        graph.add_conditional_edges("model_call", should_continue, {"tools": "tool_node", "end": END})
+        graph.add_edge("tool_node", "model_call")
+
+        return graph
 
     # ------------------------------------------------------------------
     # Main execution loop
@@ -777,37 +624,14 @@ class ConverseExecutor:
         temperature: float = 0.7,
         context: Optional[str] = None,
     ) -> ConversationResult:
-        """Execute a multi-turn conversation with tool use.
-
-        Parameters
-        ----------
-        agent_id:
-            UUID of the agent record.
-        agent_type:
-            Agent role (dev, security, etc.) — used for system prompt loading.
-        prompt:
-            The user task prompt.
-        system_prompt:
-            Override system prompt. If None, loaded from agent definition.
-        model:
-            Model shortname or full ID. Defaults to agent_type's default.
-        max_tokens:
-            Max tokens per turn.
-        temperature:
-            Sampling temperature.
-        context:
-            Optional context to prepend to the prompt (from hooks_pre_task).
-
-        Returns
-        -------
-        ConversationResult with the final response or error.
-        """
+        """Execute a multi-turn conversation with tool use."""
         self._ensure_client()
 
         resolved_model = _resolve_model(model)
         start_ts = time.monotonic()
 
-        def _error_result(error: str, turns: int = 0) -> ConversationResult:
+        def _error_result(error: str, turns: int = 0, input_tokens: int = 0,
+                          output_tokens: int = 0, tool_calls: list = None) -> ConversationResult:
             elapsed = int((time.monotonic() - start_ts) * 1000)
             return ConversationResult(
                 agent_id=agent_id,
@@ -815,44 +639,137 @@ class ConverseExecutor:
                 model=resolved_model,
                 response=None,
                 error=error,
-                total_input_tokens=0,
-                total_output_tokens=0,
-                total_cost_usd=0.0,
+                total_input_tokens=input_tokens,
+                total_output_tokens=output_tokens,
+                total_cost_usd=_compute_cost(resolved_model, input_tokens, output_tokens),
                 duration_ms=elapsed,
                 turns=turns,
+                tool_calls=tool_calls or [],
             )
 
         # Check availability
-        if self._available is False or (self._client is None and self._provider_client is None):
+        if self._available is False or (
+            self._client is None and self._provider_client is None and self._llm is None
+        ):
             return _error_result("bedrock unavailable: client not initialised")
 
         # Check budget
-        budget_error = self._check_budget()
+        budget_error = self._check_budget(agent_type=agent_type)
         if budget_error:
             return _error_result(budget_error)
 
-        # Load system prompt from agent definition if not provided
+        # Load system prompt
         if system_prompt is None:
             system_prompt = load_agent_system_prompt(agent_type)
 
-        # Build system message (Converse API format)
-        system_messages = None
-        if system_prompt:
-            system_messages = [{"text": system_prompt}]
-
-        # Build initial user message
+        # Build user content
         user_content = prompt
         if context:
             user_content = f"## Context\n{context}\n\n## Task\n{prompt}"
 
-        messages: list[dict] = [
-            {"role": "user", "content": [{"text": user_content}]}
-        ]
+        # LangGraph path
+        if self._llm is not None:
+            return self._execute_langgraph(
+                agent_id=agent_id, agent_type=agent_type,
+                resolved_model=resolved_model, user_content=user_content,
+                system_prompt=system_prompt, start_ts=start_ts,
+            )
 
-        # Tool config
+        # Legacy boto3/provider_client path
+        return self._execute_legacy(
+            agent_id=agent_id, agent_type=agent_type,
+            resolved_model=resolved_model, user_content=user_content,
+            system_prompt=system_prompt, max_tokens=max_tokens,
+            temperature=temperature, start_ts=start_ts,
+        )
+
+    def _execute_langgraph(self, agent_id, agent_type, resolved_model, user_content, system_prompt, start_ts):
+        """Execute using LangGraph StateGraph."""
+        from cap.harness.agent_tools import get_tools_for_agent
+
+        workspace = os.getcwd()
+        tools = get_tools_for_agent(agent_type, workspace)
+
+        if self._allowed_tools is not None:
+            tools = [t for t in tools if t.name in self._allowed_tools]
+
+        max_iterations = MAX_TOOL_ITERATIONS
+        if self._config and "execution" in self._config:
+            max_iterations = self._config["execution"].get("max_tool_iterations", MAX_TOOL_ITERATIONS)
+
+        graph = self._build_graph(self._llm, tools, max_iterations)
+        compiled = graph.compile()
+
+        messages: list[BaseMessage] = []
+        if system_prompt:
+            messages.append(SystemMessage(content=system_prompt))
+        messages.append(HumanMessage(content=user_content))
+
+        initial_state: AgentState = {
+            "messages": messages,
+            "iterations": 0,
+            "total_input_tokens": 0,
+            "total_output_tokens": 0,
+            "tool_calls_log": [],
+            "budget_exceeded": False,
+            "error": None,
+        }
+
+        try:
+            final_state = compiled.invoke(initial_state)
+
+            all_messages = final_state["messages"]
+            last_ai_message = None
+            for msg in reversed(all_messages):
+                if isinstance(msg, AIMessage):
+                    last_ai_message = msg
+                    break
+
+            response_text = ""
+            if last_ai_message:
+                response_text = last_ai_message.content if isinstance(last_ai_message.content, str) else str(last_ai_message.content)
+
+            elapsed = int((time.monotonic() - start_ts) * 1000)
+            total_input = final_state["total_input_tokens"]
+            total_output = final_state["total_output_tokens"]
+
+            error = None
+            if final_state["iterations"] >= max_iterations and (
+                last_ai_message and hasattr(last_ai_message, "tool_calls") and last_ai_message.tool_calls
+            ):
+                error = f"max tool iterations reached ({max_iterations})"
+                response_text = None
+
+            self._available = True
+            final_cost = _compute_cost(resolved_model, total_input, total_output)
+            if error is None:
+                self._record_budget_spend(agent_type, final_cost)
+            return ConversationResult(
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=response_text if error is None else None, error=error,
+                total_input_tokens=total_input, total_output_tokens=total_output,
+                total_cost_usd=final_cost,
+                duration_ms=elapsed, turns=final_state["iterations"],
+                tool_calls=final_state["tool_calls_log"],
+            )
+        except Exception as exc:
+            logger.error("ConverseExecutor: LangGraph error: %s", exc, exc_info=True)
+            elapsed = int((time.monotonic() - start_ts) * 1000)
+            return ConversationResult(
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=None, error=str(exc),
+                total_input_tokens=0, total_output_tokens=0,
+                total_cost_usd=0.0, duration_ms=elapsed, turns=0,
+            )
+
+    def _execute_legacy(self, agent_id, agent_type, resolved_model, user_content, system_prompt, max_tokens, temperature, start_ts):
+        """Execute using legacy boto3/provider_client path."""
+        from botocore.exceptions import ClientError
+
+        system_messages = [{"text": system_prompt}] if system_prompt else None
+        messages: list[dict] = [{"role": "user", "content": [{"text": user_content}]}]
         tool_config = self._get_tool_config()
 
-        # Execution loop
         total_input_tokens = 0
         total_output_tokens = 0
         tool_call_log: list[dict] = []
@@ -862,77 +779,49 @@ class ConverseExecutor:
             for iteration in range(MAX_TOOL_ITERATIONS):
                 turns += 1
 
-                # Budget check each turn (skip first — already checked above)
                 if iteration > 0:
-                    budget_error = self._check_budget()
+                    budget_error = self._check_budget(agent_type=agent_type)
                     if budget_error:
                         elapsed = int((time.monotonic() - start_ts) * 1000)
                         return ConversationResult(
-                            agent_id=agent_id,
-                            agent_type=agent_type,
-                            model=resolved_model,
-                            response=None,
-                            error=f"budget exceeded mid-conversation at turn {turns}",
-                            total_input_tokens=total_input_tokens,
-                            total_output_tokens=total_output_tokens,
+                            agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                            response=None, error=f"budget exceeded mid-conversation at turn {turns}",
+                            total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
                             total_cost_usd=_compute_cost(resolved_model, total_input_tokens, total_output_tokens),
-                            duration_ms=elapsed,
-                            turns=turns,
-                            tool_calls=tool_call_log,
+                            duration_ms=elapsed, turns=turns, tool_calls=tool_call_log,
                         )
 
-                # Call Converse API
                 response = self._call_converse(
-                    model_id=resolved_model,
-                    messages=messages,
-                    system=system_messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    tool_config=tool_config,
+                    model_id=resolved_model, messages=messages, system=system_messages,
+                    max_tokens=max_tokens, temperature=temperature, tool_config=tool_config,
                 )
 
-                # Extract token usage
                 usage = response.get("usage", {})
                 total_input_tokens += usage.get("inputTokens", 0)
                 total_output_tokens += usage.get("outputTokens", 0)
 
-                # Check stop reason
                 stop_reason = response.get("stopReason", "end_turn")
                 output = response.get("output", {})
                 message = output.get("message", {})
                 content_blocks = message.get("content", [])
 
-                # If stop reason is "end_turn" or "max_tokens" — extract final text
                 if stop_reason in ("end_turn", "max_tokens"):
-                    text_parts = []
-                    for block in content_blocks:
-                        if "text" in block:
-                            text_parts.append(block["text"])
-
+                    text_parts = [b["text"] for b in content_blocks if "text" in b]
                     final_text = "\n".join(text_parts) if text_parts else ""
-
                     self._available = True
                     elapsed = int((time.monotonic() - start_ts) * 1000)
+                    final_cost = _compute_cost(resolved_model, total_input_tokens, total_output_tokens)
+                    self._record_budget_spend(agent_type, final_cost)
                     return ConversationResult(
-                        agent_id=agent_id,
-                        agent_type=agent_type,
-                        model=resolved_model,
-                        response=final_text,
-                        error=None,
-                        total_input_tokens=total_input_tokens,
-                        total_output_tokens=total_output_tokens,
-                        total_cost_usd=_compute_cost(resolved_model, total_input_tokens, total_output_tokens),
-                        duration_ms=elapsed,
-                        turns=turns,
-                        tool_calls=tool_call_log,
+                        agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                        response=final_text, error=None,
+                        total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
+                        total_cost_usd=final_cost,
+                        duration_ms=elapsed, turns=turns, tool_calls=tool_call_log,
                     )
 
-                # If stop reason is "tool_use" — process tool calls
                 if stop_reason == "tool_use":
-                    # Add assistant message to conversation
                     messages.append({"role": "assistant", "content": content_blocks})
-
-                    # Process each tool_use block
                     tool_results = []
                     for block in content_blocks:
                         if "toolUse" in block:
@@ -940,70 +829,40 @@ class ConverseExecutor:
                             tool_name = tool_use["name"]
                             tool_input = tool_use.get("input", {})
                             tool_use_id = tool_use["toolUseId"]
-
-                            # Execute the tool
                             tool_output = execute_tool(tool_name, tool_input)
-
                             tool_call_log.append({
-                                "tool": tool_name,
-                                "input": tool_input,
-                                "output_preview": tool_output[:200],
-                                "iteration": iteration,
+                                "tool": tool_name, "input": tool_input,
+                                "output_preview": tool_output[:200], "iteration": iteration,
                             })
-
                             tool_results.append({
-                                "toolResult": {
-                                    "toolUseId": tool_use_id,
-                                    "content": [{"text": tool_output}],
-                                }
+                                "toolResult": {"toolUseId": tool_use_id, "content": [{"text": tool_output}]}
                             })
-
-                    # Add tool results as user message
                     messages.append({"role": "user", "content": tool_results})
                     continue
 
-                # Unknown stop reason — treat as completion
-                text_parts = []
-                for block in content_blocks:
-                    if "text" in block:
-                        text_parts.append(block["text"])
-
+                text_parts = [b["text"] for b in content_blocks if "text" in b]
                 self._available = True
                 elapsed = int((time.monotonic() - start_ts) * 1000)
                 return ConversationResult(
-                    agent_id=agent_id,
-                    agent_type=agent_type,
-                    model=resolved_model,
-                    response="\n".join(text_parts),
-                    error=None,
-                    total_input_tokens=total_input_tokens,
-                    total_output_tokens=total_output_tokens,
+                    agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                    response="\n".join(text_parts), error=None,
+                    total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
                     total_cost_usd=_compute_cost(resolved_model, total_input_tokens, total_output_tokens),
-                    duration_ms=int((time.monotonic() - start_ts) * 1000),
-                    turns=turns,
-                    tool_calls=tool_call_log,
+                    duration_ms=elapsed, turns=turns, tool_calls=tool_call_log,
                 )
 
-            # Hit max iterations
             elapsed = int((time.monotonic() - start_ts) * 1000)
             return ConversationResult(
-                agent_id=agent_id,
-                agent_type=agent_type,
-                model=resolved_model,
-                response=None,
-                error=f"max tool iterations reached ({MAX_TOOL_ITERATIONS})",
-                total_input_tokens=total_input_tokens,
-                total_output_tokens=total_output_tokens,
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=None, error=f"max tool iterations reached ({MAX_TOOL_ITERATIONS})",
+                total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
                 total_cost_usd=_compute_cost(resolved_model, total_input_tokens, total_output_tokens),
-                duration_ms=elapsed,
-                turns=turns,
-                tool_calls=tool_call_log,
+                duration_ms=elapsed, turns=turns, tool_calls=tool_call_log,
             )
 
         except ClientError as exc:
             code = exc.response["Error"]["Code"]
             msg = exc.response["Error"].get("Message", str(exc))
-
             if code == "ThrottlingException":
                 error_str = "throttled (retries exhausted)"
             elif code == "ValidationException":
@@ -1013,100 +872,60 @@ class ConverseExecutor:
             else:
                 error_str = f"{code}: {msg}"
                 self._available = False
-
             elapsed = int((time.monotonic() - start_ts) * 1000)
             return ConversationResult(
-                agent_id=agent_id,
-                agent_type=agent_type,
-                model=resolved_model,
-                response=None,
-                error=error_str,
-                total_input_tokens=total_input_tokens,
-                total_output_tokens=total_output_tokens,
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=None, error=error_str,
+                total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
                 total_cost_usd=_compute_cost(resolved_model, total_input_tokens, total_output_tokens),
-                duration_ms=elapsed,
-                turns=turns,
-                tool_calls=tool_call_log,
+                duration_ms=elapsed, turns=turns, tool_calls=tool_call_log,
             )
-
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("ConverseExecutor: unexpected error: %s", exc, exc_info=True)
             elapsed = int((time.monotonic() - start_ts) * 1000)
             return ConversationResult(
-                agent_id=agent_id,
-                agent_type=agent_type,
-                model=resolved_model,
-                response=None,
-                error=str(exc),
-                total_input_tokens=total_input_tokens,
-                total_output_tokens=total_output_tokens,
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=None, error=str(exc),
+                total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
                 total_cost_usd=_compute_cost(resolved_model, total_input_tokens, total_output_tokens),
-                duration_ms=elapsed,
-                turns=turns,
-                tool_calls=tool_call_log,
+                duration_ms=elapsed, turns=turns, tool_calls=tool_call_log,
             )
 
     # ------------------------------------------------------------------
     # Streaming execution
     # ------------------------------------------------------------------
 
-    def execute_streaming(
-        self,
-        agent_id: str,
-        agent_type: str,
-        prompt: str,
-        system_prompt: Optional[str] = None,
-        model: Optional[str] = None,
-        max_tokens: int = DEFAULT_MAX_TOKENS,
-        temperature: float = 0.7,
-    ) -> ConversationResult:
-        """Execute with streaming response (single turn, no tool use).
-
-        Uses converse_stream() for real-time output on long-running tasks.
-        Does NOT support tool use (streaming + tool use is complex).
-        For tool-use tasks, use execute() instead.
-        """
+    def execute_streaming(self, agent_id, agent_type, prompt, system_prompt=None, model=None, max_tokens=DEFAULT_MAX_TOKENS, temperature=0.7):
+        """Execute with streaming response (single turn, no tool use)."""
         self._ensure_client()
-
         resolved_model = _resolve_model(model)
         start_ts = time.monotonic()
 
-        if self._available is False or (self._client is None and self._provider_client is None):
+        if self._available is False or (self._client is None and self._provider_client is None and self._llm is None):
             return ConversationResult(
-                agent_id=agent_id,
-                agent_type=agent_type,
-                model=resolved_model,
-                response=None,
-                error="bedrock unavailable",
-                total_input_tokens=0,
-                total_output_tokens=0,
-                total_cost_usd=0.0,
-                duration_ms=0,
-                turns=0,
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=None, error="bedrock unavailable",
+                total_input_tokens=0, total_output_tokens=0, total_cost_usd=0.0,
+                duration_ms=0, turns=0,
             )
 
         if system_prompt is None:
             system_prompt = load_agent_system_prompt(agent_type)
 
+        if self._llm is not None:
+            return self._stream_langgraph(agent_id, agent_type, resolved_model, prompt, system_prompt, start_ts)
+
         system_messages = [{"text": system_prompt}] if system_prompt else None
         messages: list[dict] = [{"role": "user", "content": [{"text": prompt}]}]
 
-        # Use provider client for streaming if available
         if self._provider_client is not None:
             try:
                 response = self._provider_client.converse_stream(
-                    model_id=resolved_model,
-                    messages=messages,
-                    system=system_messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
+                    model_id=resolved_model, messages=messages, system=system_messages,
+                    max_tokens=max_tokens, temperature=temperature,
                 )
-                # Process streamed events (same format as boto3 stream)
-                text_parts = []
-                input_tokens = 0
-                output_tokens = 0
-                stream = response.get("stream", [])
-                for event in stream:
+                text_parts, input_tokens, output_tokens = [], 0, 0
+                for event in response.get("stream", []):
                     if "contentBlockDelta" in event:
                         delta = event["contentBlockDelta"].get("delta", {})
                         if "text" in delta:
@@ -1115,58 +934,36 @@ class ConverseExecutor:
                         usage = event["metadata"].get("usage", {})
                         input_tokens = usage.get("inputTokens", 0)
                         output_tokens = usage.get("outputTokens", 0)
-
-                final_text = "".join(text_parts)
                 self._available = True
                 elapsed = int((time.monotonic() - start_ts) * 1000)
                 return ConversationResult(
-                    agent_id=agent_id,
-                    agent_type=agent_type,
-                    model=resolved_model,
-                    response=final_text,
-                    error=None,
-                    total_input_tokens=input_tokens,
-                    total_output_tokens=output_tokens,
+                    agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                    response="".join(text_parts), error=None,
+                    total_input_tokens=input_tokens, total_output_tokens=output_tokens,
                     total_cost_usd=_compute_cost(resolved_model, input_tokens, output_tokens),
-                    duration_ms=elapsed,
-                    turns=1,
+                    duration_ms=elapsed, turns=1,
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 elapsed = int((time.monotonic() - start_ts) * 1000)
                 return ConversationResult(
-                    agent_id=agent_id,
-                    agent_type=agent_type,
-                    model=resolved_model,
-                    response=None,
-                    error=str(exc),
-                    total_input_tokens=0,
-                    total_output_tokens=0,
-                    total_cost_usd=0.0,
-                    duration_ms=elapsed,
-                    turns=1,
+                    agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                    response=None, error=str(exc),
+                    total_input_tokens=0, total_output_tokens=0, total_cost_usd=0.0,
+                    duration_ms=elapsed, turns=1,
                 )
 
+        from botocore.exceptions import ClientError
         kwargs: dict[str, Any] = {
-            "modelId": resolved_model,
-            "messages": messages,
-            "inferenceConfig": {
-                "maxTokens": max_tokens,
-                "temperature": temperature,
-            },
+            "modelId": resolved_model, "messages": messages,
+            "inferenceConfig": {"maxTokens": max_tokens, "temperature": temperature},
         }
         if system_messages:
             kwargs["system"] = system_messages
 
         try:
             response = self._client.converse_stream(**kwargs)
-
-            # Collect streamed content
-            text_parts = []
-            input_tokens = 0
-            output_tokens = 0
-
-            stream = response.get("stream", [])
-            for event in stream:
+            text_parts, input_tokens, output_tokens = [], 0, 0
+            for event in response.get("stream", []):
                 if "contentBlockDelta" in event:
                     delta = event["contentBlockDelta"].get("delta", {})
                     if "text" in delta:
@@ -1175,50 +972,59 @@ class ConverseExecutor:
                     usage = event["metadata"].get("usage", {})
                     input_tokens = usage.get("inputTokens", 0)
                     output_tokens = usage.get("outputTokens", 0)
-
-            final_text = "".join(text_parts)
             self._available = True
             elapsed = int((time.monotonic() - start_ts) * 1000)
-
             return ConversationResult(
-                agent_id=agent_id,
-                agent_type=agent_type,
-                model=resolved_model,
-                response=final_text,
-                error=None,
-                total_input_tokens=input_tokens,
-                total_output_tokens=output_tokens,
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response="".join(text_parts), error=None,
+                total_input_tokens=input_tokens, total_output_tokens=output_tokens,
                 total_cost_usd=_compute_cost(resolved_model, input_tokens, output_tokens),
-                duration_ms=elapsed,
-                turns=1,
+                duration_ms=elapsed, turns=1,
             )
-
         except ClientError as exc:
             code = exc.response["Error"]["Code"]
             elapsed = int((time.monotonic() - start_ts) * 1000)
             return ConversationResult(
-                agent_id=agent_id,
-                agent_type=agent_type,
-                model=resolved_model,
-                response=None,
-                error=f"{code}: {exc.response['Error'].get('Message', '')}",
-                total_input_tokens=0,
-                total_output_tokens=0,
-                total_cost_usd=0.0,
-                duration_ms=elapsed,
-                turns=1,
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=None, error=f"{code}: {exc.response['Error'].get('Message', '')}",
+                total_input_tokens=0, total_output_tokens=0, total_cost_usd=0.0,
+                duration_ms=elapsed, turns=1,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             elapsed = int((time.monotonic() - start_ts) * 1000)
             return ConversationResult(
-                agent_id=agent_id,
-                agent_type=agent_type,
-                model=resolved_model,
-                response=None,
-                error=str(exc),
-                total_input_tokens=0,
-                total_output_tokens=0,
-                total_cost_usd=0.0,
-                duration_ms=elapsed,
-                turns=1,
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=None, error=str(exc),
+                total_input_tokens=0, total_output_tokens=0, total_cost_usd=0.0,
+                duration_ms=elapsed, turns=1,
+            )
+
+    def _stream_langgraph(self, agent_id, agent_type, resolved_model, prompt, system_prompt, start_ts):
+        """Stream using LangChain LLM (single turn, no tool use)."""
+        try:
+            messages: list[BaseMessage] = []
+            if system_prompt:
+                messages.append(SystemMessage(content=system_prompt))
+            messages.append(HumanMessage(content=prompt))
+            response = self._llm.invoke(messages)
+            text = response.content if isinstance(response.content, str) else str(response.content)
+            usage = getattr(response, "usage_metadata", None) or {}
+            input_tokens = usage.get("input_tokens", 0) if isinstance(usage, dict) else 0
+            output_tokens = usage.get("output_tokens", 0) if isinstance(usage, dict) else 0
+            self._available = True
+            elapsed = int((time.monotonic() - start_ts) * 1000)
+            return ConversationResult(
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=text, error=None,
+                total_input_tokens=input_tokens, total_output_tokens=output_tokens,
+                total_cost_usd=_compute_cost(resolved_model, input_tokens, output_tokens),
+                duration_ms=elapsed, turns=1,
+            )
+        except Exception as exc:
+            elapsed = int((time.monotonic() - start_ts) * 1000)
+            return ConversationResult(
+                agent_id=agent_id, agent_type=agent_type, model=resolved_model,
+                response=None, error=str(exc),
+                total_input_tokens=0, total_output_tokens=0, total_cost_usd=0.0,
+                duration_ms=elapsed, turns=1,
             )
