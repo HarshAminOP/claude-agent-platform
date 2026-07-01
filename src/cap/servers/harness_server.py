@@ -66,6 +66,47 @@ logging.basicConfig(
 _executor: AgentExecutor | None = None
 _DAILY_LIMIT_USD = float(os.environ.get("CAP_DAILY_LIMIT_USD", "5.0"))
 
+# ---------------------------------------------------------------------------
+# Per-turn call counter (enforces max_tool_calls_per_turn from policy)
+# ---------------------------------------------------------------------------
+
+_turn_call_count: int = 0
+_turn_last_call_ts: float = 0.0
+_TURN_IDLE_RESET_S: float = 30.0  # Reset turn counter after 30s of inactivity
+_turn_policy: "None | object" = None  # Cached HarnessPolicy for limit
+
+
+def _get_turn_limit() -> int:
+    """Load max_tool_calls_per_turn from governance policy (cached)."""
+    global _turn_policy
+    if _turn_policy is None:
+        _turn_policy = _load_policy()
+    return _turn_policy.max_tool_calls_per_turn
+
+
+def _check_turn_limit() -> str | None:
+    """Increment turn counter; return error string if limit exceeded, else None.
+
+    Resets the counter if more than _TURN_IDLE_RESET_S seconds have passed
+    since the last call (heuristic for turn boundary).
+    """
+    global _turn_call_count, _turn_last_call_ts
+
+    now = time.time()
+    if now - _turn_last_call_ts > _TURN_IDLE_RESET_S:
+        _turn_call_count = 0
+    _turn_last_call_ts = now
+    _turn_call_count += 1
+
+    limit = _get_turn_limit()
+    if _turn_call_count > limit:
+        return (
+            f"max_tool_calls_per_turn exceeded ({_turn_call_count}/{limit}). "
+            "Wait for the current turn to complete or increase the limit in "
+            ".harness/mcp-policy.json."
+        )
+    return None
+
 
 def _get_executor() -> AgentExecutor:
     global _executor
@@ -790,6 +831,12 @@ async def list_tools():
 
 @mcp.call_tool()
 async def call_tool(name: str, arguments: dict):
+    # --- Governance: enforce per-turn call limit ---
+    turn_err = _check_turn_limit()
+    if turn_err is not None:
+        _record_audit(name, agent_id=None, input_summary=f"RATE_LIMITED: {turn_err}", success=False)
+        return [TextContent(type="text", text=json.dumps({"error": turn_err}))]
+
     # --- Governance: validate common fields and record audit ---
     agent_id_raw = arguments.get("agent_id")
     if agent_id_raw is not None:
