@@ -828,67 +828,69 @@ def _get_cap_mcp_servers(cap_home: Path, data_dir: Path) -> list[dict]:
     """CAP's own MCP servers — always installed fresh."""
     python_bin = sys.executable
     servers_dir = Path(__file__).parent.parent / "servers"
+    # src/ directory where the cap package lives — needed for PYTHONPATH
+    src_dir = Path(__file__).parent.parent.parent
 
     return [
         {
             "name": "cap-knowledge",
             "command": python_bin,
             "args": [str(servers_dir / "knowledge_server.py")],
-            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={src_dir}"],
         },
         {
             "name": "cap-session",
             "command": python_bin,
             "args": [str(servers_dir / "session_server.py")],
-            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={src_dir}"],
         },
         {
             "name": "cap-fleet",
             "command": python_bin,
             "args": [str(servers_dir / "fleet_server.py")],
-            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={src_dir}"],
         },
         {
             "name": "cap-workflow-engine",
             "command": python_bin,
             "args": [str(servers_dir / "workflow_server.py")],
-            "env": [f"PLATFORM_DATA_DIR={data_dir}", f"PYTHONPATH={cap_home}"],
+            "env": [f"PLATFORM_DATA_DIR={data_dir}", f"PYTHONPATH={src_dir}"],
         },
         {
             "name": "cap-diagram",
             "command": python_bin,
             "args": [str(servers_dir / "diagram_server.py")],
-            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={src_dir}"],
         },
         {
             "name": "cap-backlog",
             "command": python_bin,
             "args": [str(servers_dir / "backlog_server.py")],
-            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={src_dir}"],
         },
         {
             "name": "cap-ast",
             "command": python_bin,
             "args": [str(servers_dir / "ast_server.py")],
-            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={src_dir}"],
         },
         {
             "name": "cap-code-intel",
             "command": python_bin,
             "args": [str(servers_dir / "code_intel_server.py")],
-            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={src_dir}"],
         },
         {
             "name": "cap-orchestrator",
             "command": python_bin,
             "args": [str(servers_dir / "orchestrator_server.py")],
-            "env": [f"CAP_ORCHESTRATOR_DB={data_dir / 'platform.db'}", f"PYTHONPATH={cap_home}"],
+            "env": [f"CAP_ORCHESTRATOR_DB={data_dir / 'platform.db'}", f"PYTHONPATH={src_dir}"],
         },
         {
             "name": "cap-harness",
             "command": python_bin,
             "args": ["-m", "cap.servers.harness_server"],
-            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={src_dir}"],
         },
     ]
 
