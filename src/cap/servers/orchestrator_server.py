@@ -136,6 +136,41 @@ async def list_tools():
                 },
             },
         ),
+        Tool(
+            name="cap_execute",
+            description="Execute a task on a specialist agent via AWS Bedrock. Spawns an agent, runs multi-turn conversation with tool use, records cost and learning outcomes. Full end-to-end execution.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_type": {
+                        "type": "string",
+                        "description": "Agent role: dev, devops, security, sre, code-review, test, docs, optimization, aws-architect",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "The task prompt to send to the agent.",
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": "Model override (sonnet, opus, haiku). Auto-selected from agent_type when omitted.",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional context to prepend (e.g., from knowledge search or prior agent output).",
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Max output tokens per turn (default 8192).",
+                        "default": 8192,
+                    },
+                    "workspace": {
+                        "type": "string",
+                        "description": "Working directory for tool execution (file_read, bash_exec).",
+                    },
+                },
+                "required": ["agent_type", "task"],
+            },
+        ),
     ]
 
 
@@ -152,6 +187,8 @@ async def call_tool(name: str, arguments: dict):
             return await _handle_dlq_list(arguments)
         elif name == "cap_health":
             return await _handle_health(arguments)
+        elif name == "cap_execute":
+            return await _handle_execute(arguments)
         else:
             return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
     except Exception as e:
@@ -245,6 +282,92 @@ async def _handle_health(args: dict):
         "agents": health_data,
         "timestamp": _now(),
     }))]
+
+
+async def _handle_execute(args: dict):
+    """Full agent execution: spawn -> execute -> record -> learn."""
+    import os
+    from cap.harness.converse_executor import ConverseExecutor
+    from cap.harness.agent_store import spawn_agent, record_execution as store_record_execution
+    from cap.harness.hooks import hooks_post_task
+    import cap.harness.cost_meter as cost_meter
+
+    agent_type = args["agent_type"]
+    task = args["task"]
+    model_override = args.get("model")
+    context = args.get("context")
+    max_tokens = int(args.get("max_tokens", 8192))
+
+    # Spawn agent record
+    try:
+        record = spawn_agent(agent_type, model=None)
+    except ValueError as exc:
+        return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
+
+    # Create executor
+    executor = ConverseExecutor(
+        profile=os.environ.get("AWS_PROFILE"),
+        region=os.environ.get("AWS_DEFAULT_REGION", "eu-central-1"),
+        budget_limit_usd=float(os.environ.get("CAP_DAILY_LIMIT_USD", "5.0")),
+    )
+
+    # Execute
+    result = executor.execute(
+        agent_id=record.agent_id,
+        agent_type=agent_type,
+        prompt=task,
+        model=model_override,
+        max_tokens=max_tokens,
+        context=context,
+    )
+
+    # Record to cost meter
+    try:
+        exec_result = result.to_execution_result()
+        cost_meter.record_execution(exec_result, agent_type=agent_type)
+    except Exception as exc:
+        logger.warning("cap_execute: cost_meter.record failed: %s", exc)
+
+    # Record to agent store
+    try:
+        store_record_execution(
+            agent_id=record.agent_id,
+            input_tokens=result.total_input_tokens,
+            output_tokens=result.total_output_tokens,
+            cost_usd=result.total_cost_usd,
+            result=result.response,
+            error=result.error,
+        )
+    except Exception as exc:
+        logger.warning("cap_execute: store_record failed: %s", exc)
+
+    # Post-task hook for learning
+    try:
+        hooks_post_task(
+            agent_id=record.agent_id,
+            execution_id=record.agent_id,
+            success=result.error is None,
+            output_summary=(result.response or "")[:500] if result.response else None,
+        )
+    except Exception as exc:
+        logger.warning("cap_execute: hooks_post_task failed: %s", exc)
+
+    # Build response
+    payload = {
+        "agent_id": record.agent_id,
+        "agent_type": agent_type,
+        "model": result.model,
+        "response": result.response,
+        "error": result.error,
+        "total_input_tokens": result.total_input_tokens,
+        "total_output_tokens": result.total_output_tokens,
+        "cost_usd": result.total_cost_usd,
+        "duration_ms": result.duration_ms,
+        "turns": result.turns,
+        "tool_calls": result.tool_calls[:20],  # Cap to avoid huge payloads
+    }
+
+    return [TextContent(type="text", text=json.dumps(payload))]
 
 
 async def main():

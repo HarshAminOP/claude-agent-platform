@@ -190,7 +190,8 @@ async def list_tools():
             description=(
                 "Execute a prompt on an existing agent via AWS Bedrock. "
                 "Records token usage and cost. "
-                "Returns degraded=true if Bedrock is unavailable."
+                "Returns degraded=true if Bedrock is unavailable. "
+                "Set multi_turn=true to use the Converse API with tool use support."
             ),
             inputSchema={
                 "type": "object",
@@ -211,6 +212,15 @@ async def list_tools():
                         "type": "integer",
                         "description": "Max output tokens (default 4096).",
                         "default": 4096,
+                    },
+                    "multi_turn": {
+                        "type": "boolean",
+                        "description": "Use multi-turn Converse API with tool use (default false for backward compat).",
+                        "default": False,
+                    },
+                    "agent_type": {
+                        "type": "string",
+                        "description": "Agent role hint for system prompt loading (required when multi_turn=true).",
                     },
                 },
                 "required": ["agent_id", "prompt"],
@@ -967,18 +977,86 @@ async def _handle_execute(args: dict):
     prompt = args["prompt"]
     system_prompt = args.get("system_prompt")
     max_tokens = int(args.get("max_tokens", 4096))
+    multi_turn = bool(args.get("multi_turn", False))
+    agent_type_hint = args.get("agent_type")
 
     record = get_agent(agent_id)
     if record is None:
         return [TextContent(type="text", text=json.dumps({"error": "agent not found"}))]
-
-    executor = _get_executor()
 
     # Mark agent as busy before execution
     try:
         _store.update_agent(agent_id, status="busy")
     except KeyError:
         pass
+
+    if multi_turn:
+        # Use ConverseExecutor for multi-turn with tool use
+        from cap.harness.converse_executor import ConverseExecutor
+
+        converse_executor = ConverseExecutor(
+            profile=os.environ.get("AWS_PROFILE"),
+            region=os.environ.get("AWS_DEFAULT_REGION", "eu-central-1"),
+            budget_limit_usd=_DAILY_LIMIT_USD,
+        )
+
+        conv_result = converse_executor.execute(
+            agent_id=agent_id,
+            agent_type=agent_type_hint or record.agent_type,
+            prompt=prompt,
+            system_prompt=system_prompt,
+            model=record.model,
+            max_tokens=max_tokens,
+        )
+
+        # Convert to legacy result for recording
+        result = conv_result.to_execution_result()
+
+        if result.error and "unavailable" in (result.error or ""):
+            try:
+                _store.update_agent(agent_id, status="idle")
+            except KeyError:
+                pass
+            return [TextContent(type="text", text=json.dumps({
+                "error": "bedrock unavailable",
+                "degraded": True,
+                "detail": result.error,
+            }))]
+
+        # Record execution in cost meter
+        try:
+            _cost_meter.record_execution(result, agent_type=record.agent_type)
+        except Exception as exc:
+            logger.warning("cost_meter.record_execution failed: %s", exc)
+
+        # Update agent store counters
+        try:
+            store_record_execution(
+                agent_id=agent_id,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                cost_usd=result.cost_usd,
+                result=result.response,
+                error=result.error,
+            )
+        except KeyError:
+            pass
+
+        payload: dict = {
+            "agent_id": agent_id,
+            "response": result.response,
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "cost_usd": result.cost_usd,
+            "duration_ms": result.duration_ms,
+            "error": result.error,
+            "turns": conv_result.turns,
+            "tool_calls": conv_result.tool_calls[:20],
+        }
+        return [TextContent(type="text", text=json.dumps(payload))]
+
+    # --- Original single-turn path (unchanged) ---
+    executor = _get_executor()
 
     result = executor.execute(
         agent_id=agent_id,
@@ -1037,7 +1115,7 @@ async def _handle_execute(args: dict):
             )
             warnings = matched
 
-    payload: dict = {
+    payload_st: dict = {
         "agent_id": agent_id,
         "response": result.response,
         "input_tokens": result.input_tokens,
@@ -1047,9 +1125,9 @@ async def _handle_execute(args: dict):
         "error": result.error,
     }
     if warnings:
-        payload["warnings"] = warnings
+        payload_st["warnings"] = warnings
 
-    return [TextContent(type="text", text=json.dumps(payload))]
+    return [TextContent(type="text", text=json.dumps(payload_st))]
 
 
 async def _handle_status(args: dict):
