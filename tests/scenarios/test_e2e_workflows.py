@@ -28,7 +28,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from cap.db import get_db, migrate
 from cap.harness.agent_store import (
-    _VALID_AGENT_TYPES,
     _open_db,
     list_agents,
     spawn_agent,
@@ -771,7 +770,7 @@ class TestLearningLoopScenario:
         # ---- Step 2: semantic routing ---------------------------------------
         route = agentdb_semantic_route("deploy kubernetes service", _db_path=pattern_db)
         assert "recommended_agent_type" in route
-        assert route["recommended_agent_type"] in _VALID_AGENT_TYPES
+        assert isinstance(route["recommended_agent_type"], str)
         assert route["based_on_patterns"] == 60
         # devops had more patterns with 'deploy' keyword context — expect it to win
         assert route["recommended_agent_type"] == "devops"

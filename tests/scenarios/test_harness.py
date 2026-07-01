@@ -528,11 +528,18 @@ class TestAgentSpawnToolReturnsAgentId:
         assert data["status"] == "idle"
 
     @pytest.mark.asyncio
-    async def test_invalid_type_returns_error(self):
+    async def test_empty_type_returns_error(self):
         from cap.servers.harness_server import _handle_spawn
-        result = await _handle_spawn({"agent_type": "unknown-robot"})
+        result = await _handle_spawn({"agent_type": ""})
         data = json.loads(result[0].text)
         assert "error" in data
+
+    @pytest.mark.asyncio
+    async def test_any_nonempty_type_succeeds(self):
+        from cap.servers.harness_server import _handle_spawn
+        result = await _handle_spawn({"agent_type": "custom-agent"})
+        data = json.loads(result[0].text)
+        assert "agent_id" in data
 
 
 class TestAgentExecuteRecordsCost:

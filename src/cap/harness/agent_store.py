@@ -27,21 +27,34 @@ from typing import Optional
 PLATFORM_DB_PATH = Path.home() / ".claude-platform" / "data" / "platform.db"
 
 # Agent types with explicit model defaults (matches CAP agent roster)
-_SONNET_AGENTS = frozenset({"dev", "devops", "test", "docs", "sre", "cicd", "explore"})
-_OPUS_AGENTS = frozenset({"security", "code-review", "aws-architect"})
-_HAIKU_AGENTS = frozenset({"optimization"})
+_OPUS_AGENTS = frozenset({
+    "security", "code-review", "aws-architect", "incident-response",
+    "threat-model", "penetration-test", "system-design",
+})
+_HAIKU_AGENTS = frozenset({
+    "optimization", "explore", "changelog-generator", "test-data-generation",
+})
+# All other agents default to sonnet
 
-_DEFAULT_MODEL: dict[str, str] = {
-    **{t: "claude-sonnet-4-6" for t in _SONNET_AGENTS},
+_DEFAULT_MODEL_OVERRIDES: dict[str, str] = {
     **{t: "claude-opus-4-6" for t in _OPUS_AGENTS},
     **{t: "claude-haiku-4-5" for t in _HAIKU_AGENTS},
 }
 
 _VALID_STATUSES = frozenset({"idle", "busy", "completed", "failed", "terminated"})
-_VALID_AGENT_TYPES = frozenset(_DEFAULT_MODEL.keys())
 _VALID_MODELS = frozenset({
     "claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"
 })
+
+# Backward-compat: tests import this. Now derived from agentdb keywords + explicit sets.
+_VALID_AGENT_TYPES: frozenset = frozenset(
+    list(_OPUS_AGENTS) + list(_HAIKU_AGENTS) + [
+        "dev", "devops", "security", "sre", "test", "docs", "aws-architect",
+        "code-review", "cicd", "explore", "orchestrator", "system-design",
+        "scrum-master", "sdk-developer", "algorithm", "api-contract",
+        "database", "incident-response", "capacity-planning",
+    ]
+)
 
 _LAST_RESULT_MAX = 2000
 
@@ -210,13 +223,10 @@ def spawn_agent(
     Returns:
         Persisted AgentRecord with status='idle'.
     """
-    if agent_type not in _VALID_AGENT_TYPES:
-        raise ValueError(
-            f"Unknown agent_type {agent_type!r}. "
-            f"Valid types: {sorted(_VALID_AGENT_TYPES)}"
-        )
+    if not agent_type or not agent_type.strip():
+        raise ValueError("agent_type must be a non-empty string")
 
-    resolved_model = model or _DEFAULT_MODEL[agent_type]
+    resolved_model = model or _DEFAULT_MODEL_OVERRIDES.get(agent_type, "claude-sonnet-4-6")
     if resolved_model not in _VALID_MODELS:
         raise ValueError(
             f"Unknown model {resolved_model!r}. Valid: {sorted(_VALID_MODELS)}"

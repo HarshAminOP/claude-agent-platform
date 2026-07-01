@@ -83,9 +83,9 @@ class TestSpawnAgent:
         fetched = get_agent(rec.agent_id, _db_path=db_path)
         assert fetched.config == cfg
 
-    def test_invalid_agent_type_raises(self, db_path):
-        with pytest.raises(ValueError, match="Unknown agent_type"):
-            spawn_agent("nonexistent", _db_path=db_path)
+    def test_empty_agent_type_raises(self, db_path):
+        with pytest.raises(ValueError, match="agent_type must be a non-empty"):
+            spawn_agent("", _db_path=db_path)
 
     def test_invalid_model_raises(self, db_path):
         with pytest.raises(ValueError, match="Unknown model"):

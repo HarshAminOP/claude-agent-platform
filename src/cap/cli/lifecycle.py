@@ -1279,6 +1279,145 @@ def _filter_cap_servers_minimal(servers: list[dict]) -> list[dict]:
     return [s for s in servers if s["name"] in _MINIMAL_CAP_SERVER_NAMES]
 
 
+# ── Setup Wizard helpers ──────────────────────────────────────────────────────
+
+def _detect_aws_profiles() -> list[str]:
+    """Parse ~/.aws/config for available profile names."""
+    aws_config = Path.home() / ".aws" / "config"
+    profiles = []
+    if aws_config.exists():
+        import configparser
+        config = configparser.RawConfigParser()
+        config.read(str(aws_config))
+        for section in config.sections():
+            if section == "default":
+                profiles.insert(0, "default")
+            elif section.startswith("profile "):
+                profiles.append(section[8:])  # Strip "profile " prefix
+    return profiles
+
+
+_MODEL_TIERS = {
+    "economy": {
+        "dev": "haiku", "devops": "haiku", "security": "haiku",
+        "code-review": "haiku", "sre": "haiku", "test": "haiku",
+        "docs": "haiku", "optimization": "haiku", "aws-architect": "haiku",
+        "explore": "haiku", "cicd": "haiku",
+    },
+    "haiku-only": {
+        "dev": "haiku", "devops": "haiku", "security": "haiku",
+        "code-review": "haiku", "sre": "haiku", "test": "haiku",
+        "docs": "haiku", "optimization": "haiku", "aws-architect": "haiku",
+        "explore": "haiku", "cicd": "haiku",
+    },
+    "balanced": {
+        "dev": "sonnet", "devops": "sonnet", "security": "opus",
+        "code-review": "opus", "sre": "sonnet", "test": "sonnet",
+        "docs": "haiku", "optimization": "haiku", "aws-architect": "opus",
+        "explore": "sonnet", "cicd": "sonnet",
+    },
+    "quality": {
+        "dev": "opus", "devops": "sonnet", "security": "opus",
+        "code-review": "opus", "sre": "opus", "test": "sonnet",
+        "docs": "sonnet", "optimization": "opus", "aws-architect": "opus",
+        "explore": "sonnet", "cicd": "sonnet",
+    },
+}
+
+
+def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dict:
+    """Interactive setup wizard for first-time CAP configuration.
+
+    Returns the complete harness config dict.
+    """
+    config_path = Path.home() / ".claude-platform" / "harness-config.json"
+
+    if config_path.exists() and not force:
+        return json.loads(config_path.read_text())
+
+    # Auto-detect non-interactive mode when stdin is not a TTY (e.g. CI, tests)
+    if not non_interactive and not sys.stdin.isatty():
+        non_interactive = True
+
+    console.print("\n[bold cyan]Setup Wizard[/bold cyan] — Configuring CAP for your environment\n")
+
+    # 1. AWS Profile
+    profiles = _detect_aws_profiles()
+    if non_interactive:
+        aws_profile = profiles[0] if profiles else ""
+    else:
+        if profiles:
+            console.print("[bold]Available AWS profiles:[/bold]")
+            for i, p in enumerate(profiles, 1):
+                console.print(f"  [cyan]{i}[/cyan]. {p}")
+            console.print()
+            choice = click.prompt(
+                "Select AWS profile (number or name)",
+                default="1",
+                type=str,
+            )
+            # Accept either number or name
+            if choice.isdigit() and 1 <= int(choice) <= len(profiles):
+                aws_profile = profiles[int(choice) - 1]
+            elif choice in profiles:
+                aws_profile = choice
+            else:
+                aws_profile = choice  # Let them type a custom one
+        else:
+            console.print("[yellow]No AWS profiles found in ~/.aws/config[/yellow]")
+            aws_profile = click.prompt("AWS profile name", default="")
+
+    # 2. Region
+    aws_region = "eu-central-1" if non_interactive else click.prompt("AWS region", default="eu-central-1")
+
+    # 3. Budget
+    daily_budget = 5.0 if non_interactive else click.prompt("Daily budget limit (USD)", default=5.0, type=float)
+
+    # 4. Model tier
+    tier = "balanced" if non_interactive else click.prompt(
+        "Model tier (economy=cheapest, balanced=default, quality=best)",
+        type=click.Choice(["economy", "balanced", "quality"]),
+        default="balanced",
+    )
+
+    config = {
+        "aws": {
+            "profile": aws_profile,
+            "region": aws_region,
+        },
+        "models": {
+            "haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+            "opus": "eu.anthropic.claude-opus-4-6-v1",
+        },
+        "budget": {
+            "daily_limit_usd": daily_budget,
+            "alert_threshold_pct": 80,
+        },
+        "agent_defaults": _MODEL_TIERS[tier],
+        "execution": {
+            "max_tool_iterations": 15,
+            "max_retries": 2,
+            "backoff_base_s": 1.0,
+            "default_max_tokens": 8192,
+            "temperature": 0.7,
+        },
+    }
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    # Print configuration summary
+    console.print("\n[bold]Configuration Summary:[/bold]")
+    console.print(f"  AWS Profile:  [cyan]{aws_profile}[/cyan]")
+    console.print(f"  Region:       [cyan]{aws_region}[/cyan]")
+    console.print(f"  Daily Budget: [cyan]${daily_budget:.2f}[/cyan]")
+    console.print(f"  Model Tier:   [cyan]{tier}[/cyan]")
+    console.print(f"\n  [green]✓[/green] Configuration written to {config_path}")
+
+    return config
+
+
 # ── cap init ──────────────────────────────────────────────────────────────────
 
 @click.command()
@@ -1287,7 +1426,8 @@ def _filter_cap_servers_minimal(servers: list[dict]) -> list[dict]:
 @click.option("--skip-mcp", is_flag=True, help="Don't register MCP servers with Claude")
 @click.option("--workspace", type=click.Path(), default=None, help="Workspace root (default: git root of CWD, or CWD)")
 @click.option("--skip-fetch", is_flag=True, help="Don't run git fetch on detected repos")
-def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip_fetch: bool):
+@click.option("--non-interactive", is_flag=True, help="Use all defaults without prompting")
+def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip_fetch: bool, non_interactive: bool = False):
     """Initialize the CAP platform (run after install).
 
     Follows the Cold Start Flow from CAP System Design v1 Section 10:
@@ -1323,6 +1463,11 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
         f"Workspace: {workspace_path}",
         box=box.ROUNDED, style="cyan",
     ))
+
+    # ── Setup Wizard (first-time config) ────────────────────────────────────
+    harness_config_path = cap_home / "harness-config.json"
+    if not harness_config_path.exists() or force:
+        _run_setup_wizard(force=force, non_interactive=non_interactive)
 
     manifest = _load_manifest(cap_home)
 

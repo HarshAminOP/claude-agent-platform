@@ -135,6 +135,75 @@ from cap.cli.witness import witness
 cli.add_command(witness)
 
 
+# ── cap config ─────────────────────────────────────────────────────────────────
+
+@cli.group()
+def config():
+    """View and modify CAP configuration."""
+    pass
+
+
+@config.command("show")
+def config_show():
+    """Display current CAP configuration."""
+    config_path = Path.home() / ".claude-platform" / "harness-config.json"
+    if not config_path.exists():
+        console.print("[yellow]No configuration found. Run `cap init` first.[/yellow]")
+        return
+
+    data = json.loads(config_path.read_text())
+
+    table = Table(title="CAP Configuration", box=box.ROUNDED, show_edge=True)
+    table.add_column("Key", style="bold cyan")
+    table.add_column("Value")
+
+    def _flatten(d, prefix=""):
+        for k, v in d.items():
+            key = f"{prefix}.{k}" if prefix else k
+            if isinstance(v, dict):
+                _flatten(v, key)
+            else:
+                table.add_row(key, str(v))
+
+    _flatten(data)
+    console.print(table)
+    console.print(f"\n[dim]Config file: {config_path}[/dim]")
+
+
+@config.command("set")
+@click.argument("key")
+@click.argument("value")
+def config_set(key: str, value: str):
+    """Set a configuration value (dot-notation: aws.profile, budget.daily_limit_usd)."""
+    config_path = Path.home() / ".claude-platform" / "harness-config.json"
+    if not config_path.exists():
+        console.print("[yellow]No configuration found. Run `cap init` first.[/yellow]")
+        raise SystemExit(1)
+
+    data = json.loads(config_path.read_text())
+
+    parts = key.split(".")
+    target = data
+    for part in parts[:-1]:
+        if part not in target or not isinstance(target[part], dict):
+            target[part] = {}
+        target = target[part]
+
+    final_key = parts[-1]
+    old_value = target.get(final_key)
+    if isinstance(old_value, float):
+        target[final_key] = float(value)
+    elif isinstance(old_value, int):
+        target[final_key] = int(value)
+    elif isinstance(old_value, bool):
+        target[final_key] = value.lower() in ("true", "1", "yes")
+    else:
+        target[final_key] = value
+
+    config_path.write_text(json.dumps(data, indent=2) + "\n")
+    console.print(f"[green]✓[/green] Set {key} = {target[final_key]}")
+
+
 # ── cap status ─────────────────────────────────────────────────────────────────
 
 @cli.command()
