@@ -1,294 +1,143 @@
-# Troubleshooting
+### Troubleshooting
 
-## Diagnostic Commands
+Common issues and resolutions. Organized by symptom.
 
+#### Embedding Failures
+
+**Symptom**: `cap embed` fails or `knowledge status` shows 0% embedding coverage.
+
+**Causes and fixes**:
+
+1. **SCP blocks Titan model**:
+   - Error: `AccessDeniedException` or `UnrecognizedClientException`
+   - Fix: Request model access in Bedrock console, or switch to sentence-transformers fallback
+   - Fallback config:
+   ```json
+   { "embeddings": { "fallback": "sentence-transformers" } }
+   ```
+
+2. **Wrong region**:
+   - Error: model not available in configured region
+   - Fix: `cap config set bedrock.region us-east-1`
+
+3. **Credential issues**:
+   - Error: `ExpiredTokenException`
+   - Fix: `aws sso login --sso-session <your-session>`
+
+4. **sentence-transformers not installed**:
+   - Error: `ModuleNotFoundError: No module named 'sentence_transformers'`
+   - Fix: `pip install sentence-transformers`
+
+#### Budget Exceeded
+
+**Symptom**: agents stop executing, "budget exceeded" errors.
+
+**Diagnosis**:
 ```bash
-cap status          # Overall health check
-cap doctor          # Detailed diagnostics
-cap db-doctor       # Database integrity
-cap fleet status    # MCP server health
-cap fleet health-check  # Force health check
+cap budget status       # Check current spend
+cap budget history      # Check daily trend
 ```
 
-## Common Issues
+**Fixes**:
+- Temporary: `cap budget raise 5.0` (adds $5 to daily cap)
+- Resume after pause: `cap budget resume`
+- Reset counter: `cap budget reset --yes`
+- Permanent: `cap config set budget.monthly_cap_usd 100`
 
-### `cap: command not found`
+#### Agent Coordination Failures
 
-**Cause:** `cap` binary not on PATH after install.
+**Symptom**: workflows fail mid-execution, steps stuck in RUNNING state.
 
-**Fix:**
+**Diagnosis**:
 ```bash
-uv tool update-shell
-source ~/.zshrc  # or ~/.bashrc
+cap orch-status         # Check circuit breakers, DLQ
+cap health              # Per-agent failure rates
+cap dlq list            # View failed tasks
 ```
 
-If using pip:
+**Fixes**:
+- Retry failed tasks: `cap dlq retry <task-id>` or `cap dlq retry-all`
+- Dismiss unfixable: `cap dlq dismiss <task-id>`
+- Circuit breaker open: wait for cooldown (2min) or check underlying cause
+- Kill stuck workflow: `cap workflow kill <workflow-id>`
+
+#### Knowledge Graph Empty
+
+**Symptom**: `cap index graph --stats` shows 0 nodes/edges.
+
+**Causes and fixes**:
+
+1. **Never indexed**: run `cap index run --workspace /path/to/code`
+2. **No repos detected**: ensure workspace contains repo markers (.git, go.mod, etc.)
+3. **All repos unchanged**: use `cap index run --full` to force re-index
+4. **Indexer budget exhausted**: check `cap index status` and raise budget
+
+#### MCP Servers Not Responding
+
+**Symptom**: Claude Code cannot use CAP tools.
+
+**Diagnosis**:
 ```bash
-pip install --user claude-agent-platform
-export PATH="$HOME/.local/bin:$PATH"
+cap fleet status        # Check server states
+cap fleet health-check  # Run health probe
 ```
 
----
+**Fixes**:
+- Servers not registered: `cap init` (re-registers all servers)
+- Servers crashed: restart via fleet or `cap init --force`
+- Check ~/.claude.json has cap-* entries
 
-### MCP servers not responding
+#### Database Corruption
 
-**Cause:** Servers not registered or crashed.
+**Symptom**: SQLite errors, "database is malformed".
 
-**Fix:**
+**Diagnosis and fix**:
 ```bash
-# Check server status
-cap fleet status
-
-# Re-register servers
-cap init --force
-
-# Check if Claude Code sees them
-cat ~/.claude.json | python3 -m json.tool | grep cap-
+cap db-doctor           # Diagnose issues
+cap db-doctor --fix --yes  # Apply fixes
 ```
 
----
-
-### `NoCredentialsError` / `ExpiredTokenException`
-
-**Cause:** AWS credentials missing or expired.
-
-**Fix:**
+If unrecoverable:
 ```bash
-# For SSO:
-aws sso login --sso-session <your-session>
-
-# Verify:
-aws sts get-caller-identity --profile <your-profile>
-
-# For env vars, ensure they're set:
-echo $AWS_ACCESS_KEY_ID
+cap restore             # Restore from backup
 ```
 
----
+#### Init Fails
 
-### `AccessDeniedException` on Bedrock
+**Symptom**: `cap init` errors out partway through.
 
-**Cause:** IAM policy does not allow `bedrock:InvokeModel`.
+**Common causes**:
+- Python < 3.11: upgrade Python
+- Missing tomli: `pip install tomli`
+- Permission denied: check ~/.claude-platform/ permissions
+- claude CLI not found: install Claude Code CLI first
 
-**Fix:**
-1. Check IAM policy allows `bedrock:InvokeModel` on Claude models
-2. Ensure model access is enabled in Bedrock console
-3. Verify the region has the requested model available
-
+**Recovery**:
 ```bash
-# Test access directly:
-aws bedrock invoke-model \
-  --model-id us.anthropic.claude-haiku-4-5-20251001-v1:0 \
-  --body '{"anthropic_version":"bedrock-2023-05-31","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}' \
-  --region us-east-1 \
-  output.json
+cap init --force        # Retry with force (overwrites existing)
 ```
 
----
+#### Slow Indexing
 
-### Database corruption
+**Symptom**: `cap index run` takes very long.
 
-**Cause:** Unexpected process termination, disk full, or file permission issues.
+**Optimizations**:
+- Skip LLM analysis: `cap index run --skip-llm`
+- Skip embeddings: `cap index run --skip-embeddings`
+- Reduce concurrency if rate-limited: `--concurrency 1`
+- Use incremental (default) instead of `--full`
+- Exclude large repos via `indexing.exclude_patterns`
 
-**Fix:**
+#### Validation Checklist
+
+After setup, verify everything works:
 ```bash
-# Check integrity
-cap db-doctor
-
-# Fix automatically
-cap db-doctor --fix --yes
-
-# If unfixable, restore from backup
-cap restore
+cap status              # All DBs healthy, servers registered
+cap budget status       # Budget tracking active
+cap knowledge status    # Entries indexed, coverage > 0%
+cap fleet health-check  # All servers healthy
+cap index status        # Indexer has run at least once
 ```
 
----
-
-### Knowledge search returns no results
-
-**Cause:** Workspace not indexed.
-
-**Fix:**
-```bash
-# Check index status
-cap knowledge status
-
-# Force full re-index
-cap sync --full --workspace /path/to/your/project
-
-# Verify
-cap knowledge search "test query"
-```
-
----
-
-### Semantic search unavailable (keyword-only mode)
-
-**Cause:** No AWS credentials for Titan Embeddings, or embedding model not enabled.
-
-**Fix:**
-- This is expected behavior without Bedrock access
-- CAP automatically uses keyword + graph search as fallback
-- To enable: configure Bedrock credentials and enable Titan Embed Text V2
-
-```bash
-# Check if embeddings are working
-cap knowledge status
-# Look for: "Embedding status: degraded" or "no_credentials"
-```
-
----
-
-### Budget exceeded / workflow killed
-
-**Cause:** Daily or monthly budget cap reached.
-
-**Fix:**
-```bash
-# Check current spend
-cap budget status
-
-# Raise daily limit
-cap budget raise 10.0
-
-# Resume after pause
-cap budget resume
-```
-
----
-
-### `cap init` hangs during model probe
-
-**Cause:** Network timeout reaching Bedrock, or missing credentials.
-
-**Fix:**
-```bash
-# Skip model probe (use defaults)
-cap init --skip-fetch
-
-# Or use non-interactive mode
-cap init --non-interactive
-```
-
----
-
-### Agent produces low-quality output
-
-**Cause:** Wrong model tier assigned, or insufficient context.
-
-**Fix:**
-1. Check agent-to-model mapping in harness-config.json
-2. Ensure knowledge base is indexed for your workspace
-3. Verify session memory is loading (`cap session list`)
-
-```bash
-# Verify config
-cat ~/.claude-platform/harness-config.json | python3 -m json.tool
-```
-
----
-
-### WAL file growing too large
-
-**Cause:** Background maintenance not running (checkpoint not triggered).
-
-**Fix:**
-```bash
-# Manual checkpoint
-cap db-doctor --fix --yes
-
-# Start daemon for automatic maintenance
-cap daemon start
-```
-
----
-
-### Permission denied on database files
-
-**Cause:** File permissions changed (should be 0600).
-
-**Fix:**
-```bash
-chmod 600 ~/.claude-platform/*.db
-chmod 600 ~/.claude-platform/*.db-wal 2>/dev/null
-chmod 600 ~/.claude-platform/*.db-shm 2>/dev/null
-```
-
-Or:
-```bash
-cap db-doctor --fix --yes
-```
-
----
-
-### `cap uninstall` failed to restore configs
-
-**Cause:** Backup files missing or corrupted.
-
-**Fix:**
-```bash
-# Check for backups
-ls ~/.claude-platform/backups/
-
-# Manual restore of Claude Code config
-# (remove CAP MCP server entries from ~/.claude.json)
-```
-
----
-
-### GitHub auto-clone fails
-
-**Cause:** SSH key not configured, org access denied, or rate limit.
-
-**Fix:**
-```bash
-# Test SSH access
-ssh -T git@github.com
-
-# Test gh CLI
-gh auth status
-gh repo view your-org/some-repo
-
-# Check config
-cap github config --show
-```
-
----
-
-## Log Locations
-
-| Component | Log Location |
-|:----------|:-------------|
-| MCP servers | stderr (visible in Claude Code developer tools) |
-| CLI commands | stdout/stderr |
-| Daemon | `~/.claude-platform/logs/daemon.log` |
-| Health checks | `cap fleet status` shows recent events |
-
-## Getting Help
-
-```bash
-# Version info
-cap --version
-
-# Command help
-cap <command> --help
-
-# Full diagnostics
-cap doctor
-cap status
-cap fleet status
-cap knowledge status
-cap budget status
-```
-
-## Reset Everything
-
-If all else fails, full reset:
-
-```bash
-cap uninstall --yes
-rm -rf ~/.claude-platform
-cap init
-```
-
-This destroys all knowledge, session memory, and configuration. Use as a last resort.
+#### Cross-links
+Link to: [Installation](installation.md), [Configuration](configuration.md), [CLI Reference](cli-reference.md)

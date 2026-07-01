@@ -303,26 +303,45 @@ def test_cleanup_stale_handles_error(daemon):
 
 
 def test_reembed_patterns_available(daemon):
-    """Reembed patterns when embedder is available."""
+    """Reembed patterns when embedder is available.
+
+    The new implementation returns a richer dict that includes indexing stats
+    in addition to the ``embedded`` count.  The key contract: ``embedded == 10``
+    and no top-level error.
+    """
     mock_pe = MagicMock()
     mock_pe.is_available = True
     mock_pe.bulk_embed_missing.return_value = 10
 
-    with patch("cap.harness.vector_patterns.PatternEmbedder", return_value=mock_pe):
+    with (
+        patch("cap.harness.vector_patterns.PatternEmbedder", return_value=mock_pe),
+        patch("cap.lib.budget_manager.is_budget_paused", return_value=False),
+        patch("cap.lib.harness_config.get_indexing_config", return_value={"local_paths": []}),
+    ):
         result = daemon.reembed_patterns()
 
-    assert result == {"embedded": 10}
+    assert result["embedded"] == 10
+    assert "error" not in result
 
 
 def test_reembed_patterns_unavailable(daemon):
-    """Reembed patterns when embedder is unavailable."""
+    """Reembed patterns when embedder is unavailable.
+
+    The new implementation signals embedder unavailability via ``embedder == 'unavailable'``
+    rather than ``skipped == 'embedder_unavailable'`` (that key is now reserved for the
+    budget-paused and no-paths cases).
+    """
     mock_pe = MagicMock()
     mock_pe.is_available = False
 
-    with patch("cap.harness.vector_patterns.PatternEmbedder", return_value=mock_pe):
+    with (
+        patch("cap.harness.vector_patterns.PatternEmbedder", return_value=mock_pe),
+        patch("cap.lib.budget_manager.is_budget_paused", return_value=False),
+        patch("cap.lib.harness_config.get_indexing_config", return_value={"local_paths": []}),
+    ):
         result = daemon.reembed_patterns()
 
-    assert result == {"skipped": "embedder_unavailable"}
+    assert result.get("embedder") == "unavailable"
 
 
 # ── Compact Vectors ──────────────────────────────────────────────────────────

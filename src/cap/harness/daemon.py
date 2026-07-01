@@ -234,21 +234,92 @@ class CapDaemon:
             return {"error": str(exc)}
 
     # ------------------------------------------------------------------
-    # Task 3: Re-embed Patterns (every 30 min)
+    # Task 3: Re-embed Patterns + Intelligent Re-index (every 30 min)
     # ------------------------------------------------------------------
 
     def reembed_patterns(self) -> dict:
-        """Embed patterns that are missing embeddings."""
+        """Incrementally reindex repos that changed + embed missing patterns.
+
+        Runs IntelligentIndexer in incremental mode (skips repos whose HEAD
+        SHA is unchanged since last index).  Respects ``indexing.reindex_interval_minutes``
+        from the harness config (default 360 min).  Stops early when the daily
+        budget would be exceeded.
+
+        Also embeds any patterns that are still missing embeddings after the
+        indexing run completes.
+        """
+        results: dict = {"embedded": 0, "repos_indexed": 0, "files_indexed": 0}
+
+        # ── Budget guard ──────────────────────────────────────────────────
+        try:
+            from cap.lib.budget_manager import is_budget_paused
+            if is_budget_paused():
+                logger.info("reembed_patterns: daily budget paused — skipping intelligent reindex")
+                results["skipped"] = "budget_paused"
+                return results
+        except Exception as exc:
+            logger.debug("Budget check failed: %s — proceeding without guard", exc)
+
+        # ── Intelligent re-index (incremental, no LLM calls) ─────────────
+        try:
+            import asyncio
+            from cap.lib.intelligent_indexer import IntelligentIndexer, IndexerConfig
+            from cap.lib.harness_config import get_indexing_config
+
+            indexing_cfg = get_indexing_config()
+            local_paths: list[str] = indexing_cfg.get("local_paths", [])
+            reindex_interval_minutes: int = int(
+                indexing_cfg.get("reindex_interval_minutes", 360)
+            )
+
+            if not local_paths:
+                logger.debug("reembed_patterns: no indexing.local_paths configured — skipping")
+                results["skipped"] = "no_paths_configured"
+            else:
+                indexer_config = IndexerConfig(
+                    workspace_roots=local_paths,
+                    full_reindex=False,
+                    incremental=True,            # skip repos whose SHA is unchanged
+                    skip_llm_analysis=False,     # allow LLM analysis on changed repos
+                    skip_embedding=False,        # generate embeddings for new entries
+                    daemon_interval_minutes=reindex_interval_minutes,
+                )
+                indexer = IntelligentIndexer(indexer_config)
+                try:
+                    stats = asyncio.run(indexer.run_incremental())
+                    results["repos_indexed"] = stats.repos_analyzed
+                    results["files_indexed"] = stats.files_indexed
+                    results["embeddings_generated"] = stats.embeddings_generated
+                    results["llm_cost_usd"] = round(stats.llm_cost_usd, 5)
+                    if stats.errors:
+                        results["errors"] = stats.errors[:10]
+                    logger.info(
+                        "Intelligent reindex: repos_analyzed=%d files=%d embeddings=%d cost=$%.4f",
+                        stats.repos_analyzed,
+                        stats.files_indexed,
+                        stats.embeddings_generated,
+                        stats.llm_cost_usd,
+                    )
+                finally:
+                    indexer.close()
+        except Exception as exc:
+            logger.warning("reembed_patterns: intelligent reindex failed: %s", exc)
+            results["indexer_error"] = str(exc)
+
+        # ── Embed patterns still missing vectors ──────────────────────────
         try:
             from cap.harness.vector_patterns import PatternEmbedder
             pe = PatternEmbedder()
             if pe.is_available:
                 count = pe.bulk_embed_missing(batch_size=50)
-                return {"embedded": count}
-            return {"skipped": "embedder_unavailable"}
+                results["embedded"] = count
+            else:
+                results["embedder"] = "unavailable"
         except Exception as exc:
-            logger.warning("reembed_patterns failed: %s", exc)
-            return {"error": str(exc)}
+            logger.warning("reembed_patterns: PatternEmbedder failed: %s", exc)
+            results["embedder_error"] = str(exc)
+
+        return results
 
     # ------------------------------------------------------------------
     # Task 4: Cleanup Stale Agents (every 1 hr)
@@ -399,6 +470,7 @@ class CapDaemon:
         return self.cleanup_stale()
 
     def _run_pattern_embedding(self) -> dict:
+        """Legacy alias for reembed_patterns() — retained for backward compat."""
         return self.reembed_patterns()
 
     def _run_learning(self) -> dict:

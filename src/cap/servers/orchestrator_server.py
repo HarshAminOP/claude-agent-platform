@@ -55,6 +55,141 @@ server = Server("cap-orchestrator")
 # Module-level singleton for embedding-based routing (lazy-initialized)
 _embedding_router = None
 
+# Module-level singleton for task decomposer (lazy-initialized)
+_task_decomposer = None
+
+# Module-level singleton for knowledge graph (lazy-initialized)
+_knowledge_graph = None
+
+
+def _get_decomposer():
+    """Return the module-level TaskDecomposer, creating it lazily on first call."""
+    global _task_decomposer
+    if _task_decomposer is None:
+        from cap.lib.task_decomposer import TaskDecomposer
+        _task_decomposer = TaskDecomposer()
+    return _task_decomposer
+
+
+def _get_knowledge_graph():
+    """Return the module-level KnowledgeGraph, creating it lazily on first call.
+
+    Returns None when the knowledge_graph module is unavailable or the graph
+    has not been populated yet.  Callers must handle None gracefully.
+    """
+    global _knowledge_graph
+    if _knowledge_graph is not None:
+        return _knowledge_graph
+    try:
+        from cap.lib.knowledge_graph import KnowledgeGraph
+        import os
+        db_path_env = os.environ.get("CAP_ORCHESTRATOR_DB", os.path.expanduser("~/.cap/cap.db"))
+        # KnowledgeGraph accepts a path or an existing sqlite3.Connection.
+        # We pass the DB path so it manages its own connection.
+        _knowledge_graph = KnowledgeGraph(db_path_env)
+        return _knowledge_graph
+    except Exception as exc:
+        logger.debug("KnowledgeGraph init failed (will retry next call): %s", exc)
+        return None
+
+
+def _query_graph_context(task: str, workspace: str = "") -> str:
+    """Query the knowledge graph for nodes/services mentioned in *task*.
+
+    Extracts entity names from the task string via a simple token scan,
+    queries the graph for matching nodes, and returns a compact context
+    string that can be prepended to agent prompts.  The whole operation
+    is bounded to < 200 ms: if the graph is empty or unavailable the
+    function returns "" in sub-millisecond time.
+
+    Args:
+        task: Natural-language task description.
+        workspace: Optional workspace path to scope graph queries.
+
+    Returns:
+        A formatted context string (may be empty when graph is empty or
+        the query finds nothing relevant).
+    """
+    import time
+    t0 = time.monotonic()
+
+    try:
+        kg = _get_knowledge_graph()
+        if kg is None:
+            return ""
+
+        # Set the workspace on the graph instance so scoped queries work.
+        # KnowledgeGraph._default_workspace is the scope key for all queries.
+        if workspace:
+            kg._default_workspace = workspace
+        elif not kg._default_workspace:
+            # No workspace configured — graph queries would raise RuntimeError.
+            return ""
+
+        # Quick check: if the graph is empty, skip token extraction.
+        try:
+            stats = kg.get_stats()
+            if stats.get("total_nodes", 0) == 0:
+                return ""
+        except Exception:
+            return ""
+
+        # Extract candidate entity names from the task using a simple
+        # token scan: words of 3+ chars that look like identifiers.
+        import re
+        tokens = re.findall(r"\b[a-zA-Z][a-zA-Z0-9_-]{2,}\b", task)
+        # Deduplicate while preserving order; limit to first 20 to stay fast.
+        seen: set[str] = set()
+        candidates: list[str] = []
+        for tok in tokens:
+            lower = tok.lower()
+            if lower not in seen:
+                seen.add(lower)
+                candidates.append(tok)
+            if len(candidates) >= 20:
+                break
+
+        matched_nodes: list[dict] = []
+        for candidate in candidates:
+            results = kg.search(candidate, limit=3)
+            for node in results:
+                if node not in matched_nodes:
+                    matched_nodes.append(node)
+            if len(matched_nodes) >= 10:
+                break
+
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        if elapsed_ms > 200:
+            logger.warning(
+                "_query_graph_context: graph query took %.0f ms (>200 ms budget)", elapsed_ms
+            )
+
+        if not matched_nodes:
+            return ""
+
+        # Build a compact context block for the agent prompt.
+        lines: list[str] = ["### Knowledge Graph Context"]
+        for node in matched_nodes[:10]:
+            import json as _json
+            name = node.get("entity_name", "")
+            ntype = node.get("entity_type", "")
+            try:
+                meta = _json.loads(node.get("metadata") or "{}")
+            except (_json.JSONDecodeError, TypeError):
+                meta = {}
+            summary = meta.get("summary", "")
+            line = f"- **{name}** ({ntype})"
+            if summary:
+                line += f": {summary[:120]}"
+            lines.append(line)
+
+        return "\n".join(lines)
+
+    except Exception as exc:
+        logger.debug("_query_graph_context failed: %s", exc)
+        return ""
+
+
 def _default_region() -> str:
     """Return the default AWS region from harness config."""
     from cap.lib.harness_config import DEFAULT_AWS_REGION
@@ -210,6 +345,34 @@ async def list_tools():
                 "required": ["agent_id"],
             },
         ),
+        Tool(
+            name="cap_coordinate",
+            description=(
+                "Explicitly run multi-step coordination: decompose a task into a TaskDAG "
+                "and execute all steps with full dependency ordering, parallelism, and shared state. "
+                "Use this when you want guaranteed multi-agent coordination even for tasks that "
+                "cap_orchestrate might route as single-agent. Returns per-step results plus a "
+                "synthesised final response."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task to decompose and execute.",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional context to include during decomposition and execution.",
+                    },
+                    "workspace": {
+                        "type": "string",
+                        "description": "Working directory for file/bash operations.",
+                    },
+                },
+                "required": ["task"],
+            },
+        ),
     ]
 
 
@@ -232,6 +395,8 @@ async def call_tool(name: str, arguments: dict):
             return await _handle_orchestrate(arguments)
         elif name == "cap_resume":
             return await _handle_resume(arguments)
+        elif name == "cap_coordinate":
+            return await _handle_coordinate(arguments)
         else:
             return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
     except Exception as e:
@@ -284,73 +449,48 @@ async def _handle_route(args: dict):
             "based_on_patterns": embed_recommendation.get("based_on_patterns", 0),
         }
 
+    # Include graph context for relevant nodes/services mentioned in the task.
+    graph_context = _query_graph_context(task_description)
+    if graph_context:
+        response["graph_context"] = graph_context
+
     return [TextContent(type="text", text=json.dumps(response))]
 
 
 async def _handle_plan(args: dict):
-    """Generate a TaskDAG plan using Bedrock to decompose the task."""
-    import os
-    from cap.harness.converse_executor import ConverseExecutor
-
+    """Generate a TaskDAG plan using TaskDecomposer (heuristic + LLM fallback)."""
     task_description = args["task_description"]
-
-    # Use haiku for planning (fast + cheap)
-    executor = ConverseExecutor(
-        profile=os.environ.get("AWS_PROFILE"),
-        region=os.environ.get("AWS_DEFAULT_REGION") or _default_region(),
-        budget_limit_usd=float(os.environ.get("CAP_DAILY_LIMIT_USD", "5.0")),
-    )
-
-    plan_prompt = f"""Decompose this task into a sequence of sub-tasks for specialist agents.
-
-Available agent types: dev, devops, security, sre, code-review, test, docs, explore, aws-architect, optimization, cicd
-
-Task: {task_description}
-
-Return a JSON object with this exact structure:
-{{
-  "steps": [
-    {{"id": "step-1", "agent_type": "agent-name", "task": "specific sub-task description", "depends_on": []}},
-    {{"id": "step-2", "agent_type": "agent-name", "task": "specific sub-task description", "depends_on": ["step-1"]}}
-  ],
-  "parallel_groups": [["step-1"], ["step-2"]],
-  "estimated_cost_usd": 0.05
-}}
-
-Return ONLY the JSON. No explanation."""
-
-    result = executor.execute(
-        agent_id=f"planner-{uuid.uuid4().hex[:8]}",
-        agent_type="dev",
-        prompt=plan_prompt,
-        model="haiku",
-        max_tokens=4096,
-        temperature=0.3,
-    )
-
-    if result.error:
-        return [TextContent(type="text", text=json.dumps({
-            "error": f"Planning failed: {result.error}",
-        }))]
-
-    # Extract JSON from response (handle markdown code blocks)
-    response_text = result.response or ""
-    if "```json" in response_text:
-        response_text = response_text.split("```json")[1].split("```")[0]
-    elif "```" in response_text:
-        response_text = response_text.split("```")[1].split("```")[0]
+    context = args.get("context", {})
+    context_str = json.dumps(context) if isinstance(context, dict) else str(context)
 
     try:
-        plan = json.loads(response_text.strip())
-        plan["workflow_id"] = _generate_workflow_id()
-        plan["planning_cost_usd"] = result.total_cost_usd
-        plan["planning_model"] = result.model
-        return [TextContent(type="text", text=json.dumps(plan))]
-    except (json.JSONDecodeError, IndexError) as exc:
+        decomposer = _get_decomposer()
+        plan = await decomposer.decompose(
+            task=task_description,
+            context=context_str,
+        )
+    except Exception as exc:
+        logger.error("_handle_plan: TaskDecomposer failed: %s", exc, exc_info=True)
         return [TextContent(type="text", text=json.dumps({
-            "error": f"Failed to parse plan: {exc}",
-            "raw_response": (result.response or "")[:1000],
+            "error": f"Planning failed: {exc}",
         }))]
+
+    return [TextContent(type="text", text=json.dumps({
+        "workflow_id": plan.workflow_id,
+        "steps": [
+            {
+                "id": s.id,
+                "agent_type": s.agent_type,
+                "task": s.task,
+                "depends_on": s.depends_on,
+            }
+            for s in plan.steps
+        ],
+        "parallel_groups": plan.parallel_groups,
+        "complexity": plan.complexity,
+        "estimated_cost_usd": plan.estimated_cost_usd,
+        "planning_cost_usd": plan.planning_cost_usd,
+    }))]
 
 
 async def _handle_status(args: dict):
@@ -473,11 +613,18 @@ def _load_harness_config() -> dict:
 
 
 async def _handle_execute(args: dict):
-    """Full agent execution: spawn -> execute -> record -> learn."""
+    """Full agent execution: spawn -> execute -> record -> learn.
+
+    When the caller does not provide explicit context and the knowledge graph
+    contains relevant nodes for the task, graph context is automatically
+    prepended so the agent has structural knowledge about affected services.
+    """
     import os
     from cap.harness.converse_executor import ConverseExecutor
     from cap.harness.agent_store import spawn_agent, record_execution as store_record_execution
     from cap.harness.hooks import hooks_post_task
+    from cap.lib.agent_context import SharedState, create_agent_context
+    from cap.lib.agent_bus import AgentBus
     import cap.harness.cost_meter as cost_meter
 
     agent_type = args["agent_type"]
@@ -485,6 +632,19 @@ async def _handle_execute(args: dict):
     model_override = args.get("model")
     context = args.get("context")
     max_tokens = int(args.get("max_tokens", 8192))
+    workspace = args.get("workspace", "")
+    # coordination_session_id is set when this execute is called as part of a
+    # coordinated plan (via CoordinationEngine).  When present, the agent gets
+    # an AgentContext wired to the shared session.
+    coordination_session_id: str | None = args.get("_coordination_session_id")
+
+    # Enrich context with knowledge graph data (< 200 ms, graceful fallback).
+    graph_ctx = _query_graph_context(task, workspace=workspace)
+    if graph_ctx:
+        if context:
+            context = f"{graph_ctx}\n\n{context}"
+        else:
+            context = graph_ctx
 
     # Load config
     config = _load_harness_config()
@@ -501,6 +661,28 @@ async def _handle_execute(args: dict):
     except ValueError as exc:
         return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
+    agent_id = record.agent_id
+
+    # When part of a coordinated plan, create a per-agent AgentContext and
+    # wire it to the shared session bus so downstream agents can read results.
+    agent_ctx = None
+    shared_state = None
+    bus = None
+    if coordination_session_id:
+        try:
+            shared_state = SharedState(session_id=coordination_session_id)
+            bus = AgentBus(session_id=coordination_session_id)
+            agent_ctx = create_agent_context(
+                agent_id=agent_id,
+                agent_type=agent_type,
+                task=task,
+                workspace=workspace or ".",
+                session_id=coordination_session_id,
+                shared_state=shared_state,
+            )
+        except Exception as exc:
+            logger.debug("cap_execute: AgentContext init failed (non-fatal): %s", exc)
+
     # Create executor
     executor = ConverseExecutor(
         profile=profile,
@@ -510,7 +692,7 @@ async def _handle_execute(args: dict):
 
     # Execute
     result = executor.execute(
-        agent_id=record.agent_id,
+        agent_id=agent_id,
         agent_type=agent_type,
         prompt=task,
         model=model_override,
@@ -528,7 +710,7 @@ async def _handle_execute(args: dict):
     # Record to agent store
     try:
         store_record_execution(
-            agent_id=record.agent_id,
+            agent_id=agent_id,
             input_tokens=result.total_input_tokens,
             output_tokens=result.total_output_tokens,
             cost_usd=result.total_cost_usd,
@@ -541,8 +723,8 @@ async def _handle_execute(args: dict):
     # Post-task hook for learning
     try:
         hooks_post_task(
-            agent_id=record.agent_id,
-            execution_id=record.agent_id,
+            agent_id=agent_id,
+            execution_id=agent_id,
             success=result.error is None,
             output_summary=(result.response or "")[:500] if result.response else None,
             agent_type=agent_type,
@@ -550,9 +732,27 @@ async def _handle_execute(args: dict):
     except Exception as exc:
         logger.warning("cap_execute: hooks_post_task failed: %s", exc)
 
+    # Publish result to shared bus so downstream agents in a coordinated plan
+    # can access this agent's output.
+    if agent_ctx is not None and shared_state is not None:
+        try:
+            output_summary = (result.response or "")[:500]
+            await agent_ctx.publish(
+                topic="result",
+                payload={
+                    "agent_id": agent_id,
+                    "agent_type": agent_type,
+                    "output_summary": output_summary,
+                    "cost_usd": result.total_cost_usd,
+                    "success": result.error is None,
+                },
+            )
+        except Exception as exc:
+            logger.debug("cap_execute: AgentContext publish failed (non-fatal): %s", exc)
+
     # Build response
     payload = {
-        "agent_id": record.agent_id,
+        "agent_id": agent_id,
         "agent_type": agent_type,
         "model": result.model,
         "response": result.response,
@@ -568,10 +768,128 @@ async def _handle_execute(args: dict):
     return [TextContent(type="text", text=json.dumps(payload))]
 
 
+def _build_dag_from_decomposer_plan(plan) -> "TaskDAG":
+    """Convert a TaskDecomposer TaskPlan into a CoordinationEngine-compatible TaskDAG.
+
+    The two ``TaskStep`` types differ:
+    - ``cap.lib.task_decomposer.TaskStep`` has a ``task`` field (the prompt text).
+    - ``cap.orchestration.dag.TaskStep`` has a ``description`` field used as the prompt.
+
+    Args:
+        plan: A ``cap.lib.task_decomposer.TaskPlan`` instance.
+
+    Returns:
+        A ``cap.orchestration.dag.TaskDAG`` with all steps mapped.
+    """
+    from cap.orchestration.dag import TaskDAG, TaskStep as DAGStep
+
+    dag = TaskDAG()
+    for s in plan.steps:
+        dag.steps[s.id] = DAGStep(
+            id=s.id,
+            description=s.task,
+            agent_type=s.agent_type,
+            depends_on=list(s.depends_on),
+        )
+    return dag
+
+
+async def _run_coordination(task: str, context: str, workspace: str) -> list:
+    """Decompose *task* and execute via CoordinationEngine.
+
+    Used by both ``_handle_orchestrate`` (for moderate/complex tasks) and
+    ``_handle_coordinate`` (explicit multi-step call).
+
+    Args:
+        task: Natural-language task description.
+        context: Optional context string.
+        workspace: Working directory for agent tool calls.
+
+    Returns:
+        A list containing a single ``TextContent`` with the coordination result JSON.
+    """
+    import os
+    from cap.harness.converse_executor import ConverseExecutor
+    from cap.lib.agent_context import SharedState
+    from cap.lib.agent_bus import AgentBus
+    from cap.lib.coordination_engine import CoordinationEngine
+
+    config = _load_harness_config()
+    aws_config = config.get("aws", {})
+    budget_config = config.get("budget", {})
+
+    profile = os.environ.get("AWS_PROFILE") or aws_config.get("profile")
+    region = os.environ.get("AWS_DEFAULT_REGION") or aws_config.get("region", _default_region())
+    budget_limit = float(os.environ.get("CAP_DAILY_LIMIT_USD", budget_config.get("daily_limit_usd", 5.0)))
+
+    decomposer = _get_decomposer()
+    plan = await decomposer.decompose(task=task, context=context or "", workspace=workspace or "")
+
+    if plan.step_count <= 1:
+        # Decomposer collapsed this to a single step — fall back to single-agent path.
+        logger.debug(
+            "_run_coordination: decomposer returned %d step(s); delegating to single-agent path",
+            plan.step_count,
+        )
+        single_step = plan.steps[0]
+        return await _handle_execute({
+            "agent_type": single_step.agent_type,
+            "task": single_step.task,
+            "context": context,
+            "workspace": workspace,
+            "_coordination_session_id": plan.workflow_id,
+        })
+
+    dag = _build_dag_from_decomposer_plan(plan)
+    session_id = plan.workflow_id
+
+    executor = ConverseExecutor(
+        profile=profile,
+        region=region,
+        budget_limit_usd=budget_limit,
+    )
+    shared = SharedState(session_id=session_id)
+    bus = AgentBus(session_id=session_id)
+    engine = CoordinationEngine(executor=executor, bus=bus, shared=shared)
+
+    result = await engine.execute_plan(dag, workspace=workspace or "")
+
+    payload = {
+        "workflow_id": plan.workflow_id,
+        "status": result.status,
+        "response": result.final_response,
+        "steps": [
+            {
+                "step_id": sr.step_id,
+                "agent_type": sr.agent_type,
+                "status": sr.status,
+                "cost_usd": sr.cost_usd,
+                "duration_ms": sr.duration_ms,
+                "error": sr.error,
+            }
+            for sr in result.steps
+        ],
+        "total_cost_usd": result.total_cost_usd,
+        "total_duration_ms": result.total_duration_ms,
+        "errors": result.errors,
+        "routing": {
+            "method": "coordinated",
+            "complexity": plan.complexity,
+            "step_count": plan.step_count,
+        },
+    }
+    return [TextContent(type="text", text=json.dumps(payload))]
+
+
 async def _handle_orchestrate(args: dict):
     """Route a task to the best specialist agent and execute it end-to-end.
 
-    This is the Ruflo-equivalent "just do it" entrypoint:
+    Routing tiers:
+    - simple complexity  → single-agent path (unchanged; EmbeddingRouter + keyword)
+    - moderate/complex   → multi-step CoordinationEngine path
+    If the new modules are unavailable, falls back to the single-agent path.
+
+    Original single-agent steps:
     1. Try EmbeddingRouter (vector-based) FIRST, fall back to keyword routing
     2. Determine best model via hooks_route (embedding + tier)
     3. Execute via ConverseExecutor (real Bedrock call)
@@ -584,6 +902,28 @@ async def _handle_orchestrate(args: dict):
     task = args["task"]
     context = args.get("context")
     workspace = args.get("workspace")
+
+    # Check complexity to decide execution path.
+    try:
+        decomposer = _get_decomposer()
+        complexity = decomposer._classify_complexity(task)
+    except Exception as exc:
+        logger.warning("_handle_orchestrate: complexity check failed (%s); defaulting to simple", exc)
+        complexity = "simple"
+
+    if complexity in ("moderate", "complex"):
+        try:
+            logger.info(
+                "_handle_orchestrate: complexity=%s — using CoordinationEngine for task: %.80s",
+                complexity,
+                task,
+            )
+            return await _run_coordination(task, context or "", workspace or "")
+        except Exception as exc:
+            logger.warning(
+                "_handle_orchestrate: CoordinationEngine failed (%s); falling back to single-agent path",
+                exc,
+            )
 
     # Step 1: Determine agent_type — EmbeddingRouter first, keyword fallback
     global _embedding_router
@@ -680,6 +1020,34 @@ async def _handle_orchestrate(args: dict):
         return [TextContent(type="text", text=json.dumps(result_payload))]
     except (json.JSONDecodeError, IndexError, AttributeError):
         return result_contents
+
+
+async def _handle_coordinate(args: dict):
+    """Explicitly run multi-step coordination for a task.
+
+    Unlike ``cap_orchestrate``, this always goes through the TaskDecomposer and
+    CoordinationEngine regardless of detected complexity. Use when the caller
+    wants guaranteed multi-agent execution with full DAG coordination.
+
+    Args:
+        args: Must contain ``task``. Optional ``context`` and ``workspace``.
+
+    Returns:
+        TextContent with coordination result JSON including per-step outcomes
+        and a synthesised final_response.
+    """
+    task = args.get("task")
+    if not task:
+        return [TextContent(type="text", text=json.dumps({"error": "task is required"}))]
+
+    context = args.get("context", "")
+    workspace = args.get("workspace", "")
+
+    try:
+        return await _run_coordination(task, context, workspace)
+    except Exception as exc:
+        logger.error("_handle_coordinate failed: %s", exc, exc_info=True)
+        return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
 
 
 async def _handle_resume(args: dict):

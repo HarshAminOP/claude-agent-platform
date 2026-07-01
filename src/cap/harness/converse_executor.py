@@ -210,6 +210,7 @@ class ConversationResult:
     turns: int
     tool_calls: list = field(default_factory=list)
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    session_id: Optional[str] = None  # Set when agent_context was provided
 
     def to_execution_result(self) -> ExecutionResult:
         """Convert to the legacy ExecutionResult format for backward compat."""
@@ -623,8 +624,24 @@ class ConverseExecutor:
         max_tokens: int = DEFAULT_MAX_TOKENS,
         temperature: float = 0.7,
         context: Optional[str] = None,
+        agent_context: Optional[Any] = None,  # AgentContext; lazy-typed to avoid hard import
     ) -> ConversationResult:
-        """Execute a multi-turn conversation with tool use."""
+        """Execute a multi-turn conversation with tool use.
+
+        Parameters
+        ----------
+        agent_context:
+            Optional ``cap.lib.agent_context.AgentContext`` instance. When
+            provided:
+            - Relevant prior-step results from shared state are prepended to the
+              prompt context.
+            - After a successful execution the result summary is persisted back
+              into shared state under ``agent.<agent_id>.result``.
+            - ``ConversationResult.session_id`` is set to the context's
+              ``session_id``.
+            Passing ``None`` (default) preserves 100% backward-compatible
+            behaviour.
+        """
         self._ensure_client()
 
         resolved_model = _resolve_model(model)
@@ -662,6 +679,39 @@ class ConverseExecutor:
         if system_prompt is None:
             system_prompt = load_agent_system_prompt(agent_type)
 
+        # Inject shared state context from AgentContext (if provided)
+        if agent_context is not None:
+            try:
+                import asyncio
+                shared_state = agent_context.shared_state
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Inside an async context — read in-memory cache directly
+                        shared_data = shared_state._cache
+                    else:
+                        shared_data = loop.run_until_complete(shared_state.get_all())
+                except RuntimeError:
+                    shared_data = shared_state._cache
+
+                relevant_keys = [
+                    k for k in shared_data
+                    if k.startswith("step.") and k.endswith(".result")
+                ]
+                if relevant_keys:
+                    prior_context = "\n".join(
+                        f"[{k}]: {v}"
+                        for k, v in shared_data.items()
+                        if k in relevant_keys and v
+                    )
+                    if prior_context:
+                        if context:
+                            context = f"{prior_context}\n\n{context}"
+                        else:
+                            context = prior_context
+            except Exception as exc:
+                logger.debug("ConverseExecutor: failed to read shared state context: %s", exc)
+
         # Build user content
         user_content = prompt
         if context:
@@ -669,19 +719,47 @@ class ConverseExecutor:
 
         # LangGraph path
         if self._llm is not None:
-            return self._execute_langgraph(
+            result = self._execute_langgraph(
                 agent_id=agent_id, agent_type=agent_type,
                 resolved_model=resolved_model, user_content=user_content,
                 system_prompt=system_prompt, start_ts=start_ts,
             )
+        else:
+            # Legacy boto3/provider_client path
+            result = self._execute_legacy(
+                agent_id=agent_id, agent_type=agent_type,
+                resolved_model=resolved_model, user_content=user_content,
+                system_prompt=system_prompt, max_tokens=max_tokens,
+                temperature=temperature, start_ts=start_ts,
+            )
 
-        # Legacy boto3/provider_client path
-        return self._execute_legacy(
-            agent_id=agent_id, agent_type=agent_type,
-            resolved_model=resolved_model, user_content=user_content,
-            system_prompt=system_prompt, max_tokens=max_tokens,
-            temperature=temperature, start_ts=start_ts,
-        )
+        # Publish result to shared state and tag with session_id (best-effort)
+        if agent_context is not None:
+            if result.response and result.error is None:
+                try:
+                    import asyncio
+                    summary = (result.response or "")[:2000]
+                    key = f"agent.{agent_id}.result"
+                    shared_state = agent_context.shared_state
+                    try:
+                        loop = asyncio.get_event_loop()
+                        if loop.is_running():
+                            shared_state._cache[key] = summary
+                            shared_state._persist(key, summary)
+                        else:
+                            loop.run_until_complete(agent_context.set_shared(key, summary))
+                    except RuntimeError:
+                        shared_state._cache[key] = summary
+                        shared_state._persist(key, summary)
+                except Exception as exc:
+                    logger.debug("ConverseExecutor: failed to publish result to shared state: %s", exc)
+
+            try:
+                result.session_id = agent_context.session_id
+            except Exception as exc:
+                logger.debug("ConverseExecutor: failed to set session_id on result: %s", exc)
+
+        return result
 
     def _execute_langgraph(self, agent_id, agent_type, resolved_model, user_content, system_prompt, start_ts):
         """Execute using LangGraph StateGraph."""

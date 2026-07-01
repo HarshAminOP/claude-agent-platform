@@ -84,6 +84,11 @@ class GitHubConfig:
     max_auto_clones_per_session: int = 10
     default_branch: str = "main"
     clone_depth: int = 1
+    org_aliases: list = field(default_factory=list)
+    """Additional GitHub org names that are treated as internal to this platform.
+    Used by the dependency scanner to detect cross-org imports (e.g., a ''-dev''
+    sibling org). Configured in harness-config.json under github.org_aliases.
+    """
 
     @property
     def org_url(self) -> str:

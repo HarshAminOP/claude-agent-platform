@@ -1,0 +1,1342 @@
+[
+  {
+    "agent_type": "dev",
+    "patterns": [
+      "implement a new REST endpoint for user profile updates",
+      "refactor the authentication module to use dependency injection",
+      "fix the bug where null pointer exception occurs during login",
+      "add pagination support to the product listing feature",
+      "write a function to parse and validate incoming webhook payloads"
+    ]
+  },
+  {
+    "agent_type": "devops",
+    "patterns": [
+      "deploy the service to the staging environment",
+      "configure kubernetes deployment manifest for the new microservice",
+      "fix the broken CI/CD pipeline that fails on integration tests",
+      "create helm chart for the payment processing service",
+      "set up argocd application sync policy for production"
+    ]
+  },
+  {
+    "agent_type": "security",
+    "patterns": [
+      "audit IAM roles for overpermissioned access in the production account",
+      "review the application for SQL injection vulnerabilities",
+      "rotate the API keys exposed in the recent git commit",
+      "implement RBAC for the admin dashboard endpoints",
+      "encrypt secrets stored in environment variables using KMS"
+    ]
+  },
+  {
+    "agent_type": "sre",
+    "patterns": [
+      "set up SLO alerts for the checkout service latency",
+      "investigate why the error rate spiked to 5% on the API gateway",
+      "create runbook for the database connection pool exhaustion incident",
+      "tune prometheus alerting rules to reduce alert fatigue",
+      "trace the slow request through distributed logs to find the bottleneck"
+    ]
+  },
+  {
+    "agent_type": "test",
+    "patterns": [
+      "write unit tests for the order processing service",
+      "add integration tests for the payment gateway integration",
+      "improve test coverage for the authentication module to 80 percent",
+      "create mock service for the third-party shipping API",
+      "set up pytest fixtures for the database test suite"
+    ]
+  },
+  {
+    "agent_type": "docs",
+    "patterns": [
+      "write a README for the new data ingestion service",
+      "document the REST API endpoints with request and response examples",
+      "create an architecture decision record for switching to event sourcing",
+      "update the onboarding guide with the new local development setup steps",
+      "add docstrings to all public functions in the core library"
+    ]
+  },
+  {
+    "agent_type": "aws-architect",
+    "patterns": [
+      "design a multi-region active-active architecture for the platform",
+      "recommend the right AWS service for real-time stream processing",
+      "review the VPC design for security and cost optimization",
+      "architect a serverless event-driven pipeline using Lambda and SQS",
+      "design a disaster recovery strategy with RTO under 15 minutes"
+    ]
+  },
+  {
+    "agent_type": "code-review",
+    "patterns": [
+      "review the pull request for the user authentication changes",
+      "critique the code quality and suggest refactoring opportunities",
+      "check the diff for security issues before merging to main",
+      "review the database migration script for correctness",
+      "lint the new feature branch and report style violations"
+    ]
+  },
+  {
+    "agent_type": "optimization",
+    "patterns": [
+      "profile the API to find why the response time is 3 seconds",
+      "reduce the Lambda cold start time for the checkout function",
+      "optimize the database query that causes high CPU on the RDS instance",
+      "right-size the EKS node groups to reduce monthly costs",
+      "add Redis caching layer to eliminate repeated database reads"
+    ]
+  },
+  {
+    "agent_type": "cicd",
+    "patterns": [
+      "set up a GitHub Actions workflow for automated testing and deployment",
+      "configure environment promotion gates from staging to production",
+      "implement semantic versioning and automatic changelog generation",
+      "fix the flaky artifact upload step in the release pipeline",
+      "add OIDC-based AWS authentication to the GitHub Actions workflow"
+    ]
+  },
+  {
+    "agent_type": "explore",
+    "patterns": [
+      "find where the payment service handler is defined in the codebase",
+      "search for all usages of the deprecated authentication library",
+      "locate the configuration files for the email notification feature",
+      "grep for all places that call the external shipping API",
+      "find which files import the shared database connection pool"
+    ]
+  },
+  {
+    "agent_type": "terraform-modules",
+    "patterns": [
+      "create a reusable terraform module for EKS cluster provisioning",
+      "add input validation to the VPC terraform module",
+      "write terratest for the S3 bucket module",
+      "refactor the monolithic terraform config into composable modules",
+      "publish the network module with proper version constraints"
+    ]
+  },
+  {
+    "agent_type": "terraform-state",
+    "patterns": [
+      "migrate the terraform state from local to S3 backend",
+      "move resources between terraform state files after a refactor",
+      "fix the state lock that is stuck after a failed plan",
+      "configure remote state sharing between network and application stacks",
+      "import existing AWS resources into terraform state"
+    ]
+  },
+  {
+    "agent_type": "terraform-import",
+    "patterns": [
+      "import the manually created RDS instance into terraform management",
+      "generate terraform config from existing AWS resources to fix drift",
+      "import an S3 bucket that was created outside of terraform",
+      "bring the legacy security groups under terraform control",
+      "reconcile terraform plan showing drift for the load balancer resource"
+    ]
+  },
+  {
+    "agent_type": "eks-cluster",
+    "patterns": [
+      "upgrade the EKS cluster from version 1.28 to 1.29",
+      "configure OIDC provider for the EKS cluster to enable IRSA",
+      "enable envelope encryption for EKS secrets at rest",
+      "fix version skew between the control plane and worker nodes",
+      "configure EKS cluster access entries for the operations team"
+    ]
+  },
+  {
+    "agent_type": "eks-node-groups",
+    "patterns": [
+      "create a GPU node group for the machine learning workloads",
+      "migrate the worker nodes to Bottlerocket AMI",
+      "configure IMDSv2 enforcement on all EKS node groups",
+      "update the launch template to use the latest EKS-optimized AMI",
+      "add a spot instance node group to reduce compute costs"
+    ]
+  },
+  {
+    "agent_type": "eks-addons",
+    "patterns": [
+      "upgrade the VPC-CNI addon to the latest compatible version",
+      "configure the EBS CSI driver addon with the right IAM permissions",
+      "update CoreDNS addon after the cluster version upgrade",
+      "enable pod identity addon for workload authentication",
+      "troubleshoot why the metrics-server addon is crashing on startup"
+    ]
+  },
+  {
+    "agent_type": "argocd-apps",
+    "patterns": [
+      "create an ArgoCD Application for the new microservice",
+      "set up an ApplicationSet to deploy across multiple clusters",
+      "implement app-of-apps pattern for the production environment",
+      "configure multi-source ArgoCD app from Helm chart plus values overlay",
+      "migrate ArgoCD apps to use the new Git repository structure"
+    ]
+  },
+  {
+    "agent_type": "argocd-sync",
+    "patterns": [
+      "configure sync waves to order database migration before app deployment",
+      "add a presync job to run schema migrations",
+      "write a Lua health check for the custom CRD",
+      "set up automated sync policy with self-heal for the staging environment",
+      "tune sync timeout for the slow-starting batch processing service"
+    ]
+  },
+  {
+    "agent_type": "helm-charts",
+    "patterns": [
+      "create a helm chart for the new backend service",
+      "add named templates to the helpers file to reduce duplication",
+      "configure chart dependencies for PostgreSQL and Redis subcharts",
+      "write helm-unittest tests for the deployment template",
+      "publish the internal helm chart to the OCI registry"
+    ]
+  },
+  {
+    "agent_type": "helm-values",
+    "patterns": [
+      "set up base and environment overlay values hierarchy for the service",
+      "integrate SOPS encryption for sensitive values in the helm chart",
+      "add JSON schema validation to the helm chart values file",
+      "configure Helmfile to manage multiple charts across environments",
+      "override helm values for the production deployment with higher resource limits"
+    ]
+  },
+  {
+    "agent_type": "karpenter",
+    "patterns": [
+      "configure Karpenter NodePool with spot and on-demand fallback strategy",
+      "create EC2NodeClass for the GPU workload with the right AMI selector",
+      "tune Karpenter consolidation settings to reduce idle node cost",
+      "set disruption budget to prevent too many nodes draining at once",
+      "fix Karpenter drift detection for nodes running outdated AMI versions"
+    ]
+  },
+  {
+    "agent_type": "vpc-network",
+    "patterns": [
+      "design VPC CIDR allocation for a new production environment",
+      "set up Transit Gateway to connect the application and management VPCs",
+      "configure VPC endpoint for S3 to avoid data transfer costs",
+      "enable VPC flow logs and route them to CloudWatch for analysis",
+      "add a secondary CIDR block to expand the EKS pod IP space"
+    ]
+  },
+  {
+    "agent_type": "subnet-design",
+    "patterns": [
+      "design public, private, and isolated subnet tiers for three AZs",
+      "allocate subnets for EKS worker nodes with enough IP headroom",
+      "configure IPv6 dual-stack subnets for the new application tier",
+      "tag subnets correctly so the load balancer controller can discover them",
+      "split the subnet to create an isolated database tier"
+    ]
+  },
+  {
+    "agent_type": "route53-dns",
+    "patterns": [
+      "create Route 53 routing policy with health checks for failover",
+      "configure external-dns controller to auto-manage DNS records",
+      "set up private hosted zone for internal service discovery",
+      "enable DNSSEC signing for the public hosted zone",
+      "configure Route 53 resolver rules for on-premises DNS forwarding"
+    ]
+  },
+  {
+    "agent_type": "cloudfront-cdn",
+    "patterns": [
+      "set up CloudFront distribution for the static React application",
+      "configure origin access control for the S3 private bucket",
+      "add a CloudFront cache policy to improve hit rate for API responses",
+      "deploy a CloudFront Function to rewrite URLs at the edge",
+      "enable WAF integration on the CloudFront distribution"
+    ]
+  },
+  {
+    "agent_type": "nlb-loadbalancer",
+    "patterns": [
+      "configure Network Load Balancer for the gRPC service with TLS termination",
+      "set up static Elastic IP addresses for the NLB",
+      "expose the service via PrivateLink using an NLB as the endpoint",
+      "configure UDP listener on the NLB for the game server",
+      "add health check tuning to reduce NLB failover time"
+    ]
+  },
+  {
+    "agent_type": "alb-ingress",
+    "patterns": [
+      "configure ALB ingress for the Kubernetes service with path-based routing",
+      "set up SSL termination on the Application Load Balancer",
+      "configure target group stickiness for the stateful application",
+      "add listener rules to route traffic to different backend services",
+      "troubleshoot why the ingress controller is not creating the ALB"
+    ]
+  },
+  {
+    "agent_type": "python-backend",
+    "patterns": [
+      "implement a FastAPI service for the user management domain",
+      "add async database calls using SQLAlchemy in the order service",
+      "define Pydantic models for the API request and response schemas",
+      "fix the N+1 query issue in the product listing endpoint",
+      "structure the Flask application with blueprints for modularity"
+    ]
+  },
+  {
+    "agent_type": "typescript-frontend",
+    "patterns": [
+      "build a React component for the multi-step checkout form",
+      "implement a custom hook for fetching and caching user preferences",
+      "migrate the Next.js pages router to the app router",
+      "add TypeScript strict types to the shared component library",
+      "optimize re-renders in the product listing component with useMemo"
+    ]
+  },
+  {
+    "agent_type": "rest-endpoints",
+    "patterns": [
+      "implement a REST endpoint with pagination for listing orders",
+      "add idempotency key support to the payment creation endpoint",
+      "return RFC 7807 problem details for all API error responses",
+      "implement cursor-based pagination for the timeline feed endpoint",
+      "add rate limiting headers to the public REST API"
+    ]
+  },
+  {
+    "agent_type": "graphql-schema",
+    "patterns": [
+      "design the GraphQL schema for the product catalog domain",
+      "implement DataLoader to solve N+1 queries in the order resolver",
+      "add a GraphQL subscription for real-time order status updates",
+      "set up Apollo Federation to compose the user and order subgraphs",
+      "add input type validation to the user profile mutation"
+    ]
+  },
+  {
+    "agent_type": "grpc-services",
+    "patterns": [
+      "define the protobuf service definition for the inventory service",
+      "implement a bidirectional streaming RPC for the chat service",
+      "add deadline propagation to all gRPC client calls",
+      "configure grpc-gateway to expose the gRPC service as REST",
+      "add authentication interceptor to all gRPC service handlers"
+    ]
+  },
+  {
+    "agent_type": "websocket-handlers",
+    "patterns": [
+      "implement WebSocket server for real-time collaborative editing",
+      "scale WebSocket connections horizontally using Redis pub/sub adapter",
+      "add JWT authentication on the WebSocket handshake",
+      "implement per-connection rate limiting for the WebSocket server",
+      "handle graceful reconnection with exponential backoff on the client side"
+    ]
+  },
+  {
+    "agent_type": "orm-models",
+    "patterns": [
+      "define SQLAlchemy 2.0 models for the user and order entities",
+      "prevent N+1 queries by adding selectin loading to the relationship",
+      "implement soft delete on the content model using a deleted_at column",
+      "add composite primary key to the product variant model",
+      "configure TypeORM entities with proper index definitions"
+    ]
+  },
+  {
+    "agent_type": "error-handling",
+    "patterns": [
+      "implement retry with exponential jitter for the external payment API calls",
+      "add circuit breaker pattern to the shipping service client",
+      "define structured error types for the order processing domain",
+      "route failed messages to a dead-letter queue after three retries",
+      "implement fallback response when the recommendation service is unavailable"
+    ]
+  },
+  {
+    "agent_type": "feature-flags",
+    "patterns": [
+      "implement feature flag to gate the new checkout flow for 10 percent of users",
+      "configure LaunchDarkly targeting rules for the beta cohort",
+      "add a kill switch flag to disable the new recommendation engine",
+      "implement canary flag to progressively enable the new payment provider",
+      "clean up the old feature flags that are fully rolled out"
+    ]
+  },
+  {
+    "agent_type": "cli-tools",
+    "patterns": [
+      "build a Click CLI for the data migration tool with subcommands",
+      "add progress bar to the long-running batch export command",
+      "implement shell completion for the deployment CLI",
+      "configure XDG-compliant config file loading for the developer tool",
+      "publish the internal CLI tool to PyPI with proper versioning"
+    ]
+  },
+  {
+    "agent_type": "api-design",
+    "patterns": [
+      "design the REST API for the new notification service",
+      "define URL naming conventions for the versioned API",
+      "add cursor pagination design to the event history endpoint",
+      "design backward-compatible API versioning strategy",
+      "write OpenAPI 3.1 specification for the partner integration API"
+    ]
+  },
+  {
+    "agent_type": "api-contract",
+    "patterns": [
+      "validate that the API response schema is backward compatible",
+      "write consumer-driven contract tests for the billing service integration",
+      "add Pact tests to verify the notification service contract",
+      "check if the breaking change in the response schema affects consumers",
+      "generate OpenAPI spec from the existing FastAPI application"
+    ]
+  },
+  {
+    "agent_type": "sdk-client",
+    "patterns": [
+      "build a Python SDK client for the internal notification API",
+      "add retry and backoff logic to the API client library",
+      "implement cursor-based pagination helper in the SDK",
+      "add authentication token refresh logic to the API wrapper",
+      "write the client library for the partner integration REST API"
+    ]
+  },
+  {
+    "agent_type": "sdk-developer",
+    "patterns": [
+      "design the plugin system API for the developer platform",
+      "build a public SDK with stable interface for third-party integrations",
+      "create extension points for the workflow engine",
+      "document the public API surface for the developer SDK",
+      "publish the SDK to npm with proper type definitions"
+    ]
+  },
+  {
+    "agent_type": "algorithm",
+    "patterns": [
+      "optimize the graph traversal algorithm for the recommendation engine",
+      "implement an efficient LRU cache with O(1) get and put operations",
+      "analyze the time complexity of the current sorting implementation",
+      "design a rate limiting algorithm using the token bucket pattern",
+      "improve the search ranking algorithm to reduce response latency"
+    ]
+  },
+  {
+    "agent_type": "database",
+    "patterns": [
+      "design the DynamoDB single-table schema for the order management domain",
+      "choose between PostgreSQL and DynamoDB for the high-read user preferences feature",
+      "plan the NoSQL data model for the time-series event store",
+      "create the schema for the multi-tenant SaaS database",
+      "design indexes to support the access patterns for the product catalog"
+    ]
+  },
+  {
+    "agent_type": "database-migrations",
+    "patterns": [
+      "write a zero-downtime migration to add a non-nullable column to the orders table",
+      "implement expand-contract migration to rename the user email column",
+      "create a batched backfill script for the new denormalized field",
+      "add a CONCURRENTLY index to the large orders table without locking",
+      "write the rollback migration script for the schema change"
+    ]
+  },
+  {
+    "agent_type": "caching-strategy",
+    "patterns": [
+      "design a Redis cache-aside strategy for the product detail page",
+      "implement cache stampede prevention using probabilistic early expiration",
+      "configure CloudFront TTLs for the API response caching layer",
+      "set up write-through caching for the user session store",
+      "design cache invalidation strategy for the product catalog updates"
+    ]
+  },
+  {
+    "agent_type": "queue-workers",
+    "patterns": [
+      "implement an idempotent SQS consumer for the order fulfillment worker",
+      "add dead-letter queue handling to the email notification consumer",
+      "configure backpressure in the Kafka consumer to prevent OOM",
+      "implement graceful shutdown for the message queue worker",
+      "add deduplication logic for the at-least-once delivery scenario"
+    ]
+  },
+  {
+    "agent_type": "batch-processing",
+    "patterns": [
+      "implement a nightly ETL batch job to aggregate daily sales metrics",
+      "migrate the CSV import job to use AWS Glue for scalability",
+      "schedule the data cleanup job with proper retry and failure alerting",
+      "optimize the Spark batch job to reduce shuffling overhead",
+      "implement checkpointing for the long-running data migration job"
+    ]
+  },
+  {
+    "agent_type": "monorepo-management",
+    "patterns": [
+      "configure Turborepo pipeline to run only affected packages on CI",
+      "set up Nx workspace for the TypeScript monorepo with proper boundaries",
+      "configure remote caching for the monorepo build pipeline",
+      "define package boundaries to prevent circular dependencies in the monorepo",
+      "migrate from Lerna to Changesets for monorepo versioning"
+    ]
+  },
+  {
+    "agent_type": "unit-test-python",
+    "patterns": [
+      "write pytest unit tests for the order service with fixtures",
+      "add parametrize tests to cover all edge cases in the discount calculator",
+      "mock the external payment API in the checkout service tests",
+      "set up conftest.py with shared fixtures for the test suite",
+      "configure pytest coverage report with 80 percent threshold enforcement"
+    ]
+  },
+  {
+    "agent_type": "unit-test-typescript",
+    "patterns": [
+      "write Jest tests for the user authentication hook",
+      "mock the API client in the React component unit tests",
+      "add Vitest unit tests for the utility functions module",
+      "configure test coverage reporting in the TypeScript project",
+      "write describe/it blocks for the shopping cart reducer"
+    ]
+  },
+  {
+    "agent_type": "integration-test",
+    "patterns": [
+      "write integration tests using Testcontainers for the PostgreSQL repository layer",
+      "add docker-compose based integration tests for the payment gateway",
+      "test the full API endpoint stack against a real database instance",
+      "set up integration tests for the Kafka consumer with an embedded broker",
+      "write integration tests for the S3 file upload service"
+    ]
+  },
+  {
+    "agent_type": "e2e-test",
+    "patterns": [
+      "write Playwright tests for the multi-step checkout user journey",
+      "add Cypress end-to-end tests for the login and registration flow",
+      "implement page object model for the admin dashboard tests",
+      "mock external API calls in the Playwright tests using network interception",
+      "configure Playwright tests to run in CI with video recording on failure"
+    ]
+  },
+  {
+    "agent_type": "load-test",
+    "patterns": [
+      "write k6 load test for the product search endpoint",
+      "run Locust load test against the checkout flow to find the breaking point",
+      "configure a ramp-up scenario in JMeter for the API stress test",
+      "measure p99 latency baseline for the recommendation service under load",
+      "identify the throughput ceiling for the event ingestion API"
+    ]
+  },
+  {
+    "agent_type": "contract-test",
+    "patterns": [
+      "write Pact consumer tests for the notification service integration",
+      "verify provider contracts after the API schema change",
+      "add can-i-deploy gate to the release pipeline using Pact broker",
+      "create consumer-driven contract tests for the billing service",
+      "set up pending pact support for safe contract evolution"
+    ]
+  },
+  {
+    "agent_type": "chaos-test",
+    "patterns": [
+      "design a chaos experiment to test service resilience when the database is unavailable",
+      "create an AWS FIS experiment to terminate random EKS nodes",
+      "run a game day to test the failover procedure for the primary database",
+      "inject network latency between the app and cache to test timeout handling",
+      "write a Litmus chaos experiment for the Kubernetes pod failure scenario"
+    ]
+  },
+  {
+    "agent_type": "fuzz-test",
+    "patterns": [
+      "add Hypothesis property-based tests for the JSON parser utility",
+      "write fuzzing tests for the user input sanitization function",
+      "implement fast-check property tests for the date calculation module",
+      "run Go native fuzzer against the configuration file parser",
+      "add AFL++ fuzzing for the binary protocol deserialization code"
+    ]
+  },
+  {
+    "agent_type": "mutation-test",
+    "patterns": [
+      "run Stryker mutation tests on the discount calculation module",
+      "measure test quality by running mutmut on the order service tests",
+      "improve mutation score by adding missing boundary condition assertions",
+      "configure PIT mutation testing for the Java payment service",
+      "analyze which mutants survived to identify gaps in the test suite"
+    ]
+  },
+  {
+    "agent_type": "snapshot-test",
+    "patterns": [
+      "add Jest snapshot tests for the product card component",
+      "update snapshots after the design system component refactor",
+      "configure snapshot serializers for the custom React component tree",
+      "review all outdated snapshots and decide which ones to approve",
+      "set up golden file tests for the PDF report generator output"
+    ]
+  },
+  {
+    "agent_type": "visual-regression",
+    "patterns": [
+      "set up Chromatic visual regression testing for the design system",
+      "configure Percy screenshots for the checkout flow visual tests",
+      "add baseline images for the new marketing landing page components",
+      "suppress animation in visual regression tests to reduce flakiness",
+      "configure pixel diff threshold for the responsive layout tests"
+    ]
+  },
+  {
+    "agent_type": "accessibility-test",
+    "patterns": [
+      "run axe-core accessibility audit on the checkout flow components",
+      "fix the WCAG 2.1 AA color contrast violation on the button component",
+      "add ARIA labels to the icon-only navigation buttons",
+      "write automated keyboard navigation tests for the modal dialog",
+      "configure Pa11y to run accessibility checks in the CI pipeline"
+    ]
+  },
+  {
+    "agent_type": "ab-testing",
+    "patterns": [
+      "design an A/B test for the new product recommendation widget",
+      "calculate the required sample size for the checkout button color experiment",
+      "analyze the statistical significance of the current pricing experiment results",
+      "set up the experiment tracking for the new onboarding flow variant",
+      "define success metrics and guardrail metrics for the search ranking test"
+    ]
+  },
+  {
+    "agent_type": "mock-service",
+    "patterns": [
+      "create a WireMock stub for the third-party payment processor API",
+      "set up Mock Service Worker to intercept API calls in tests",
+      "build a fake shipping service for local development and testing",
+      "configure WireMock stateful scenarios for the order lifecycle tests",
+      "add fault injection to the mock service to test error handling"
+    ]
+  },
+  {
+    "agent_type": "test-data-generation",
+    "patterns": [
+      "create factory_boy factories for the user and order test data",
+      "build a Faker-based data generator for realistic product catalog seed data",
+      "anonymize production data for use in integration test environments",
+      "set up deterministic seeding for reproducible test scenarios",
+      "generate test fixtures for the multi-tenant permission test suite"
+    ]
+  },
+  {
+    "agent_type": "test-infrastructure",
+    "patterns": [
+      "configure pytest-xdist parallel test execution to speed up the test suite",
+      "identify and fix the flaky test that fails intermittently in CI",
+      "set up dedicated test environment provisioning in the CI pipeline",
+      "configure test sharding across multiple CI runners for faster feedback",
+      "diagnose why the integration tests are timing out in the CI environment"
+    ]
+  },
+  {
+    "agent_type": "iam-policy-review",
+    "patterns": [
+      "audit the Lambda execution role for overpermissioned S3 access",
+      "review all IAM policies with wildcard actions in the production account",
+      "identify unused permissions in the EKS node group instance profile",
+      "check if the developer IAM policies comply with least privilege",
+      "analyze which IAM actions are actually used using Access Analyzer"
+    ]
+  },
+  {
+    "agent_type": "container-scanning",
+    "patterns": [
+      "scan the production Docker images with Trivy for critical CVEs",
+      "harden the Dockerfile to remove unnecessary packages and reduce attack surface",
+      "configure Grype to block the CI pipeline on high-severity vulnerabilities",
+      "generate a software bill of materials for the container images",
+      "fix the critical CVE found in the base image layer"
+    ]
+  },
+  {
+    "agent_type": "dependency-audit",
+    "patterns": [
+      "run npm audit and fix the high severity vulnerability in the frontend",
+      "check for transitive dependency CVEs using Snyk in the Python project",
+      "configure Dependabot to auto-merge patch version security updates",
+      "review the license compliance of all third-party dependencies",
+      "identify which packages have known vulnerabilities in the Go module"
+    ]
+  },
+  {
+    "agent_type": "secret-rotation",
+    "patterns": [
+      "implement zero-downtime rotation for the RDS database password",
+      "set up automatic rotation for the API key using Secrets Manager",
+      "rotate the compromised access key across all services without downtime",
+      "configure the credential lifecycle policy to rotate keys every 90 days",
+      "implement dual-write secret rotation for the external partner API key"
+    ]
+  },
+  {
+    "agent_type": "secrets-manager",
+    "patterns": [
+      "store database credentials in AWS Secrets Manager and update the app to retrieve them",
+      "configure External Secrets Operator to sync secrets into Kubernetes",
+      "migrate from environment variable secrets to Secrets Manager",
+      "set up cross-account access to the shared secrets in the platform account",
+      "use sealed secrets to encrypt Kubernetes secrets in the Git repository"
+    ]
+  },
+  {
+    "agent_type": "network-security",
+    "patterns": [
+      "harden security groups to follow least-privilege network access rules",
+      "implement network ACLs to isolate the database subnet tier",
+      "configure a zero-trust network policy using Istio in the EKS cluster",
+      "audit security group rules for overly permissive 0.0.0.0/0 ingress",
+      "set up PrivateLink for the partner integration to avoid public internet exposure"
+    ]
+  },
+  {
+    "agent_type": "compliance-gdpr",
+    "patterns": [
+      "implement right-to-erasure functionality for personal data in the user service",
+      "design PII data mapping for the GDPR compliance audit",
+      "automate data retention policy enforcement for user records older than 7 years",
+      "implement consent management for marketing email opt-in tracking",
+      "configure cross-border data transfer safeguards for EU user data"
+    ]
+  },
+  {
+    "agent_type": "compliance-hipaa",
+    "patterns": [
+      "encrypt protected health information at rest using KMS",
+      "implement audit logging for all PHI access events",
+      "review the application architecture for HIPAA technical safeguards compliance",
+      "configure access controls to restrict PHI to authorized roles only",
+      "document the data flow diagram for the HIPAA Business Associate Agreement"
+    ]
+  },
+  {
+    "agent_type": "compliance-sox",
+    "patterns": [
+      "implement audit trail for all changes to financial configuration",
+      "create change management controls for the production deployment process",
+      "configure segregation of duties in the release pipeline",
+      "evidence the IT general controls for the SOX quarterly audit",
+      "implement access certification review for the financial systems"
+    ]
+  },
+  {
+    "agent_type": "threat-model",
+    "patterns": [
+      "create a STRIDE threat model for the new payment processing feature",
+      "identify attack vectors for the user authentication flow",
+      "document trust boundaries in the data flow diagram for the audit",
+      "enumerate threats for the file upload and processing service",
+      "map the identified threats to existing security controls"
+    ]
+  },
+  {
+    "agent_type": "penetration-test",
+    "patterns": [
+      "plan a penetration test for the public-facing API endpoints",
+      "test for OWASP Top 10 vulnerabilities in the web application",
+      "perform a red team exercise against the cloud infrastructure",
+      "score the penetration test findings with CVSS and produce a report",
+      "verify remediation of the SQL injection vulnerability found last quarter"
+    ]
+  },
+  {
+    "agent_type": "incident-forensics",
+    "patterns": [
+      "preserve CloudTrail evidence after the suspected unauthorized access incident",
+      "reconstruct the attack timeline from the CloudWatch logs",
+      "extract indicators of compromise from the compromised EC2 instance",
+      "map the attacker's lateral movement to the MITRE ATT&CK framework",
+      "produce a forensic report for the data breach incident"
+    ]
+  },
+  {
+    "agent_type": "encryption-review",
+    "patterns": [
+      "review the KMS key policy for the customer data encryption keys",
+      "audit TLS certificate expiry dates across all production endpoints",
+      "check that all S3 buckets use server-side encryption at rest",
+      "verify in-transit encryption is enforced for all internal service communication",
+      "review the envelope encryption implementation for the database credential store"
+    ]
+  },
+  {
+    "agent_type": "waf-rules",
+    "patterns": [
+      "configure WAF rate limiting rules for the login endpoint",
+      "add AWS managed rules for OWASP Top 10 protection to the WAF",
+      "implement geo-blocking rules to restrict access from high-risk countries",
+      "tune the WAF bot control rules to reduce false positives",
+      "create custom WAF rules to block scrapers targeting the product catalog"
+    ]
+  },
+  {
+    "agent_type": "zero-trust",
+    "patterns": [
+      "implement mTLS between services using SPIFFE/SPIRE workload identity",
+      "configure Istio authorization policies for zero-trust pod-to-pod communication",
+      "set up IRSA with minimum required permissions for each EKS workload",
+      "implement microsegmentation to isolate the payment processing services",
+      "configure just-in-time access for the production database operations team"
+    ]
+  },
+  {
+    "agent_type": "least-privilege-audit",
+    "patterns": [
+      "use IAM Access Analyzer to find and remove unused permissions",
+      "generate a least-privilege policy from CloudTrail last-accessed data",
+      "audit the S3 bucket policies for overly permissive cross-account access",
+      "implement permission boundaries on the developer IAM roles",
+      "review all IAM roles that have not been used in the last 90 days"
+    ]
+  },
+  {
+    "agent_type": "prometheus-metrics",
+    "patterns": [
+      "add Prometheus histogram metrics for the API request latency",
+      "write PromQL recording rules to pre-aggregate high-cardinality metrics",
+      "name and label the new counter metric following Prometheus conventions",
+      "debug high cardinality in the Prometheus metrics causing memory issues",
+      "add a summary metric for tracking the order processing duration"
+    ]
+  },
+  {
+    "agent_type": "grafana-dashboards",
+    "patterns": [
+      "create a Grafana dashboard for the service request rate and error rate",
+      "add template variables to the Grafana dashboard for filtering by environment",
+      "provision the Grafana dashboard as code using the JSON model",
+      "add a Loki log panel to the existing service health dashboard",
+      "optimize the Grafana dashboard PromQL queries for faster load time"
+    ]
+  },
+  {
+    "agent_type": "alertmanager-rules",
+    "patterns": [
+      "write Prometheus alert rules for high error rate on the checkout service",
+      "configure Alertmanager routing to send P1 alerts to PagerDuty",
+      "add inhibition rules to suppress downstream alerts when the database is down",
+      "set up a PrometheusRule for the SLO burn rate alert",
+      "tune alert thresholds to reduce false positive pages in the on-call rotation"
+    ]
+  },
+  {
+    "agent_type": "distributed-tracing",
+    "patterns": [
+      "instrument the order service with OpenTelemetry SDK for distributed tracing",
+      "configure W3C TraceContext propagation across the microservices",
+      "design a sampling strategy that captures all error traces at low cost",
+      "route OTEL traces to X-Ray through the OpenTelemetry Collector",
+      "add custom span attributes to identify slow database queries in traces"
+    ]
+  },
+  {
+    "agent_type": "log-aggregation",
+    "patterns": [
+      "configure Fluent Bit DaemonSet to ship pod logs to CloudWatch Logs",
+      "set up log routing to forward error logs to a separate log group",
+      "design CloudWatch log retention policy to control storage costs",
+      "enrich logs with pod metadata using the Fluent Bit Kubernetes filter",
+      "set up OpenSearch index templates for the structured application logs"
+    ]
+  },
+  {
+    "agent_type": "error-tracking",
+    "patterns": [
+      "integrate Sentry SDK to capture unhandled exceptions in the backend",
+      "configure Sentry release tracking to link errors to deployments",
+      "add custom fingerprint rules to group related Sentry issues together",
+      "upload source maps to Sentry for readable TypeScript stack traces",
+      "set up Sentry PagerDuty integration for critical error alerting"
+    ]
+  },
+  {
+    "agent_type": "apm-setup",
+    "patterns": [
+      "set up Datadog APM auto-instrumentation for the Python microservices",
+      "configure transaction naming rules in the Elastic APM agent",
+      "add custom spans to trace the slow database calls in the service",
+      "set up service maps in Datadog to visualize inter-service dependencies",
+      "configure Apdex score alerting for the user-facing API services"
+    ]
+  },
+  {
+    "agent_type": "synthetic-monitoring",
+    "patterns": [
+      "create a CloudWatch Synthetics canary to monitor the checkout flow",
+      "set up uptime monitoring for all public API health check endpoints",
+      "write a multi-step synthetic transaction test for the login journey",
+      "configure SSL certificate expiry alerting using synthetic monitors",
+      "set up Statuspage integration to reflect synthetic monitor results"
+    ]
+  },
+  {
+    "agent_type": "cost-monitoring",
+    "patterns": [
+      "set up AWS Cost Anomaly Detection for the production workloads",
+      "configure Kubecost to show per-team EKS cost allocation",
+      "create an AWS Budget with alert at 80 percent of monthly limit",
+      "investigate the unexpected spike in data transfer costs last month",
+      "implement resource tagging strategy to enable accurate cost allocation"
+    ]
+  },
+  {
+    "agent_type": "github-actions",
+    "patterns": [
+      "create a GitHub Actions reusable workflow for shared build and test steps",
+      "configure OIDC authentication for GitHub Actions to assume AWS role",
+      "add matrix strategy to test across multiple Python versions in CI",
+      "implement concurrency groups to cancel stale workflow runs on new push",
+      "create a composite action for the shared Docker build and push steps"
+    ]
+  },
+  {
+    "agent_type": "gitlab-ci",
+    "patterns": [
+      "create a GitLab CI pipeline with build, test, and deploy stages",
+      "configure GitLab Runner with Kubernetes executor for the CI jobs",
+      "add needs dependencies to parallelize the GitLab CI pipeline stages",
+      "configure environment deployments in the GitLab CI pipeline",
+      "set up multi-project pipeline trigger from the parent repository"
+    ]
+  },
+  {
+    "agent_type": "jenkins-pipeline",
+    "patterns": [
+      "write a Jenkins declarative pipeline for the Java service build",
+      "create a Jenkins shared library for reusable pipeline steps",
+      "configure Kubernetes pod agents for the Jenkins pipeline jobs",
+      "manage Jenkins credentials securely using the credential binding plugin",
+      "migrate the freestyle Jenkins job to a declarative Jenkinsfile"
+    ]
+  },
+  {
+    "agent_type": "build-optimization",
+    "patterns": [
+      "optimize the Docker build by adding proper layer caching with BuildKit",
+      "speed up the multi-stage Docker build for the Node.js application",
+      "configure GitHub Actions cache for the npm install step",
+      "enable BuildKit cache mounts to reuse pip packages across builds",
+      "parallelize the slow build steps to reduce CI feedback time"
+    ]
+  },
+  {
+    "agent_type": "release-management",
+    "patterns": [
+      "configure semantic-release for automated versioning and changelog generation",
+      "set up Conventional Commits enforcement in the PR validation workflow",
+      "implement the hotfix release process for critical production bugs",
+      "configure Changesets for versioning in the TypeScript monorepo",
+      "automate GitHub Releases creation from the CI/CD pipeline"
+    ]
+  },
+  {
+    "agent_type": "canary-deploy",
+    "patterns": [
+      "set up Argo Rollouts canary strategy with automated analysis step",
+      "configure Flagger for progressive traffic shifting in the EKS cluster",
+      "implement canary deployment with 5 percent initial traffic split",
+      "configure automated rollback when error rate exceeds the canary threshold",
+      "add Istio traffic weights for the canary release of the payment service"
+    ]
+  },
+  {
+    "agent_type": "blue-green-deploy",
+    "patterns": [
+      "implement blue-green deployment by switching ALB target groups",
+      "configure ECS CodeDeploy with blue-green deployment strategy",
+      "set up Argo Rollouts BlueGreen strategy for the frontend service",
+      "ensure database schema is backward compatible for the blue-green cutover",
+      "automate smoke test gate before completing the blue-green switch"
+    ]
+  },
+  {
+    "agent_type": "rollback-strategy",
+    "patterns": [
+      "implement automated rollback trigger when Argo Rollouts analysis fails",
+      "design a Helm rollback procedure for the production deployment",
+      "configure ArgoCD to auto-rollback when the health check fails",
+      "write the database down-migration script for emergency rollback",
+      "set up feature flag based rollback to revert the bad release instantly"
+    ]
+  },
+  {
+    "agent_type": "artifact-management",
+    "patterns": [
+      "configure ECR lifecycle policy to retain only the last 10 production images",
+      "implement cosign image signing for the production container builds",
+      "generate and attach SBOM to the Docker image on every release build",
+      "set up multi-arch Docker manifest list for ARM and x86 support",
+      "promote the staging image to production registry without rebuilding"
+    ]
+  },
+  {
+    "agent_type": "environment-promotion",
+    "patterns": [
+      "design the promotion workflow from dev to staging to production",
+      "configure ArgoCD Image Updater for automatic image tag promotion",
+      "add smoke test gates before allowing promotion to the next environment",
+      "set up Helm values overlays for environment-specific configuration",
+      "implement a GitOps-based promotion flow using pull request approvals"
+    ]
+  },
+  {
+    "agent_type": "gitops-patterns",
+    "patterns": [
+      "implement app-of-apps GitOps pattern for managing multiple services",
+      "configure ApplicationSet with git generator for automatic app onboarding",
+      "set up External Secrets Operator to replace hard-coded Kubernetes secrets",
+      "configure ArgoCD Image Updater to track and update image tags in Git",
+      "design the GitOps repository structure for multi-cluster deployments"
+    ]
+  },
+  {
+    "agent_type": "data-pipeline",
+    "patterns": [
+      "build an Airflow DAG to process daily sales data from S3 to Redshift",
+      "implement an AWS Step Functions workflow for the order data pipeline",
+      "set up SLA monitoring and alerting for the nightly ETL pipeline",
+      "migrate the cron-based data pipeline to a managed Airflow environment",
+      "add data quality checks at each stage of the Dagster pipeline"
+    ]
+  },
+  {
+    "agent_type": "data-lake",
+    "patterns": [
+      "partition the S3 data lake by date for efficient query performance",
+      "migrate the data lake format from Parquet to Apache Iceberg",
+      "configure AWS Lake Formation for fine-grained access control",
+      "set up Glue Data Catalog for the S3 data lake tables",
+      "implement time travel queries on the Iceberg data lake table"
+    ]
+  },
+  {
+    "agent_type": "data-warehouse",
+    "patterns": [
+      "design Redshift distribution keys for the high-join analytics queries",
+      "optimize the slow Snowflake query using proper clustering keys",
+      "build a dimensional model for the sales analytics data warehouse",
+      "create materialized views in BigQuery for the weekly reporting dashboards",
+      "analyze the Redshift EXPLAIN plan to fix the query performance issue"
+    ]
+  },
+  {
+    "agent_type": "etl-transform",
+    "patterns": [
+      "implement dbt transformation models for the customer revenue metrics",
+      "write PySpark transformation to deduplicate and normalize event data",
+      "add null handling and type casting to the pandas ETL transformation",
+      "implement data quality assertions in the dbt model tests",
+      "build the Glue ETL job to transform raw clickstream data"
+    ]
+  },
+  {
+    "agent_type": "streaming-kafka",
+    "patterns": [
+      "design the Kafka topic partitioning strategy for the order event stream",
+      "implement exactly-once semantics in the Kafka Streams application",
+      "configure consumer group rebalancing strategy to minimize lag",
+      "set up Avro schema registry integration for the Kafka producers",
+      "monitor and alert on consumer group lag for the event processing pipeline"
+    ]
+  },
+  {
+    "agent_type": "schema-registry",
+    "patterns": [
+      "configure backward compatibility enforcement in the Confluent Schema Registry",
+      "register Avro schema for the new order event type",
+      "implement safe schema evolution by adding optional fields only",
+      "migrate from Avro to Protobuf schemas in the AWS Glue Schema Registry",
+      "set up schema registry access controls for producer and consumer teams"
+    ]
+  },
+  {
+    "agent_type": "analytics-dashboard",
+    "patterns": [
+      "build a QuickSight dashboard for the executive weekly business review",
+      "configure SPICE dataset for the sales performance analytics in QuickSight",
+      "add row-level security to the Looker dashboard for tenant isolation",
+      "design calculated fields for the conversion funnel metrics",
+      "embed the analytics dashboard in the customer portal using the SDK"
+    ]
+  },
+  {
+    "agent_type": "data-governance",
+    "patterns": [
+      "implement data lineage tracking using OpenLineage for the ETL pipelines",
+      "classify PII fields in the data catalog for GDPR compliance",
+      "set up data retention automation for the customer records older than 7 years",
+      "configure Lake Formation column-level access control for sensitive fields",
+      "create a data stewardship workflow for approving access to sensitive datasets"
+    ]
+  },
+  {
+    "agent_type": "data-quality",
+    "patterns": [
+      "implement Great Expectations suite for the daily sales data pipeline",
+      "add dbt test coverage for referential integrity in the warehouse models",
+      "set up data freshness checks to alert when the pipeline is delayed",
+      "create validation rules for the incoming partner data feed",
+      "configure Deequ to validate data quality on the S3 data lake tables"
+    ]
+  },
+  {
+    "agent_type": "adr-writer",
+    "patterns": [
+      "write an architecture decision record for choosing Kafka over SQS",
+      "document the decision to migrate from REST to GraphQL with trade-offs",
+      "create an ADR for the database technology selection",
+      "record the decision to adopt the strangler fig pattern for the monolith migration",
+      "write an ADR capturing the context and consequences of the multi-tenancy approach"
+    ]
+  },
+  {
+    "agent_type": "runbook-author",
+    "patterns": [
+      "write an operational runbook for the database failover procedure",
+      "create a playbook for responding to the high memory usage alert",
+      "document the escalation path and on-call steps for the P1 incident response",
+      "write the step-by-step rollback runbook for the payment service deployment",
+      "create a runbook for rotating the compromised API credentials"
+    ]
+  },
+  {
+    "agent_type": "api-docs",
+    "patterns": [
+      "generate OpenAPI 3.1 spec for the new user management REST API",
+      "set up Swagger UI to serve the API documentation from the FastAPI app",
+      "write the error catalog documenting all error codes and their meanings",
+      "configure Redoc for the partner-facing API documentation portal",
+      "generate a TypeScript SDK from the OpenAPI specification"
+    ]
+  },
+  {
+    "agent_type": "onboarding-guide",
+    "patterns": [
+      "write a developer onboarding guide for setting up the local development environment",
+      "create a getting started guide for new engineers joining the backend team",
+      "document the first week checklist for new team members",
+      "write architecture overview documentation for onboarding new developers",
+      "create a troubleshooting FAQ for the common local development issues"
+    ]
+  },
+  {
+    "agent_type": "changelog-generator",
+    "patterns": [
+      "generate the changelog for the v2.1.0 release from the commit history",
+      "configure git-cliff to produce formatted release notes from Conventional Commits",
+      "write the breaking changes section of the release notes",
+      "automate changelog updates on every merge to the release branch",
+      "create the what's new section for the quarterly product release"
+    ]
+  },
+  {
+    "agent_type": "lambda-functions",
+    "patterns": [
+      "optimize Lambda cold start time by reducing the deployment package size",
+      "implement Lambda function with a custom layer for shared dependencies",
+      "configure Lambda power tuning to find the optimal memory setting",
+      "set up Lambda function to process S3 event notifications",
+      "enable Lambda SnapStart for the Java function to reduce cold starts"
+    ]
+  },
+  {
+    "agent_type": "step-functions",
+    "patterns": [
+      "design a Step Functions state machine for the order processing workflow",
+      "add Catch and Retry blocks to handle transient failures in the state machine",
+      "use Express workflow for the high-volume real-time processing pipeline",
+      "implement a parallel state to run validation steps concurrently",
+      "configure SDK integration to call DynamoDB directly from a state machine step"
+    ]
+  },
+  {
+    "agent_type": "dynamodb",
+    "patterns": [
+      "design single-table DynamoDB schema for the e-commerce order domain",
+      "select partition key and sort key to support all required access patterns",
+      "add a Global Secondary Index to support the order-by-customer query",
+      "configure DynamoDB on-demand capacity to handle unpredictable traffic",
+      "implement DynamoDB Streams processor to sync changes to Elasticsearch"
+    ]
+  },
+  {
+    "agent_type": "rds-aurora",
+    "patterns": [
+      "configure Aurora PostgreSQL cluster with read replicas for the analytics queries",
+      "set up RDS Proxy to pool connections for the Lambda functions",
+      "tune RDS parameter group for the write-heavy workload",
+      "perform major version upgrade of Aurora PostgreSQL using blue-green deployment",
+      "enable Performance Insights to diagnose the slow query on the RDS instance"
+    ]
+  },
+  {
+    "agent_type": "s3-buckets",
+    "patterns": [
+      "configure S3 bucket policy to restrict access to specific VPC endpoints only",
+      "set up S3 lifecycle rule to transition old objects to Glacier",
+      "enable S3 cross-region replication for disaster recovery",
+      "configure S3 Object Lock for immutable audit log retention",
+      "set up S3 event notification to trigger the processing Lambda"
+    ]
+  },
+  {
+    "agent_type": "sqs-queues",
+    "patterns": [
+      "design SQS FIFO queue for ordered processing of payment events",
+      "configure visibility timeout and dead-letter queue for the order consumer",
+      "implement SQS Lambda event source mapping with batch size tuning",
+      "handle large message payloads by storing them in S3 with SQS metadata pointer",
+      "configure SQS message deduplication for the idempotent payment processor"
+    ]
+  },
+  {
+    "agent_type": "sns-topics",
+    "patterns": [
+      "configure SNS subscription filter policies for targeted notification delivery",
+      "implement SNS fan-out to multiple SQS queues for parallel processing",
+      "set up SNS FIFO topic for the ordered event distribution",
+      "add message attribute filtering to the SNS subscription",
+      "choose between SNS and EventBridge for the real-time notification routing"
+    ]
+  },
+  {
+    "agent_type": "eventbridge",
+    "patterns": [
+      "configure EventBridge rules to route order events to processing services",
+      "use EventBridge Pipes to filter and enrich events before routing",
+      "set up custom EventBridge event bus for domain event isolation",
+      "configure cross-account EventBridge event sharing between platform and tenant accounts",
+      "implement event replay from the EventBridge archive for data recovery"
+    ]
+  },
+  {
+    "agent_type": "ecr-registry",
+    "patterns": [
+      "configure ECR lifecycle policy to delete untagged images older than 30 days",
+      "enable ECR enhanced scanning with Inspector for continuous vulnerability monitoring",
+      "enforce immutable image tags in the production ECR repository",
+      "set up cross-account ECR pull permission for the staging account",
+      "configure ECR pull-through cache for Docker Hub base images"
+    ]
+  },
+  {
+    "agent_type": "ecs-fargate",
+    "patterns": [
+      "create ECS Fargate task definition for the stateless API service",
+      "configure ECS service auto-scaling based on CPU and request count metrics",
+      "set up ECS service discovery using AWS Cloud Map",
+      "configure Fargate Spot capacity provider for the cost-sensitive batch workloads",
+      "migrate the EC2 ECS service to Fargate to eliminate node management overhead"
+    ]
+  },
+  {
+    "agent_type": "parameter-store",
+    "patterns": [
+      "organize SSM Parameter Store hierarchy for multi-environment config management",
+      "store database connection string as a SecureString parameter in SSM",
+      "configure application to load all parameters by path prefix at startup",
+      "set up parameter store access policy for the ECS task execution role",
+      "migrate from hardcoded config files to SSM Parameter Store"
+    ]
+  },
+  {
+    "agent_type": "incident-response",
+    "patterns": [
+      "triage the P1 incident where the checkout service is returning 500 errors",
+      "coordinate the incident response for the database outage",
+      "create the post-mortem for last night's authentication service degradation",
+      "run the on-call playbook for the high-latency alert on the payment service",
+      "identify the blast radius of the configuration change that caused the incident"
+    ]
+  },
+  {
+    "agent_type": "capacity-planning",
+    "patterns": [
+      "forecast the infrastructure capacity needed for the holiday traffic spike",
+      "calculate the correct HPA thresholds for the API service scaling",
+      "right-size the RDS instance based on the last 30 days of usage metrics",
+      "estimate the cost of scaling the EKS cluster to handle 2x current traffic",
+      "determine the safe headroom percentage for the node group auto-scaling"
+    ]
+  },
+  {
+    "agent_type": "dependency-updates",
+    "patterns": [
+      "configure Renovate to auto-merge patch updates for low-risk dependencies",
+      "update the major version of the ORM library with a migration guide",
+      "set up Dependabot to group security updates into a single pull request",
+      "bump all Python dependencies to their latest compatible versions",
+      "configure Renovate schedule to batch dependency updates weekly"
+    ]
+  },
+  {
+    "agent_type": "logging-structured",
+    "patterns": [
+      "implement structured JSON logging with correlation ID propagation in the service",
+      "add request context to all log lines for better traceability",
+      "configure log levels correctly to avoid debug logs in production",
+      "redact PII fields from the structured logs before shipping to CloudWatch",
+      "write CloudWatch Logs Insights queries for the structured log fields"
+    ]
+  },
+  {
+    "agent_type": "react-components",
+    "patterns": [
+      "build a reusable data table component with sorting and filtering",
+      "implement a form with client-side validation using React Hook Form",
+      "optimize the product list component to prevent unnecessary re-renders",
+      "add accessibility attributes to the custom dropdown component",
+      "manage global state for the shopping cart using Zustand"
+    ]
+  },
+  {
+    "agent_type": "system-design",
+    "patterns": [
+      "design a scalable notification system to handle 10 million users",
+      "choose the right consistency model for the distributed shopping cart",
+      "design a URL shortener with high availability and low latency",
+      "architect the event sourcing system for the order management domain",
+      "design the multi-tenant data isolation strategy for the SaaS platform"
+    ]
+  },
+  {
+    "agent_type": "scrum-master",
+    "patterns": [
+      "facilitate the sprint planning session for the upcoming two-week sprint",
+      "run the retrospective to identify what slowed down the team this sprint",
+      "track the velocity trend and help the team improve acceptance criteria quality",
+      "resolve the impediment blocking the backend team's standup progress",
+      "define the definition of done for the new feature stories"
+    ]
+  },
+  {
+    "agent_type": "orchestrator",
+    "patterns": [
+      "coordinate the full-stack implementation of the new user authentication feature",
+      "delegate the multi-service refactoring across the platform team",
+      "orchestrate the parallel security audit and performance optimization sprint",
+      "manage the complex multi-agent workflow for the database migration project",
+      "coordinate specialists to implement and deploy the new payment integration end-to-end"
+    ]
+  }
+]

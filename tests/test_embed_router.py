@@ -410,3 +410,208 @@ class TestHooksRouteEmbeddingIntegration:
         assert result["routing_method"] == "embedding"
         assert result["tier"] == "full"
         assert result["recommended_model"] == "claude-opus-4-6"
+
+
+# ---------------------------------------------------------------------------
+# EmbeddingRouter.load_seed_patterns
+# ---------------------------------------------------------------------------
+
+_SEED_DDL = """
+CREATE TABLE IF NOT EXISTS patterns (
+    id TEXT PRIMARY KEY,
+    task_type TEXT,
+    prompt_hash TEXT,
+    prompt_summary TEXT,
+    model TEXT,
+    agent_type TEXT,
+    cost_usd REAL,
+    duration_ms INTEGER,
+    success INTEGER DEFAULT 1,
+    output_summary TEXT,
+    embedding_id TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
+def _make_seed_db(tmp_path) -> Path:
+    """Create a temporary on-disk SQLite DB and return its path.
+
+    Using a named file rather than :memory: lets us open fresh connections
+    after load_seed_patterns() closes its own connection, avoiding the
+    Python 3.13 read-only ``close`` attribute issue on sqlite3.Connection.
+    """
+    db_path = tmp_path / "seed_test.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(_SEED_DDL)
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def _open_seed_conn(db_path: Path) -> sqlite3.Connection:
+    """Open a fresh read connection to the seed test DB."""
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+class TestLoadSeedPatterns:
+    """Tests for EmbeddingRouter.load_seed_patterns()."""
+
+    def test_inserts_patterns_into_db(self, tmp_path):
+        """Happy path: all 134 agent types in seed_patterns.json get rows inserted."""
+        db_path = _make_seed_db(tmp_path)
+
+        def _make_conn():
+            c = sqlite3.connect(str(db_path))
+            c.row_factory = sqlite3.Row
+            return c
+
+        with patch("cap.harness.embed_router._get_conn", side_effect=_make_conn), \
+             patch("cap.harness.embed_router.PatternEmbedder", None):
+            er = EmbeddingRouter()
+            count = er.load_seed_patterns()
+
+        # 134 agents × 5 patterns each = 670
+        assert count == 670
+        conn = _open_seed_conn(db_path)
+        rows = conn.execute("SELECT COUNT(*) FROM patterns WHERE task_type = 'seed'").fetchone()
+        conn.close()
+        assert rows[0] == 670
+
+    def test_skips_already_seeded_agents(self, tmp_path):
+        """Re-running without force should skip agents already fully seeded."""
+        db_path = _make_seed_db(tmp_path)
+
+        def _make_conn():
+            c = sqlite3.connect(str(db_path))
+            c.row_factory = sqlite3.Row
+            return c
+
+        with patch("cap.harness.embed_router._get_conn", side_effect=_make_conn), \
+             patch("cap.harness.embed_router.PatternEmbedder", None):
+            er = EmbeddingRouter()
+            first = er.load_seed_patterns()
+            second = er.load_seed_patterns()
+
+        assert first == 670
+        assert second == 0  # nothing new to insert
+
+    def test_force_reinserts_patterns(self, tmp_path):
+        """force=True bypasses per-hash dedup so all patterns are re-inserted."""
+        db_path = _make_seed_db(tmp_path)
+
+        def _make_conn():
+            c = sqlite3.connect(str(db_path))
+            c.row_factory = sqlite3.Row
+            return c
+
+        with patch("cap.harness.embed_router._get_conn", side_effect=_make_conn), \
+             patch("cap.harness.embed_router.PatternEmbedder", None):
+            er = EmbeddingRouter()
+            er.load_seed_patterns()
+            second = er.load_seed_patterns(force=True)
+
+        assert second == 670
+
+    def test_returns_zero_when_get_conn_unavailable(self):
+        """No crash when _get_conn is None."""
+        with patch("cap.harness.embed_router._get_conn", None), \
+             patch("cap.harness.embed_router.PatternEmbedder", None):
+            er = EmbeddingRouter()
+            count = er.load_seed_patterns()
+        assert count == 0
+
+    def test_returns_zero_when_seed_file_missing(self, tmp_path):
+        """Graceful degradation when seed_patterns.json cannot be read."""
+        db_path = _make_seed_db(tmp_path)
+
+        def _make_conn():
+            c = sqlite3.connect(str(db_path))
+            c.row_factory = sqlite3.Row
+            return c
+
+        with patch("cap.harness.embed_router._get_conn", side_effect=_make_conn), \
+             patch("cap.harness.embed_router.PatternEmbedder", None), \
+             patch("cap.harness.embed_router._pkg_files",
+                   side_effect=FileNotFoundError("no seed file")):
+            er = EmbeddingRouter()
+            count = er.load_seed_patterns()
+
+        assert count == 0
+
+    def test_agent_type_column_populated_correctly(self, tmp_path):
+        """Each inserted row must carry the correct agent_type value."""
+        db_path = _make_seed_db(tmp_path)
+
+        def _make_conn():
+            c = sqlite3.connect(str(db_path))
+            c.row_factory = sqlite3.Row
+            return c
+
+        with patch("cap.harness.embed_router._get_conn", side_effect=_make_conn), \
+             patch("cap.harness.embed_router.PatternEmbedder", None):
+            er = EmbeddingRouter()
+            er.load_seed_patterns()
+
+        conn = _open_seed_conn(db_path)
+        for agent_type in ("dev", "devops", "security", "orchestrator"):
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM patterns WHERE agent_type = ? AND task_type = 'seed'",
+                (agent_type,),
+            ).fetchone()
+            assert rows[0] == 5, f"{agent_type} should have 5 seed patterns"
+        conn.close()
+
+    def test_embedding_stored_when_embedder_available(self, tmp_path):
+        """When PatternEmbedder is available, embedding_id should be set on rows."""
+        db_path = _make_seed_db(tmp_path)
+
+        def _make_conn():
+            c = sqlite3.connect(str(db_path))
+            c.row_factory = sqlite3.Row
+            return c
+
+        mock_embedder = MagicMock()
+        type(mock_embedder).is_available = PropertyMock(return_value=True)
+        mock_embedder.store.return_value = "emb-id-xyz"
+
+        with patch("cap.harness.embed_router._get_conn", side_effect=_make_conn), \
+             patch("cap.harness.embed_router.PatternEmbedder", return_value=mock_embedder):
+            er = EmbeddingRouter()
+            count = er.load_seed_patterns()
+
+        assert count == 670
+        assert mock_embedder.store.call_count == 670
+
+        conn = _open_seed_conn(db_path)
+        rows = conn.execute(
+            "SELECT COUNT(*) FROM patterns WHERE embedding_id = 'emb-id-xyz'"
+        ).fetchone()
+        conn.close()
+        assert rows[0] == 670
+
+    def test_continues_when_embedding_fails_for_one_pattern(self, tmp_path):
+        """Embedding failure for individual patterns must not abort the batch."""
+        db_path = _make_seed_db(tmp_path)
+
+        def _make_conn():
+            c = sqlite3.connect(str(db_path))
+            c.row_factory = sqlite3.Row
+            return c
+
+        mock_embedder = MagicMock()
+        type(mock_embedder).is_available = PropertyMock(return_value=True)
+        mock_embedder.store.side_effect = [
+            RuntimeError("embed error") if i % 2 == 0 else f"emb-{i}"
+            for i in range(700)
+        ]
+
+        with patch("cap.harness.embed_router._get_conn", side_effect=_make_conn), \
+             patch("cap.harness.embed_router.PatternEmbedder", return_value=mock_embedder):
+            er = EmbeddingRouter()
+            count = er.load_seed_patterns()
+
+        # All 670 rows still inserted despite embedding errors
+        assert count == 670

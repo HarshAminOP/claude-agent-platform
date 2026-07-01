@@ -984,3 +984,260 @@ class TestToolDefinitions:
         tool = next(t for t in TOOL_DEFINITIONS if t["toolSpec"]["name"] == "knowledge_search")
         schema = tool["toolSpec"]["inputSchema"]["json"]
         assert "query" in schema["required"]
+
+
+# ---------------------------------------------------------------------------
+# ConversationResult — session_id field
+# ---------------------------------------------------------------------------
+
+class TestConversationResultSessionId:
+    def _make_result(self, **kwargs) -> ConversationResult:
+        defaults = dict(
+            agent_id="a1",
+            agent_type="dev",
+            model=MODEL_ALIASES["sonnet"],
+            response="hello",
+            error=None,
+            total_input_tokens=10,
+            total_output_tokens=5,
+            total_cost_usd=0.0,
+            duration_ms=100,
+            turns=1,
+        )
+        defaults.update(kwargs)
+        return ConversationResult(**defaults)
+
+    def test_session_id_defaults_to_none(self):
+        r = self._make_result()
+        assert r.session_id is None
+
+    def test_session_id_can_be_set(self):
+        r = self._make_result(session_id="sess-abc-123")
+        assert r.session_id == "sess-abc-123"
+
+    def test_session_id_not_propagated_to_execution_result(self):
+        """session_id is a ConversationResult concern only; ExecutionResult has no such field."""
+        r = self._make_result(session_id="sess-xyz")
+        er = r.to_execution_result()
+        assert not hasattr(er, "session_id")
+
+
+# ---------------------------------------------------------------------------
+# ConverseExecutor — agent_context integration
+# ---------------------------------------------------------------------------
+
+def _make_mock_shared_state(cache: dict = None):
+    """Build a minimal mock SharedState object."""
+    mock_state = MagicMock()
+    mock_state._cache = cache if cache is not None else {}
+
+    async def _get_all():
+        return dict(mock_state._cache)
+
+    mock_state.get_all = _get_all
+    mock_state._persist = MagicMock()
+    return mock_state
+
+
+def _make_agent_context(session_id: str = "sess-001", cache: dict = None):
+    """Build a minimal mock AgentContext."""
+    ctx = MagicMock()
+    ctx.session_id = session_id
+    ctx.shared_state = _make_mock_shared_state(cache or {})
+
+    async def _set_shared(key, value):
+        ctx.shared_state._cache[key] = value
+
+    ctx.set_shared = _set_shared
+    return ctx
+
+
+class TestConverseExecutorAgentContext:
+    """Tests for the optional agent_context parameter on execute()."""
+
+    # --- backward compatibility ---
+
+    def test_no_agent_context_behavior_unchanged(self):
+        """Omitting agent_context must produce identical results to before."""
+        client = MagicMock()
+        client.converse.return_value = _converse_response("normal result")
+        ex = _make_executor(client)
+
+        r = ex.execute("a1", "dev", "do work")
+        assert r.response == "normal result"
+        assert r.error is None
+        assert r.session_id is None
+
+    def test_none_agent_context_identical_to_omitted(self):
+        client = MagicMock()
+        client.converse.return_value = _converse_response("same result")
+        ex = _make_executor(client)
+
+        r = ex.execute("a1", "dev", "task", agent_context=None)
+        assert r.response == "same result"
+        assert r.session_id is None
+
+    # --- session_id propagation ---
+
+    def test_session_id_set_on_result_when_context_provided(self):
+        client = MagicMock()
+        client.converse.return_value = _converse_response("done")
+        ex = _make_executor(client)
+        ctx = _make_agent_context(session_id="sess-42")
+
+        r = ex.execute("a1", "dev", "task", agent_context=ctx)
+        assert r.session_id == "sess-42"
+
+    def test_session_id_none_when_no_context(self):
+        client = MagicMock()
+        client.converse.return_value = _converse_response("done")
+        ex = _make_executor(client)
+
+        r = ex.execute("a1", "dev", "task")
+        assert r.session_id is None
+
+    # --- shared state context injection ---
+
+    def test_prior_step_results_injected_into_prompt(self):
+        """step.*.result keys in shared state must appear in the converse call."""
+        client = MagicMock()
+        client.converse.return_value = _converse_response("ok")
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context(cache={
+            "step.1.result": "output from step one",
+            "step.2.result": "output from step two",
+            "irrelevant.key": "should not appear",
+        })
+
+        ex.execute("a1", "dev", "final task", agent_context=ctx)
+        call_kwargs = client.converse.call_args[1]
+        content_text = call_kwargs["messages"][0]["content"][0]["text"]
+        assert "output from step one" in content_text
+        assert "output from step two" in content_text
+        assert "irrelevant.key" not in content_text
+
+    def test_empty_shared_state_no_context_injected(self):
+        """Empty shared state must not prepend anything to the prompt."""
+        client = MagicMock()
+        client.converse.return_value = _converse_response("ok")
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context(cache={})
+
+        ex.execute("a1", "dev", "my prompt", agent_context=ctx)
+        call_kwargs = client.converse.call_args[1]
+        content_text = call_kwargs["messages"][0]["content"][0]["text"]
+        # No ## Context header should be injected from shared state
+        assert content_text == "my prompt"
+
+    def test_shared_state_context_combined_with_explicit_context(self):
+        """Explicit context param and shared-state context must both appear."""
+        client = MagicMock()
+        client.converse.return_value = _converse_response("ok")
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context(cache={"step.1.result": "from prior step"})
+
+        ex.execute("a1", "dev", "task", context="explicit context", agent_context=ctx)
+        call_kwargs = client.converse.call_args[1]
+        content_text = call_kwargs["messages"][0]["content"][0]["text"]
+        assert "from prior step" in content_text
+        assert "explicit context" in content_text
+
+    def test_no_step_result_keys_means_no_injection(self):
+        """Keys that don't match step.*.result pattern must not be injected."""
+        client = MagicMock()
+        client.converse.return_value = _converse_response("ok")
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context(cache={
+            "agent.a1.result": "prior agent result",
+            "config.key": "some config",
+        })
+
+        ex.execute("a1", "dev", "clean prompt", agent_context=ctx)
+        call_kwargs = client.converse.call_args[1]
+        content_text = call_kwargs["messages"][0]["content"][0]["text"]
+        assert content_text == "clean prompt"
+
+    # --- result publishing to shared state ---
+
+    def test_result_published_to_shared_state_on_success(self):
+        """After success, agent.<agent_id>.result key must be set in the cache."""
+        client = MagicMock()
+        client.converse.return_value = _converse_response("final answer")
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context()
+        ex.execute("my-agent", "dev", "task", agent_context=ctx)
+
+        assert ctx.shared_state._cache.get("agent.my-agent.result") == "final answer"
+
+    def test_result_not_published_on_error(self):
+        """On error, the shared state must not be updated."""
+        client = MagicMock()
+        client.converse.side_effect = _client_error("ThrottlingException")
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context()
+        with patch("time.sleep"):
+            ex.execute("my-agent", "dev", "task", agent_context=ctx)
+
+        assert "agent.my-agent.result" not in ctx.shared_state._cache
+
+    def test_result_truncated_at_2000_chars_in_shared_state(self):
+        """Results longer than 2000 chars must be truncated before storing."""
+        long_response = "x" * 5000
+        client = MagicMock()
+        client.converse.return_value = _converse_response(long_response)
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context()
+        ex.execute("a1", "dev", "task", agent_context=ctx)
+
+        stored = ctx.shared_state._cache.get("agent.a1.result", "")
+        assert len(stored) == 2000
+
+    # --- defensive: shared state errors never break execution ---
+
+    def test_shared_state_read_failure_does_not_fail_execution(self):
+        """If reading shared state raises, execution must still succeed."""
+        client = MagicMock()
+        client.converse.return_value = _converse_response("ok despite error")
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context()
+        # Make shared_state._cache raise on access
+        ctx.shared_state._cache = MagicMock()
+        ctx.shared_state._cache.__iter__ = MagicMock(side_effect=RuntimeError("DB down"))
+
+        r = ex.execute("a1", "dev", "task", agent_context=ctx)
+        assert r.response == "ok despite error"
+        assert r.error is None
+
+    def test_shared_state_write_failure_does_not_fail_execution(self):
+        """If writing to shared state raises, execution result must still be returned."""
+        client = MagicMock()
+        client.converse.return_value = _converse_response("result ok")
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context()
+        ctx.shared_state._persist = MagicMock(side_effect=OSError("disk full"))
+
+        r = ex.execute("a1", "dev", "task", agent_context=ctx)
+        assert r.response == "result ok"
+        assert r.error is None
+
+    def test_broken_session_id_attribute_does_not_fail_execution(self):
+        """If agent_context.session_id raises, result must still be returned."""
+        client = MagicMock()
+        client.converse.return_value = _converse_response("still works")
+        ex = _make_executor(client)
+
+        ctx = _make_agent_context()
+        type(ctx).session_id = property(lambda self: (_ for _ in ()).throw(AttributeError("no session")))
+
+        r = ex.execute("a1", "dev", "task", agent_context=ctx)
+        assert r.response == "still works"
+        assert r.error is None

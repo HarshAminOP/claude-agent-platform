@@ -29,6 +29,7 @@ Cold Start Flow (from CAP System Design v1 Section 10):
 import hashlib
 import importlib
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -48,6 +49,7 @@ from rich.table import Table
 from rich import box
 
 console = Console(stderr=True)
+logger = logging.getLogger("cap.cli.lifecycle")
 
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
@@ -1005,6 +1007,31 @@ def _quick_index_workspace(data_dir: Path, workspace: Path, repos: list[Path]) -
     return indexed
 
 
+# ── Routing seed patterns ─────────────────────────────────────────────────────
+
+def _load_routing_seed_patterns(data_dir: Path, force: bool = False) -> int:  # noqa: ARG001
+    """Load pre-computed routing seed patterns for cold-start bootstrap.
+
+    Delegates to ``EmbeddingRouter.load_seed_patterns()``.  Any failure is
+    caught and logged so a seed-load error never blocks ``cap init``.
+
+    Args:
+        data_dir: Platform data directory (unused directly; EmbeddingRouter
+            resolves the DB path internally via ``PLATFORM_DB_PATH``).
+        force:    Passed through to ``load_seed_patterns`` to force re-seed.
+
+    Returns:
+        Number of seed pattern rows inserted, or 0 on any error.
+    """
+    try:
+        from cap.harness.embed_router import EmbeddingRouter
+        router = EmbeddingRouter()
+        return router.load_seed_patterns(force=force)
+    except Exception as exc:
+        logger.warning("_load_routing_seed_patterns: failed: %s", exc)
+        return 0
+
+
 # ── Baseline corrections ─────────────────────────────────────────────────────
 
 _BASELINE_CORRECTIONS = [
@@ -1600,6 +1627,133 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         default="balanced",
     )
 
+    # ── Step 6: Indexing paths ───────────────────────────────────────────────
+    if non_interactive:
+        indexing_local_paths: list[str] = []
+    else:
+        console.print("\n[bold]Workspace Indexing Paths:[/bold]")
+        console.print("  [dim]Paths to scan for repos (comma-separated, or empty for CWD only).[/dim]")
+        console.print("  [dim]Example: /Users/you/projects, /Users/you/work/infra[/dim]\n")
+        paths_input = click.prompt(
+            "Paths to index (comma-separated, empty=CWD only)",
+            default="",
+            type=str,
+        )
+        if paths_input.strip():
+            indexing_local_paths = [
+                p.strip() for p in paths_input.split(",") if p.strip()
+            ]
+        else:
+            indexing_local_paths = []
+
+    # ── Step 7: Remote git endpoints ─────────────────────────────────────────
+    indexing_remotes: list[dict] = []
+    if non_interactive:
+        pass  # No remotes in non-interactive mode
+    else:
+        console.print("\n[bold]Remote Git Endpoints:[/bold]")
+        console.print("  [dim]Configure SSH-only git remotes for auto-cloning repos.[/dim]")
+        console.print("  [cyan]1[/cyan]. GitHub")
+        console.print("  [cyan]2[/cyan]. Bitbucket")
+        console.print("  [cyan]3[/cyan]. GitLab")
+        console.print("  [cyan]4[/cyan]. None (skip)")
+        console.print()
+
+        while True:
+            remote_choice = click.prompt(
+                "Add remote endpoint (1-4, or 'done' to finish)",
+                default="4",
+                type=str,
+            )
+            if remote_choice in ("4", "done", ""):
+                break
+
+            if remote_choice == "1":
+                remote_type = "github"
+                default_ssh = "git@github.com"
+            elif remote_choice == "2":
+                remote_type = "bitbucket"
+                default_ssh = "git@bitbucket.org"
+            elif remote_choice == "3":
+                remote_type = "gitlab"
+                default_ssh = "git@gitlab.com"
+            else:
+                console.print(f"  [yellow]Invalid choice: {remote_choice}[/yellow]")
+                continue
+
+            org_label = "group" if remote_type == "gitlab" else "org"
+            org_name = click.prompt(f"  {remote_type} {org_label} name", type=str)
+            ssh_endpoint = click.prompt(
+                f"  SSH endpoint", default=default_ssh, type=str
+            )
+            auto_clone = click.confirm("  Auto-clone new repos?", default=True)
+
+            remote_entry: dict = {
+                "type": remote_type,
+                "ssh_endpoint": ssh_endpoint,
+                "auto_clone": auto_clone,
+            }
+            if remote_type == "gitlab":
+                remote_entry["group"] = org_name
+            else:
+                remote_entry["org"] = org_name
+
+            indexing_remotes.append(remote_entry)
+            console.print(f"  [green]✓[/green] Added {remote_type}/{org_name}")
+            console.print()
+
+    # ── Step 8: Embedding model preference ───────────────────────────────────
+    if non_interactive:
+        embedding_provider = "bedrock"
+        embedding_model_id = "amazon.titan-embed-text-v2:0"
+        embedding_fallback = "sentence-transformers"
+        embedding_fallback_model = "all-MiniLM-L6-v2"
+        embedding_dimensions = 1024
+    else:
+        console.print("\n[bold]Embedding Model Preference:[/bold]")
+        console.print("  [cyan]1[/cyan]. titan-v2 — Amazon Titan Text Embeddings V2 (1024 dims, via Bedrock)")
+        console.print("  [cyan]2[/cyan]. cohere-v3 — Cohere Embed English V3 (1024 dims, via Bedrock)")
+        console.print("  [cyan]3[/cyan]. sentence-transformers — Local all-MiniLM-L6-v2 (384 dims, free)")
+        console.print("  [cyan]4[/cyan]. auto — Probe Bedrock, fall back to local if unavailable")
+        console.print()
+        emb_choice = click.prompt(
+            "Select embedding model (1-4)",
+            default="4",
+            type=str,
+        )
+
+        if emb_choice == "1":
+            embedding_provider = "bedrock"
+            embedding_model_id = "amazon.titan-embed-text-v2:0"
+            embedding_dimensions = 1024
+            embedding_fallback = "sentence-transformers"
+            embedding_fallback_model = "all-MiniLM-L6-v2"
+        elif emb_choice == "2":
+            embedding_provider = "bedrock"
+            embedding_model_id = "cohere.embed-english-v3"
+            embedding_dimensions = 1024
+            embedding_fallback = "sentence-transformers"
+            embedding_fallback_model = "all-MiniLM-L6-v2"
+        elif emb_choice == "3":
+            embedding_provider = "sentence-transformers"
+            embedding_model_id = "all-MiniLM-L6-v2"
+            embedding_dimensions = 384
+            embedding_fallback = "none"
+            embedding_fallback_model = ""
+        elif emb_choice == "4":
+            embedding_provider = "bedrock"
+            embedding_model_id = "amazon.titan-embed-text-v2:0"
+            embedding_dimensions = 1024
+            embedding_fallback = "sentence-transformers"
+            embedding_fallback_model = "all-MiniLM-L6-v2"
+            console.print("  [dim]Auto: will probe Bedrock at runtime, fall back to local if needed.[/dim]")
+        else:
+            embedding_provider = "bedrock"
+            embedding_model_id = "amazon.titan-embed-text-v2:0"
+            embedding_dimensions = 1024
+            embedding_fallback = "sentence-transformers"
+            embedding_fallback_model = "all-MiniLM-L6-v2"
+
     # ── Build config ─────────────────────────────────────────────────────────
     if provider == PROVIDER_AWS_BEDROCK:
         models = bedrock_models  # Set by probe or region defaults above
@@ -1620,6 +1774,24 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
             "backoff_base_s": 1.0,
             "default_max_tokens": 8192,
             "temperature": 0.7,
+        },
+        "indexing": {
+            "local_paths": indexing_local_paths,
+            "remotes": indexing_remotes,
+            "clone_base_path": str(Path.home() / ".claude-platform" / "repos"),
+            "exclude_patterns": ["node_modules", ".git", "vendor", "__pycache__", ".terraform", "dist", "build"],
+            "file_extensions": [".py", ".go", ".ts", ".tf", ".yaml", ".yml", ".json", ".md", ".sh", ".rs", ".hcl", ".toml", ".js"],
+            "max_file_size_kb": 512,
+            "reindex_interval_minutes": 360,
+        },
+        "embeddings": {
+            "provider": embedding_provider,
+            "model_id": embedding_model_id,
+            "dimensions": embedding_dimensions,
+            "fallback": embedding_fallback,
+            "fallback_model": embedding_fallback_model,
+            "region": aws_config.get("region", "eu-central-1") if provider == PROVIDER_AWS_BEDROCK else "eu-central-1",
+            "profile": aws_config.get("profile") if provider == PROVIDER_AWS_BEDROCK else None,
         },
     }
 
@@ -1652,6 +1824,11 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         console.print(f"  Base URL:     [cyan]{local_config.get('base_url', '')}[/cyan]")
     console.print(f"  Daily Budget: [cyan]${daily_budget:.2f}[/cyan]")
     console.print(f"  Model Tier:   [cyan]{tier}[/cyan]")
+    if indexing_local_paths:
+        console.print(f"  Indexing:     [cyan]{len(indexing_local_paths)} path(s)[/cyan]")
+    if indexing_remotes:
+        console.print(f"  Remotes:      [cyan]{len(indexing_remotes)} endpoint(s)[/cyan]")
+    console.print(f"  Embeddings:   [cyan]{embedding_provider}/{embedding_model_id}[/cyan]")
     console.print(f"\n  [green]✓[/green] Configuration written to {config_path}")
 
     return config
@@ -1822,7 +1999,7 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
     t_phase2 = time.time() - t_start
 
     # ══════════════════════════════════════════════════════════════════════════
-    # PHASE 3 (3-5s): Quick-index + recursive index workspace
+    # PHASE 3 (3-5s): Quick-index + intelligent index workspace
     # ══════════════════════════════════════════════════════════════════════════
     console.print(f"\n[bold cyan]Phase 3[/bold cyan] [dim]({t_phase2:.1f}s)[/dim] — Index workspace")
 
@@ -1837,9 +2014,7 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
         else:
             console.print(f"  [dim]─[/dim] No indexable files found in workspace (quick-index)")
 
-    # Recursive indexing — scans entire directory tree
-    from cap.lib.recursive_indexer import index_directory_tree
-    from cap.lib.harness_config import add_indexed_root, get_knowledge_config
+    from cap.lib.harness_config import add_indexed_root, get_knowledge_config, get_indexing_config
 
     knowledge_config = get_knowledge_config()
 
@@ -1850,40 +2025,90 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
         else:
             console.print(f"  [dim]...[/dim] {msg}")
 
+    # Intelligent indexing via IntelligentIndexer — discovery + understanding pipeline.
+    # Falls back to recursive_indexer when IntelligentIndexer is unavailable or Bedrock
+    # is unreachable (skip_llm_analysis=True ensures no hard Bedrock dependency at init).
+    intelligent_stats: dict = {"files_indexed": 0}
     try:
-        recursive_config = {
-            "data_dir": str(data_dir),
-            "extensions": set(knowledge_config.get("file_extensions", [])),
-            "exclude_dirs": set(knowledge_config.get("exclude_patterns", [])),
-            "max_file_size_kb": knowledge_config.get("max_file_size_kb", 500),
-            "batch_size": 100,
-            "workspace": str(workspace_path),
-        }
-        recursive_stats = index_directory_tree(
-            root=workspace_path,
-            config=recursive_config,
-            progress_callback=_progress_cb,
-        )
-        console.print(
-            f"  [green]✓[/green] Recursive index: {recursive_stats['files_indexed']} files indexed, "
-            f"{recursive_stats['repos_detected']} repos, "
-            f"{recursive_stats['graph_nodes_created']} graph nodes"
-        )
-        if recursive_stats.get("files_skipped_size", 0) > 0:
-            console.print(f"  [dim]─[/dim] {recursive_stats['files_skipped_size']} files skipped (too large)")
+        from cap.lib.intelligent_indexer import IntelligentIndexer, IndexerConfig
 
-        # Add workspace root to indexed_roots in harness config
+        indexing_cfg = get_indexing_config()
+        local_paths: list[str] = indexing_cfg.get("local_paths", [])
+        if not local_paths:
+            local_paths = [str(workspace_path)]
+
+        total_paths = len(local_paths)
+        completed_paths = 0
+
+        def _indexer_progress(msg: str, phase_cur: int, phase_tot: int) -> None:
+            console.print(f"  [dim]...[/dim] Analyzing repos... ({completed_paths}/{total_paths} complete) — {msg}")
+
+        indexer_config = IndexerConfig(
+            workspace_roots=local_paths,
+            full_reindex=force,
+            # Disable LLM analysis during init — it adds latency and requires
+            # Bedrock credentials that may not be configured yet.  The daemon
+            # will run a full analysis on the next scheduled reindex.
+            skip_llm_analysis=True,
+            skip_embedding=True,  # embeddings are handled by the daemon
+            incremental=not force,
+        )
+        indexer = IntelligentIndexer(indexer_config)
+        try:
+            indexer_run_stats = indexer.run_sync(progress_callback=_indexer_progress)
+            intelligent_stats["files_indexed"] = indexer_run_stats.files_indexed
+            intelligent_stats["repos_discovered"] = indexer_run_stats.repos_discovered
+            intelligent_stats["graph_nodes_created"] = indexer_run_stats.graph_nodes_created
+            console.print(
+                f"  [green]✓[/green] Intelligent index: {indexer_run_stats.files_indexed} files, "
+                f"{indexer_run_stats.repos_discovered} repos, "
+                f"{indexer_run_stats.graph_nodes_created} graph nodes"
+            )
+            if indexer_run_stats.errors:
+                console.print(
+                    f"  [yellow]![/yellow] {len(indexer_run_stats.errors)} non-fatal indexing error(s) — "
+                    "run `cap sync` for details"
+                )
+        finally:
+            indexer.close()
+
         add_indexed_root(str(workspace_path))
         console.print(f"  [green]✓[/green] Workspace root added to knowledge.indexed_roots")
 
     except Exception as exc:
-        console.print(f"  [yellow]![/yellow] Recursive indexing failed: {exc}")
-        console.print(f"  [dim]─[/dim] Quick-index results remain available")
-        # Ensure indexed_count reflects the quick-index only
-        recursive_stats = {"files_indexed": 0}
+        console.print(f"  [yellow]![/yellow] Intelligent indexing failed: {exc} — falling back to recursive indexer")
+        # Fall back to the legacy recursive indexer so init never leaves the
+        # knowledge base completely empty.
+        try:
+            from cap.lib.recursive_indexer import index_directory_tree
 
-    # Add recursive index count to total
-    indexed_count += recursive_stats.get("files_indexed", 0)
+            recursive_config = {
+                "data_dir": str(data_dir),
+                "extensions": set(knowledge_config.get("file_extensions", [])),
+                "exclude_dirs": set(knowledge_config.get("exclude_patterns", [])),
+                "max_file_size_kb": knowledge_config.get("max_file_size_kb", 500),
+                "batch_size": 100,
+                "workspace": str(workspace_path),
+            }
+            recursive_stats = index_directory_tree(
+                root=workspace_path,
+                config=recursive_config,
+                progress_callback=_progress_cb,
+            )
+            intelligent_stats["files_indexed"] = recursive_stats.get("files_indexed", 0)
+            console.print(
+                f"  [green]✓[/green] Fallback recursive index: {intelligent_stats['files_indexed']} files indexed"
+            )
+            try:
+                add_indexed_root(str(workspace_path))
+            except Exception:
+                pass
+        except Exception as fallback_exc:
+            console.print(f"  [yellow]![/yellow] Fallback indexing also failed: {fallback_exc}")
+            console.print(f"  [dim]─[/dim] Quick-index results remain available")
+
+    # Add intelligent index count to total
+    indexed_count += intelligent_stats.get("files_indexed", 0)
 
     # Load baseline corrections
     corrections_loaded = _load_baseline_corrections(data_dir, str(workspace_path))
@@ -1891,6 +2116,14 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
         console.print(f"  [green]✓[/green] {corrections_loaded} baseline corrections loaded")
     else:
         console.print(f"  [dim]─[/dim] Baseline corrections already present")
+
+    # Load routing seed patterns for cold-start bootstrap
+    console.print(f"  [dim]...[/dim] Loading routing seed patterns...")
+    seed_count = _load_routing_seed_patterns(data_dir, force=force)
+    if seed_count > 0:
+        console.print(f"  [green]✓[/green] {seed_count} routing seed patterns loaded")
+    else:
+        console.print(f"  [dim]─[/dim] Routing seed patterns already present")
 
     t_phase3 = time.time() - t_start
 

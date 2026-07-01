@@ -53,5 +53,33 @@
     "backoff_base_s": 1.0,
     "default_max_tokens": 8192,
     "temperature": 0.7
+  },
+  "indexing": {
+    "_comment": "Multi-path indexing configuration. local_paths lists workspace directories to scan. remotes defines git endpoints for auto-cloning.",
+    "local_paths": [],
+    "remotes": [
+      {
+        "_example": "Remove this entry and add your own remotes",
+        "type": "github",
+        "org": "__YOUR_ORG__",
+        "ssh_endpoint": "git@github.com",
+        "auto_clone": true
+      }
+    ],
+    "clone_base_path": "~/.claude-platform/repos",
+    "exclude_patterns": ["node_modules", ".git", "vendor", "__pycache__", ".terraform", "dist", "build"],
+    "file_extensions": [".py", ".go", ".ts", ".tf", ".yaml", ".yml", ".json", ".md", ".sh", ".rs", ".hcl", ".toml", ".js"],
+    "max_file_size_kb": 512,
+    "reindex_interval_minutes": 360
+  },
+  "embeddings": {
+    "_comment": "Embedding model configuration. Primary uses Bedrock Titan; fallback uses local sentence-transformers (no API calls).",
+    "provider": "bedrock",
+    "model_id": "amazon.titan-embed-text-v2:0",
+    "dimensions": 1024,
+    "fallback": "sentence-transformers",
+    "fallback_model": "all-MiniLM-L6-v2",
+    "region": "__SET_BY_CAP_INIT__",
+    "profile": null
   }
 }

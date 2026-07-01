@@ -2683,6 +2683,187 @@ def daemon_uninstall_cmd():
         console.print("[yellow]Could not uninstall service.[/yellow]")
 
 
+# ── cap index ─────────────────────────────────────────────────────────────────
+
+@cli.group()
+def index():
+    """Intelligent indexing pipeline management."""
+    pass
+
+
+@index.command("run")
+@click.option("--workspace", "-w", multiple=True, help="Workspace path(s) to index")
+@click.option("--full", is_flag=True, help="Full re-index (ignore incremental tracking)")
+@click.option("--skip-llm", is_flag=True, help="Skip LLM analysis")
+@click.option("--skip-embedding", is_flag=True, help="Skip embedding generation")
+@click.option("--budget", type=float, default=2.0, help="Max LLM budget in USD")
+@click.option("--quiet", "-q", is_flag=True, help="Minimal output")
+def index_run(workspace, full, skip_llm, skip_embedding, budget, quiet):
+    """Run intelligent indexing pipeline."""
+    from cap.lib.intelligent_indexer import IntelligentIndexer, IndexerConfig
+    from cap.lib.config import load_config
+
+    platform_config = load_config()
+
+    # Determine workspace roots
+    workspace_roots = list(workspace) if workspace else []
+    if not workspace_roots:
+        # Fall back to configured indexed_roots from harness config
+        from cap.lib.harness_config import load_harness_config
+        hc = load_harness_config()
+        workspace_roots = hc.get("knowledge", {}).get("indexed_roots", [])
+
+    if not workspace_roots:
+        console.print("[red]No workspace specified. Use --workspace or configure indexed_roots.[/red]")
+        raise SystemExit(1)
+
+    config = IndexerConfig(
+        workspace_roots=workspace_roots,
+        full_reindex=full,
+        skip_llm_analysis=skip_llm,
+        skip_embedding=skip_embedding,
+        budget_limit_usd=budget,
+    )
+
+    indexer = IntelligentIndexer(config=config, platform_config=platform_config)
+
+    def progress(msg, current, total):
+        if not quiet:
+            console.print(f"  [dim]{msg}[/dim] ({current}/{total})")
+
+    import asyncio
+    stats = asyncio.run(indexer.run(progress_callback=progress))
+
+    # Print summary
+    console.print(f"\n[bold green]Indexing complete[/bold green]")
+    console.print(f"  Repos discovered: {stats.repos_discovered}")
+    console.print(f"  Repos analyzed:   {stats.repos_analyzed}")
+    console.print(f"  Dependencies:     {stats.dependencies_resolved} resolved, {stats.dependencies_unresolved} unresolved")
+    console.print(f"  Graph:            {stats.graph_nodes_created} nodes, {stats.graph_edges_created} edges")
+    console.print(f"  Files indexed:    {stats.files_indexed}")
+    console.print(f"  LLM cost:         ${stats.llm_cost_usd:.4f}")
+    console.print(f"  Duration:         {stats.duration_seconds:.1f}s")
+    if stats.errors:
+        console.print(f"  [yellow]Errors: {len(stats.errors)}[/yellow]")
+        for err in stats.errors[:5]:
+            console.print(f"    [dim]{err}[/dim]")
+
+
+@index.command("status")
+def index_status():
+    """Show intelligent indexer status."""
+    from cap.lib.intelligent_indexer import IntelligentIndexer, IndexerConfig
+    from cap.lib.config import load_config
+
+    platform_config = load_config()
+    indexer = IntelligentIndexer(config=IndexerConfig(), platform_config=platform_config)
+    status = indexer.get_status()
+
+    console.print("[bold]Intelligent Indexer Status[/bold]")
+    console.print(f"  Last run:           {status.get('last_run_at', 'never')}")
+    console.print(f"  Repos tracked:      {status.get('repos_tracked', 0)}")
+    console.print(f"  Graph nodes:        {status.get('graph_nodes', 0)}")
+    console.print(f"  Graph edges:        {status.get('graph_edges', 0)}")
+    console.print(f"  Stale nodes:        {status.get('stale_nodes', 0)}")
+    console.print(f"  Total LLM cost:     ${status.get('total_cost_usd', 0):.4f}")
+
+
+@index.command("deps")
+@click.argument("repo_name", required=False)
+@click.option("--depth", type=int, default=2, help="Dependency depth")
+@click.option("--reverse", is_flag=True, help="Show reverse dependencies (who depends on this)")
+def index_deps(repo_name, depth, reverse):
+    """Show dependency graph for a repo or all repos."""
+    from cap.lib.intelligent_indexer import IntelligentIndexer, IndexerConfig
+    from cap.lib.config import load_config
+
+    platform_config = load_config()
+    indexer = IntelligentIndexer(config=IndexerConfig(), platform_config=platform_config)
+
+    if repo_name:
+        if reverse:
+            deps = indexer._knowledge_graph.get_dependents(repo_name)
+            console.print(f"[bold]Repos that depend on {repo_name}:[/bold]")
+        else:
+            deps = indexer._knowledge_graph.get_dependencies(repo_name, depth=depth)
+            console.print(f"[bold]Dependencies of {repo_name} (depth={depth}):[/bold]")
+        for dep in deps:
+            etype = dep.get('entity_type', '?')
+            ename = dep.get('entity_name', '?')
+            console.print(f"  {ename} \\[{etype}]")
+    else:
+        stats = indexer._knowledge_graph.get_stats()
+        console.print("[bold]Dependency Overview[/bold]")
+        for node_type, count in stats.get("nodes_by_type", {}).items():
+            console.print(f"  {node_type}: {count}")
+        console.print(f"\n  Total edges: {stats.get('total_edges', 0)}")
+
+
+@index.command("graph")
+@click.argument("query")
+@click.option("--type", "node_type", help="Filter by node type")
+@click.option("--limit", type=int, default=20, help="Max results")
+def index_graph(query, node_type, limit):
+    """Search the knowledge graph."""
+    from cap.lib.intelligent_indexer import IntelligentIndexer, IndexerConfig
+    from cap.lib.config import load_config
+
+    platform_config = load_config()
+    indexer = IntelligentIndexer(config=IndexerConfig(), platform_config=platform_config)
+
+    results = indexer._knowledge_graph.search(query, node_type=node_type, limit=limit)
+    console.print(f"[bold]Graph search: '{query}'[/bold] ({len(results)} results)")
+    for r in results:
+        meta = r.get("metadata", {})
+        summary = meta.get("summary", "")[:80] if meta else ""
+        etype = r.get('entity_type', '?')
+        ename = r.get('entity_name', '?')
+        console.print(f"  \\[{etype}] {ename}")
+        if summary:
+            console.print(f"    [dim]{summary}[/dim]")
+
+
+@index.command("daemon")
+@click.option("--interval", type=int, default=60, help="Re-index interval in minutes")
+@click.option("--stop", is_flag=True, help="Stop the daemon")
+def index_daemon(interval, stop):
+    """Start/stop the intelligent indexing daemon."""
+    if stop:
+        # Signal daemon to stop via lock file
+        from cap.lib.config import load_config
+        lock_file = load_config().locks_dir / "intelligent_indexer.lock"
+        if lock_file.exists():
+            lock_file.unlink()
+            console.print("[green]Daemon stop signal sent.[/green]")
+        else:
+            console.print("[yellow]No daemon running.[/yellow]")
+        return
+
+    from cap.lib.intelligent_indexer import IntelligentIndexer, IndexerConfig
+    from cap.lib.config import load_config
+    import asyncio
+
+    platform_config = load_config()
+    config = IndexerConfig(daemon_mode=True, daemon_interval_minutes=interval)
+
+    # Get workspace roots from config
+    from cap.lib.harness_config import load_harness_config
+    hc = load_harness_config()
+    config.workspace_roots = hc.get("knowledge", {}).get("indexed_roots", [])
+
+    if not config.workspace_roots:
+        console.print("[red]No workspace roots configured.[/red]")
+        raise SystemExit(1)
+
+    indexer = IntelligentIndexer(config=config, platform_config=platform_config)
+
+    console.print(f"[green]Starting indexing daemon (interval: {interval}m)[/green]")
+    try:
+        asyncio.run(indexer.run_daemon())
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Daemon stopped.[/yellow]")
+
+
 # ── Entrypoint ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

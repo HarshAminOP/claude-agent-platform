@@ -9,7 +9,7 @@ callers can fall back to FTS5-only search without raising.
 import asyncio
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import boto3
@@ -82,16 +82,26 @@ class EmbeddingClient:
     """
 
     def __init__(self, config: EmbeddingConfig = None) -> None:
+        self._fallback_provider: str = "sentence-transformers"
+        self._fallback_model: str = "all-MiniLM-L6-v2"
+        self._fallback_client: Optional["SentenceTransformerClient"] = None
+
         if config is None:
             try:
-                from cap.lib.harness_config import load_harness_config
-                hconfig = load_harness_config()
+                from cap.lib.harness_config import get_embeddings_config
+                emb_cfg = get_embeddings_config()
                 config = EmbeddingConfig(
-                    region=hconfig.get("aws", {}).get("region", "us-east-1"),
-                    profile=hconfig.get("aws", {}).get("profile"),
+                    model_id=emb_cfg.get("model_id", "amazon.titan-embed-text-v2:0"),
+                    dimensions=emb_cfg.get("dimensions", 1024),
+                    region=emb_cfg.get("region", "us-east-1"),
+                    profile=emb_cfg.get("profile"),
                 )
+                self._fallback_provider = emb_cfg.get("fallback", "sentence-transformers")
+                self._fallback_model = emb_cfg.get("fallback_model", "all-MiniLM-L6-v2")
             except Exception:
                 config = EmbeddingConfig()
+                self._fallback_provider = "sentence-transformers"
+                self._fallback_model = "all-MiniLM-L6-v2"
         self.config = config
         self._semaphore: Optional[asyncio.Semaphore] = None
         # None = not tested yet, True = last call succeeded, False = unavailable
@@ -131,7 +141,10 @@ class EmbeddingClient:
             any unrecoverable failure.
         """
         if self._client is None:
-            return None
+            return await self._fallback_embed(text)
+
+        if self._available is False:
+            return await self._fallback_embed(text)
 
         if not text or not text.strip():
             logger.debug("embed_single: empty text, returning None")
@@ -179,12 +192,12 @@ class EmbeddingClient:
 
                 elif code in _PERMANENT_ERROR_CODES:
                     logger.error(
-                        "Bedrock permanent error %s — embeddings unavailable: %s",
+                        "Bedrock permanent error %s — switching to fallback: %s",
                         code,
                         exc,
                     )
                     self._available = False
-                    return None
+                    return await self._fallback_embed(text)
 
                 else:
                     logger.error(
@@ -307,3 +320,144 @@ class EmbeddingClient:
         """
         delay = self.config.base_delay_s * (self.config.backoff_multiplier ** attempt)
         return min(delay, self.config.max_delay_s)
+
+    async def _fallback_embed(self, text: str) -> Optional[list[float]]:
+        """Attempt to embed using the configured fallback provider.
+
+        Initializes the fallback client lazily on first use. Returns None
+        if the fallback is unavailable or fails.
+        """
+        if self._fallback_provider != "sentence-transformers":
+            return None
+
+        if self._fallback_client is None:
+            self._fallback_client = SentenceTransformerClient(
+                model_name=self._fallback_model
+            )
+
+        if not self._fallback_client.is_available:
+            return None
+
+        try:
+            return await asyncio.to_thread(
+                self._fallback_client.embed_single_sync, text
+            )
+        except Exception as exc:
+            logger.warning("Fallback embedding failed: %s", exc)
+            return None
+
+
+class SentenceTransformerClient:
+    """Local embedding fallback using sentence-transformers library.
+
+    This client uses the sentence-transformers package to generate embeddings
+    locally without any API calls. It is used as a fallback when Bedrock is
+    unavailable (AccessDenied, ServiceUnavailable, etc.).
+
+    The sentence-transformers package is an OPTIONAL dependency. If not
+    installed, the client reports itself as unavailable and all methods
+    return None gracefully.
+
+    Usage::
+
+        client = SentenceTransformerClient(model_name="all-MiniLM-L6-v2")
+        if client.is_available:
+            vector = client.embed_single_sync("hello world")
+    """
+
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2") -> None:
+        """Initialize the sentence-transformers client.
+
+        Args:
+            model_name: HuggingFace model identifier. Default is
+                all-MiniLM-L6-v2 which produces 384-dim vectors and is ~80MB.
+        """
+        self._model_name = model_name
+        self._model = None
+        self._available: bool = False
+
+        try:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer(model_name)
+            self._available = True
+            logger.info(
+                "SentenceTransformerClient initialized: model=%s", model_name
+            )
+        except ImportError:
+            logger.info(
+                "sentence-transformers not installed — local fallback unavailable. "
+                "Install with: pip install sentence-transformers"
+            )
+        except Exception as exc:
+            logger.warning(
+                "SentenceTransformerClient init failed: %s", exc
+            )
+
+    @property
+    def is_available(self) -> bool:
+        """Whether the sentence-transformers model loaded successfully."""
+        return self._available
+
+    def embed_single_sync(self, text: str) -> Optional[list[float]]:
+        """Embed a single text synchronously.
+
+        Args:
+            text: The text to embed. Empty strings return None.
+
+        Returns:
+            A list of floats (the embedding vector) or None on failure.
+        """
+        if not self._available or self._model is None:
+            return None
+
+        if not text or not text.strip():
+            return None
+
+        try:
+            embedding = self._model.encode(text, convert_to_numpy=True)
+            return embedding.tolist()
+        except Exception as exc:
+            logger.warning(
+                "SentenceTransformer encode failed: %s", exc
+            )
+            return None
+
+    def embed_batch_sync(self, texts: list[str]) -> list[Optional[list[float]]]:
+        """Embed multiple texts synchronously in a single batch.
+
+        The sentence-transformers library handles batching internally
+        which is more efficient than calling encode() one at a time.
+
+        Args:
+            texts: List of strings to embed.
+
+        Returns:
+            List of embedding vectors (or None for failed texts).
+        """
+        if not self._available or self._model is None:
+            return [None] * len(texts)
+
+        if not texts:
+            return []
+
+        try:
+            embeddings = self._model.encode(texts, convert_to_numpy=True)
+            return [emb.tolist() for emb in embeddings]
+        except Exception as exc:
+            logger.warning(
+                "SentenceTransformer batch encode failed: %s", exc
+            )
+            return [None] * len(texts)
+
+    @property
+    def dimensions(self) -> int:
+        """Return the output dimensionality of the loaded model.
+
+        Returns 384 for all-MiniLM-L6-v2, or 0 if model is unavailable.
+        """
+        if self._model is not None:
+            try:
+                return self._model.get_sentence_embedding_dimension()
+            except Exception:
+                pass
+        return 0

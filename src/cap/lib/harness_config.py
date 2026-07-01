@@ -34,6 +34,37 @@ def _default_knowledge_config() -> dict:
     }
 
 
+def _default_indexing_config() -> dict:
+    """Return default multi-path indexing configuration."""
+    return {
+        "local_paths": [],
+        "remotes": [],
+        "clone_base_path": str(Path.home() / ".claude-platform" / "repos"),
+        "exclude_patterns": ["node_modules", ".git", "vendor", "__pycache__", ".terraform", "dist", "build"],
+        "file_extensions": [".py", ".go", ".ts", ".tf", ".yaml", ".yml", ".json", ".md", ".sh", ".rs", ".hcl", ".toml", ".js"],
+        "max_file_size_kb": 512,
+        "reindex_interval_minutes": 360,
+    }
+
+
+def _default_embeddings_config() -> dict:
+    """Return default embedding model configuration.
+
+    The region falls back to the ``AWS_DEFAULT_REGION`` environment variable
+    so the default works across any AWS region without code changes.
+    """
+    import os
+    return {
+        "provider": "bedrock",
+        "model_id": "amazon.titan-embed-text-v2:0",
+        "dimensions": 1024,
+        "fallback": "sentence-transformers",
+        "fallback_model": "all-MiniLM-L6-v2",
+        "region": os.environ.get("AWS_DEFAULT_REGION", DEFAULT_AWS_REGION),
+        "profile": None,
+    }
+
+
 def load_harness_config() -> dict:
     """Load the harness config, falling back to sensible defaults.
 
@@ -52,6 +83,12 @@ def load_harness_config() -> dict:
         # Ensure knowledge config is present (added in v0.6)
         if "knowledge" not in config:
             config["knowledge"] = _default_knowledge_config()
+        # Ensure indexing config is present (added in v0.8)
+        if "indexing" not in config:
+            config["indexing"] = _default_indexing_config()
+        # Ensure embeddings config is present (added in v0.8)
+        if "embeddings" not in config:
+            config["embeddings"] = _default_embeddings_config()
         return config
 
     # Fallback defaults — used when cap init hasn't been run yet.
@@ -83,6 +120,8 @@ def load_harness_config() -> dict:
             "temperature": 0.7,
         },
         "knowledge": _default_knowledge_config(),
+        "indexing": _default_indexing_config(),
+        "embeddings": _default_embeddings_config(),
     }
 
 
@@ -156,3 +195,46 @@ def is_path_under_indexed_root(path: str, config: dict | None = None) -> bool:
         if normalized.startswith(root):
             return True
     return False
+
+
+def get_indexing_config(config: dict | None = None) -> dict:
+    """Get the multi-path indexing configuration section.
+
+    Returns dict with keys: local_paths, remotes, clone_base_path,
+    exclude_patterns, file_extensions, max_file_size_kb, reindex_interval_minutes.
+    """
+    if config is None:
+        config = load_harness_config()
+    return config.get("indexing", _default_indexing_config())
+
+
+def get_embeddings_config(config: dict | None = None) -> dict:
+    """Get the embedding model configuration section.
+
+    Returns dict with keys: provider, model_id, dimensions, fallback,
+    fallback_model, region, profile.
+    """
+    if config is None:
+        config = load_harness_config()
+    return config.get("embeddings", _default_embeddings_config())
+
+
+def get_local_paths(config: dict | None = None) -> list[str]:
+    """Get the list of local workspace paths configured for indexing.
+
+    Returns an empty list if no paths are configured. Each path is
+    returned as-is from config (not resolved/expanded).
+    """
+    indexing = get_indexing_config(config)
+    return indexing.get("local_paths", [])
+
+
+def get_remotes(config: dict | None = None) -> list[dict]:
+    """Get the list of remote git endpoint configurations.
+
+    Each remote dict has keys: type (github/bitbucket/gitlab),
+    org or group, ssh_endpoint, auto_clone.
+    Returns an empty list if no remotes are configured.
+    """
+    indexing = get_indexing_config(config)
+    return indexing.get("remotes", [])

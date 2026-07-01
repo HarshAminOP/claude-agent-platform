@@ -10,7 +10,11 @@ keyword routing.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import uuid
+from importlib.resources import files as _pkg_files
 from typing import Optional
 
 logger = logging.getLogger("cap.harness.embed_router")
@@ -181,6 +185,131 @@ class EmbeddingRouter:
         except Exception as exc:
             logger.debug("EmbeddingRouter.route failed: %s", exc)
             return None
+
+    # ------------------------------------------------------------------
+    # Seed pattern loader
+    # ------------------------------------------------------------------
+
+    def load_seed_patterns(self, force: bool = False) -> int:
+        """Load seed patterns for cold-start bootstrap.
+
+        Reads ``cap/data/seed_patterns.json`` from the installed package,
+        checks whether patterns are already present for each agent type,
+        and inserts missing ones into the patterns table.  If the
+        ``PatternEmbedder`` is available, each pattern is also embedded so
+        vector-similarity routing works from the very first query.
+
+        Args:
+            force: When True, re-insert patterns even if they already exist.
+
+        Returns:
+            Number of new pattern rows inserted.
+        """
+        if _get_conn is None:
+            logger.debug("load_seed_patterns: _get_conn unavailable, skipping")
+            return 0
+
+        # Locate seed_patterns.json inside the installed package
+        seed_data: list[dict] = []
+        try:
+            seed_text = (_pkg_files("cap.data") / "seed_patterns.json").read_text(encoding="utf-8")
+            seed_data = json.loads(seed_text)
+        except Exception as exc:
+            logger.warning("load_seed_patterns: could not read seed_patterns.json: %s", exc)
+            return 0
+
+        try:
+            conn = _get_conn()
+        except Exception as exc:
+            logger.warning("load_seed_patterns: db unavailable: %s", exc)
+            return 0
+
+        # Resolve embedder once — None means embeddings are unavailable
+        embedder: Optional[object] = None
+        try:
+            if PatternEmbedder is not None:
+                _emb = PatternEmbedder()
+                if _emb.is_available:
+                    embedder = _emb
+        except Exception as exc:
+            logger.debug("load_seed_patterns: embedder unavailable: %s", exc)
+
+        inserted = 0
+        try:
+            for entry in seed_data:
+                agent_type = str(entry.get("agent_type", ""))
+                patterns: list[str] = entry.get("patterns", [])
+                if not agent_type or not patterns:
+                    continue
+
+                # Check if this agent type already has seed patterns present
+                if not force:
+                    existing = conn.execute(
+                        "SELECT COUNT(*) FROM patterns WHERE agent_type = ? AND task_type = 'seed'",
+                        (agent_type,),
+                    ).fetchone()
+                    if existing and existing[0] >= len(patterns):
+                        # Already fully seeded — skip
+                        continue
+
+                for prompt_summary in patterns:
+                    normalized = prompt_summary.strip().lower()[:200]
+                    prompt_hash = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+
+                    # Skip duplicates (same hash already in DB)
+                    if not force:
+                        dup = conn.execute(
+                            "SELECT id FROM patterns WHERE prompt_hash = ? AND task_type = 'seed'",
+                            (prompt_hash,),
+                        ).fetchone()
+                        if dup:
+                            continue
+
+                    pattern_id = uuid.uuid4().hex
+                    embedding_id: Optional[str] = None
+
+                    # Attempt to embed the pattern text
+                    if embedder is not None:
+                        try:
+                            embedding_id = embedder.store(
+                                pattern_id=pattern_id,
+                                text=prompt_summary,
+                            )
+                        except Exception as exc:
+                            logger.debug(
+                                "load_seed_patterns: embedding failed for '%s': %s",
+                                prompt_summary[:60],
+                                exc,
+                            )
+
+                    conn.execute(
+                        """INSERT INTO patterns
+                           (id, task_type, prompt_hash, prompt_summary, model, agent_type,
+                            cost_usd, duration_ms, success, output_summary, embedding_id,
+                            created_at)
+                           VALUES (?, 'seed', ?, ?, 'unknown', ?, 0.0, 0, 1, NULL, ?,
+                                   CURRENT_TIMESTAMP)""",
+                        (
+                            pattern_id,
+                            prompt_hash,
+                            str(prompt_summary)[:500],
+                            agent_type,
+                            embedding_id,
+                        ),
+                    )
+                    inserted += 1
+
+            conn.commit()
+        except Exception as exc:
+            logger.warning("load_seed_patterns: unexpected error: %s", exc)
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+        logger.info("load_seed_patterns: inserted %d seed patterns (force=%s)", inserted, force)
+        return inserted
 
     def recommend_model(self, agent_type: str, task: str = "") -> str:  # noqa: ARG002
         """Return the cheapest model with >=80% success rate for *agent_type*.

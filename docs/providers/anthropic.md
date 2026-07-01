@@ -1,42 +1,15 @@
-# Anthropic API Provider
+### Anthropic API Provider
 
-## Overview
+Direct API access. Uses `langchain-anthropic` ChatAnthropic.
 
-Direct access to Claude models via the Anthropic Messages API. Best for individual developers or teams without AWS infrastructure.
+#### Setup
 
-## Setup
-
-### 1. Get an API Key
-
-1. Go to [console.anthropic.com](https://console.anthropic.com)
-2. Navigate to API Keys
-3. Create a new key
-4. Copy the key (starts with `sk-ant-`)
-
-### 2. Set Environment Variable
-
+1. Set environment variable:
 ```bash
-export ANTHROPIC_API_KEY="sk-ant-api03-..."
+export ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-Add to your shell profile (`~/.zshrc`, `~/.bashrc`) for persistence:
-
-```bash
-echo 'export ANTHROPIC_API_KEY="sk-ant-api03-..."' >> ~/.zshrc
-```
-
-### 3. Initialize CAP
-
-```bash
-cap init
-# Select: anthropic-api
-# Confirm API key env var name (default: ANTHROPIC_API_KEY)
-```
-
-## Configuration
-
-In `~/.claude-platform/harness-config.json`:
-
+2. Configure provider in harness-config.json:
 ```json
 {
   "provider": "anthropic-api",
@@ -46,75 +19,44 @@ In `~/.claude-platform/harness-config.json`:
 }
 ```
 
-The API key is NEVER stored in config files. Only the environment variable name is stored.
+Or select during `cap init` wizard.
 
-### Custom Environment Variable
+#### Available Models
 
-If you use a different env var name:
+| Tier | Model ID | Notes |
+|------|----------|-------|
+| haiku | claude-haiku-4-5-20250501 | Fast, cheap |
+| sonnet | claude-sonnet-4-5-20250514 | Balanced |
+| opus | claude-opus-4-20250514 | Most capable |
 
+#### Embedding
+
+Anthropic does not provide an embedding API. Options:
+1. **Voyage AI** (recommended): set up separately if available
+2. **sentence-transformers** (default fallback): `all-MiniLM-L6-v2`, runs locally, 384 dimensions
+
+Configure fallback in harness-config.json:
 ```json
 {
-  "anthropic": {
-    "api_key_env": "MY_CLAUDE_KEY"
+  "embeddings": {
+    "fallback": "sentence-transformers"
   }
 }
 ```
 
-## Available Models
+#### When to Use
 
-| Tier | Model ID | Use Case |
-|:-----|:---------|:---------|
-| haiku | claude-haiku-4-5-20251001 | Fast tasks, docs, simple lookups |
-| sonnet | claude-sonnet-4-6 | General development, standard tasks |
-| opus | claude-opus-4-8 | Complex architecture, security review |
+- No AWS account available
+- Development/testing environments
+- Personal projects with API key
+- When Bedrock model access is restricted by SCP
 
-Models are automatically selected based on agent tier configuration.
+#### Limitations vs Bedrock
 
-## Rate Limits
+- No native embedding model (falls back to local)
+- API key management (env var, not IAM)
+- No SSO integration
+- Rate limits are per-key (not per-account)
 
-Anthropic applies rate limits per API key:
-
-| Limit Type | Free Tier | Scale Tier |
-|:-----------|:----------|:-----------|
-| Requests/min | 50 | 4,000 |
-| Input tokens/min | 40,000 | 400,000 |
-| Output tokens/min | 8,000 | 80,000 |
-
-CAP handles rate limiting automatically with exponential backoff (configurable in `execution.max_retries` and `execution.backoff_base_s`).
-
-## Cost
-
-Pricing (per 1M tokens):
-
-| Model | Input | Output |
-|:------|:------|:-------|
-| Haiku | $0.80 | $4.00 |
-| Sonnet | $3.00 | $15.00 |
-| Opus | $15.00 | $75.00 |
-
-Set daily limits via:
-```bash
-cap config set daily_budget_usd 10.0
-```
-
-## Limitations vs. Bedrock
-
-| Feature | Anthropic API | AWS Bedrock |
-|:--------|:--------------|:------------|
-| Semantic search (embeddings) | Not supported | Titan V2 included |
-| Auth method | API key | SSO/IAM/instance role |
-| Billing | Anthropic billing | AWS billing |
-| VPC access | Public internet | VPC endpoints available |
-| Audit trail | API logs | CloudTrail |
-
-When using the Anthropic API provider, semantic search is unavailable. CAP uses keyword + knowledge graph search instead (retrieval weights auto-adjust).
-
-## Troubleshooting
-
-| Error | Cause | Fix |
-|:------|:------|:----|
-| `AuthenticationError` | Invalid or missing key | Check `ANTHROPIC_API_KEY` is set correctly |
-| `RateLimitError` | Too many requests | CAP auto-retries; reduce concurrency if persistent |
-| `OverloadedError` | API overloaded | Transient; CAP retries automatically |
-| `InvalidRequestError` | Malformed request | Check model ID is valid |
-| Key not found | Env var not set | Set `ANTHROPIC_API_KEY` in shell profile |
+#### Cross-links
+Link to: [Configuration](../configuration.md), [Bedrock Provider](bedrock.md)
