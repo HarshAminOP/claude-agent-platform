@@ -147,20 +147,9 @@ class TestKnowledgeDBSection:
         result = _run_doctor({"CAP_HOME": str(temp_cap_home)})
         assert "Failed embeddings: 1" in result.output
 
-    def test_last_consolidation_never_when_no_consolidated_entries(self, temp_cap_home, knowledge_db):
+    def test_no_consolidation_query_on_knowledge_entries(self, temp_cap_home, knowledge_db):
         result = _run_doctor({"CAP_HOME": str(temp_cap_home)})
-        assert "Last consolidation: never" in result.output
-
-    def test_last_consolidation_shown_when_present(self, temp_cap_home, knowledge_db):
-        conn = sqlite3.connect(str(knowledge_db))
-        conn.execute(
-            "UPDATE knowledge_entries SET consolidated_into = 'x', updated_at = '2026-01-01' WHERE uuid = 'abc'"
-        )
-        conn.commit()
-        conn.close()
-
-        result = _run_doctor({"CAP_HOME": str(temp_cap_home)})
-        assert "Last consolidation: 2026-01-01" in result.output
+        assert "consolidated_into" not in result.output
 
 
 # ── Tests: Embedder section ───────────────────────────────────────────────────

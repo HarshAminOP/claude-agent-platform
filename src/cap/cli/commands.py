@@ -291,20 +291,12 @@ def doctor():
             failed_emb = conn.execute(
                 "SELECT COUNT(*) FROM knowledge_entries WHERE embedding_status = 'failed'"
             ).fetchone()[0]
-            # last consolidation — stored as updated_at on consolidated_into entries
-            last_consol_row = conn.execute(
-                "SELECT MAX(updated_at) FROM knowledge_entries WHERE consolidated_into IS NOT NULL"
-            ).fetchone()
             conn.close()
             click.echo(f"  {ok} Entries: {total}")
             if failed_emb == 0:
                 click.echo(f"  {ok} Failed embeddings: 0")
             else:
                 click.echo(f"  {warn} Failed embeddings: {failed_emb}")
-            if last_consol_row and last_consol_row[0]:
-                click.echo(f"  {ok} Last consolidation: {last_consol_row[0]}")
-            else:
-                click.echo(f"  {warn} Last consolidation: never")
         except Exception as exc:
             click.echo(f"  {err} Cannot query knowledge.db: {exc}")
 
