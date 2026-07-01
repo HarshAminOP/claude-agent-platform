@@ -1,9 +1,0 @@
-{
-  "template_version": "2.0",
-  "generated_at": "2026-07-01T03:55:10.821093+00:00",
-  "file_hashes": {
-    ".harness/mcp-policy.json": "f2353297b4f9fad5fa9d9fcbac78186e88682ba1621452712252a517e4580324",
-    "pyproject.toml": "3a1564b16393e7c6990b42c50e936b3bcf54bdc4e0e8ae38c02885b6edfe7d2e",
-    "src/cap/harness/__init__.py": "61111499ddbbaecb96bf23a960d2921efbb8aa3a293da37647e78cb84eb38e01"
-  }
-}

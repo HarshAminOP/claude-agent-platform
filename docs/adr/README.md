@@ -19,9 +19,7 @@ This directory contains Architecture Decision Records (ADRs) documenting key des
 | [ADR-011](ADR-011-adaptive-routing.md) | 3-tier adaptive complexity routing | Accepted | 2026-06-30 |
 | [ADR-012](ADR-012-unified-database.md) | Single SQLite database with WAL mode | Accepted | 2026-06-30 |
 | [ADR-013](ADR-013-dag-execution.md) | DAG-based task decomposition (parallel where deps allow) | Accepted | 2026-06-30 |
-| [ADR-014](ADR-014-consensus-protocol.md) | Domain-weighted consensus for agent disagreements | Accepted | 2026-06-30 |
 | [ADR-015](ADR-015-circuit-breakers.md) | Per-agent-type circuit breakers prevent cascade failures | Accepted | 2026-06-30 |
-| [ADR-016](ADR-016-checkpoint-resume.md) | Checkpoint at plan-complete + after each agent; resume from last good state | Accepted | 2026-06-30 |
 | [ADR-017](ADR-017-code-intelligence.md) | Tree-sitter based code graph (ast-grep, HCL excluded) | Accepted | 2026-06-30 |
 | [ADR-018](ADR-018-auto-sync.md) | Automatic knowledge freshness (5 sync triggers) | Accepted | 2026-06-30 |
 | [ADR-019](ADR-019-degree-aware-graph.md) | Hub-aware graph traversal (two-phase BFS) | Accepted | 2026-06-30 |
@@ -53,11 +51,9 @@ These ADRs follow MADR (Markdown Architecture Decision Records) format with:
 - ADR-011 (adaptive routing) — INLINE/LIGHTWEIGHT/FULL with learning
 - ADR-012 (unified database) — single cap.db replaces 4 separate DBs
 
-**For Week 2 (orchestration layer — DAG, consensus, resilience, persistence):**
+**For Week 2 (orchestration layer — DAG, resilience, harness):**
 - ADR-013 (DAG execution) — tasks decompose into dependency DAGs, parallel where deps allow
-- ADR-014 (consensus protocol) — domain-weighted authority + judge escalation for disagreements
 - ADR-015 (circuit breakers) — per-agent-type breakers prevent cascade failures
-- ADR-016 (checkpoint resume) — checkpoint at plan-complete + after each agent, resume from last good state
 
 **For Week 3 (code intelligence + knowledge freshness + graph performance):**
 - ADR-017 (code intelligence) — ast-grep/tree-sitter for symbol extraction, HCL excluded

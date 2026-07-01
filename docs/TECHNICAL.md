@@ -60,11 +60,11 @@ That's it. Claude Code will auto-discover the MCP servers on next launch.
 │   │                                                    │                        │
 │   │  orchestration/   memory/        enforcement/      │                        │
 │   │   router.py        scorer.py      passthrough.py   │                        │
-│   │   context.py       manager.py                      │                        │
-│   │   scratchpad.py    eviction.py   learning/         │                        │
-│   │                    consolidation  engine.py        │                        │
-│   │  cost/            runtime/        integrity/       │                        │
-│   │   tracker.py       offline.py     witness.py       │                        │
+│   │   dag.py           manager.py                      │                        │
+│   │                    eviction.py   learning/         │                        │
+│   │  harness/         consolidation  engine.py        │                        │
+│   │   executor.py     cost/           integrity/       │                        │
+│   │   agent_store.py   tracker.py     witness.py       │                        │
 │   │                                                    │                        │
 │   │  db.py (unified SQLite, WAL mode)                  │                        │
 │   └────────────────────────┬───────────────────────────┘                        │
@@ -202,7 +202,7 @@ Three MCP servers (long-lived) and two hook scripts (short-lived, per-tool-call)
 
 | Component | Type | Database | Capabilities |
 |-----------|------|----------|-------------|
-| `cap-orchestrator` | MCP Server | `~/.cap/cap.db` | Routing, delegation, checkpoint, learning |
+| `cap-orchestrator` | MCP Server | `~/.cap/cap.db` | Routing, delegation, DAG execution, learning |
 | `cap-memory` | MCP Server | `~/.cap/cap.db` | 3-tier memory CRUD, search, scoring, eviction |
 | `cap-code-intel` | MCP Server | `~/.cap/cap.db` | AST queries, graph traversal, blast radius |
 | `pretool.py` | PreToolUse Hook | `~/.cap/cap.db` | Hard enforcement (exit 2), delegation tracking |
@@ -401,23 +401,28 @@ claude-agent-platform/
 │   ├── orchestration/          # Complexity routing and multi-agent delegation
 │   │   ├── __init__.py
 │   │   ├── router.py          # 3-tier adaptive routing (INLINE/LIGHTWEIGHT/FULL)
-│   │   ├── context.py         # Inter-agent context passing protocol (ContextFrame)
-│   │   └── scratchpad.py      # Inter-agent artifact sharing (temp files + refs)
+│   │   └── dag.py             # DAG-based workflow step execution
+│   ├── harness/                # Execution harness (Bedrock, agents, swarms)
+│   │   ├── agent_store.py     # Persistent agent lifecycle (SQLite)
+│   │   ├── executor.py        # Direct Bedrock API execution
+│   │   ├── cost_meter.py      # Per-agent cost attribution
+│   │   ├── hooks.py           # Intelligent routing and pattern learning
+│   │   ├── swarm.py           # Multi-agent topology management
+│   │   ├── coordination.py    # Load balancing and consensus
+│   │   ├── governance.py      # Policy enforcement and audit
+│   │   └── daemon.py          # Background maintenance tasks
 │   ├── learning/               # Self-improvement from routing outcomes
 │   │   ├── __init__.py
 │   │   └── engine.py          # Record outcomes, recalculate thresholds, adapt
 │   ├── cost/                   # Budget enforcement and tracking
 │   │   ├── __init__.py
 │   │   └── tracker.py         # Token usage, cost estimates, budget checks
-│   ├── runtime/                # Environment detection and mode switching
-│   │   ├── __init__.py
-│   │   └── offline.py         # Network/budget state detection, graceful degradation
 │   ├── integrity/              # Audit and verification
 │   │   ├── __init__.py
 │   │   └── witness.py         # Cryptographic audit trail for enforcement actions
 │   ├── mcp/                    # MCP servers (stdio JSON-RPC, long-lived)
 │   │   ├── __init__.py
-│   │   ├── orchestrator.py    # Orchestration tools (route, delegate, checkpoint)
+│   │   ├── orchestrator.py    # Orchestration tools (route, delegate, status)
 │   │   ├── memory.py          # Memory tools (store, recall, search, evict)
 │   │   └── code_intel.py      # Code tools (structure, dependents, blast radius)
 │   ├── cli/                    # Click + Rich CLI application

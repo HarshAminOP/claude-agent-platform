@@ -1765,12 +1765,12 @@ src/cap/
 │   └── dlq.py                            # Dead-letter queue for failed tasks
 ├── lib/                                   # Shared library modules
 │   ├── __init__.py
-│   ├── api_gateway.py                    # API rate limiting and concurrency
 │   ├── autonomy.py                       # Progressive autonomy engine
 │   ├── backlog.py                        # Task backlog operations
 │   ├── blast_radius.py                   # Blast radius assessment
 │   ├── config.py                         # Config model and loader
-│   ├── dashboard.py                      # Real-time TUI dashboard
+│   ├── chunker.py                        # Sentence-aware text chunking
+│   ├── consolidator.py                   # 6-phase DB consolidation
 │   ├── db_init.py                        # Database initialization
 │   ├── db_maintenance.py                 # DB maintenance (checkpoint, vacuum, doctor)
 │   ├── decision_cards.py                 # Structured decision cards
@@ -1789,7 +1789,9 @@ src/cap/
 │   ├── security.py                       # Input sanitization
 │   ├── sync_engine.py                    # File-level sync operations
 │   ├── team_renderer.py                  # Team conversation rendering
-│   ├── workflow_hooks.py                 # Workflow lifecycle hooks
+│   ├── dedup.py                          # SHA-256 content deduplication
+│   ├── embed_cache.py                    # Persistent embedding LRU cache
+│   ├── secret_scanner.py                 # Pre-ingest secret detection
 │   └── workflow_observer.py              # Workflow event polling
 ├── cli/                                   # CLI application
 │   ├── __init__.py
@@ -1926,7 +1928,7 @@ def create_database(path: str) -> sqlite3.Connection:
 ### Phase 1: Workflow Engine (COMPLETE)
 
 - [x] Shared models (`models.py`)
-- [x] API Gateway with adaptive concurrency (`api_gateway.py`)
+- [x] Embedding client with retry and rate limiting (`embeddings.py`)
 - [x] Workflow MCP server (6 tools)
 - [x] Budget enforcement + kill switch
 - [x] 8 integration tests passing
