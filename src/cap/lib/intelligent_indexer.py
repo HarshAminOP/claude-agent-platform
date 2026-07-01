@@ -257,7 +257,7 @@ class IntelligentIndexer:
         self._dependency_resolver = None
         if _DEPENDENCY_RESOLVER_AVAILABLE:
             try:
-                self._dependency_resolver = DependencyResolver()
+                self._dependency_resolver = DependencyResolver(self._db)
             except Exception as exc:
                 logger.warning("DependencyResolver init failed: %s", exc)
 

@@ -98,11 +98,6 @@ class UnderstandingConfig:
                 models = cfg.get("models", {})
                 embeddings = cfg.get("embeddings", {})
                 aws = cfg.get("aws", {})
-                # Prefer config-supplied model IDs; fall back to safe cross-region IDs
-                if not self.analysis_model:
-                    self.analysis_model = models.get("haiku") or "anthropic.claude-haiku-4-5-20251001-v1:0"
-                if not self.complex_model:
-                    self.complex_model = models.get("sonnet") or "anthropic.claude-sonnet-4-6-20250929-v1:0"
                 if not self.region:
                     self.region = (
                         embeddings.get("region")
@@ -111,14 +106,40 @@ class UnderstandingConfig:
                     )
                 if self.profile is None:
                     self.profile = aws.get("profile") or None
-            except Exception:
-                # harness config unavailable — use safe cross-region fallbacks
+                # Apply region prefix to model IDs
+                prefix = self._region_prefix(self.region)
                 if not self.analysis_model:
-                    self.analysis_model = "anthropic.claude-haiku-4-5-20251001-v1:0"
+                    raw = models.get("haiku") or "anthropic.claude-haiku-4-5-20251001-v1:0"
+                    self.analysis_model = self._apply_prefix(raw, prefix)
                 if not self.complex_model:
-                    self.complex_model = "anthropic.claude-sonnet-4-6-20250929-v1:0"
+                    raw = models.get("sonnet") or "anthropic.claude-sonnet-4-6-20250929-v1:0"
+                    self.complex_model = self._apply_prefix(raw, prefix)
+            except Exception:
                 if not self.region:
                     self.region = "us-east-1"
+                prefix = self._region_prefix(self.region)
+                if not self.analysis_model:
+                    self.analysis_model = f"{prefix}.anthropic.claude-haiku-4-5-20251001-v1:0"
+                if not self.complex_model:
+                    self.complex_model = f"{prefix}.anthropic.claude-sonnet-4-6-20250929-v1:0"
+
+    @staticmethod
+    def _region_prefix(region: str) -> str:
+        """Map AWS region to Bedrock model ID prefix."""
+        if region.startswith("eu"):
+            return "eu"
+        if region.startswith("ap"):
+            return "ap"
+        return "us"
+
+    @staticmethod
+    def _apply_prefix(model_id: str, prefix: str) -> str:
+        """Strip existing region prefix and apply the correct one."""
+        for p in ("us.", "eu.", "ap."):
+            if model_id.startswith(p):
+                model_id = model_id[len(p):]
+                break
+        return f"{prefix}.{model_id}"
 
 
 # ---------------------------------------------------------------------------
