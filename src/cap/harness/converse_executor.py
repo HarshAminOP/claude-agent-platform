@@ -716,7 +716,10 @@ class ConverseExecutor:
         }
 
         try:
-            final_state = compiled.invoke(initial_state)
+            final_state = compiled.invoke(
+                initial_state,
+                {"recursion_limit": max_iterations * 3}
+            )
 
             all_messages = final_state["messages"]
             last_ai_message = None

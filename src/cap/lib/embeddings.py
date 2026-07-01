@@ -82,7 +82,17 @@ class EmbeddingClient:
     """
 
     def __init__(self, config: EmbeddingConfig = None) -> None:
-        self.config = config or EmbeddingConfig()
+        if config is None:
+            try:
+                from cap.lib.harness_config import load_harness_config
+                hconfig = load_harness_config()
+                config = EmbeddingConfig(
+                    region=hconfig.get("aws", {}).get("region", "us-east-1"),
+                    profile=hconfig.get("aws", {}).get("profile"),
+                )
+            except Exception:
+                config = EmbeddingConfig()
+        self.config = config
         self._semaphore: Optional[asyncio.Semaphore] = None
         # None = not tested yet, True = last call succeeded, False = unavailable
         self._available: Optional[bool] = None
