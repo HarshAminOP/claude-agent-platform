@@ -11,11 +11,15 @@ Every routing decision is recorded to routing_decisions for self-learning.
 """
 
 import json
+import logging
+import re
 import time
 import sqlite3
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class Tier(Enum):
@@ -32,7 +36,37 @@ class RoutingDecision:
     estimated_cost: float
     complexity_score: float = 0.0
     decision_id: Optional[int] = None
+    workflow_name: Optional[str] = None
+    task_keywords: list[str] = field(default_factory=list)
 
+
+# Task keyword patterns for workflow dispatch (word-boundary regex, not substring)
+TASK_KEYWORD_PATTERNS: dict[str, list[str]] = {
+    "feature": [r"\bimplement\b", r"\bcreate\b", r"\bbuild\b", r"\badd\b", r"\bnew feature\b", r"\bdevelop\b"],
+    "bug": [r"\bfix\b", r"\bbug\b", r"\berror\b", r"\bbroken\b", r"\bcrash\b", r"\bfailing\b"],
+    "infra": [r"\bterraform\b", r"\bkubernetes\b", r"\bhelm\b", r"\bargocd\b", r"\bdeploy\b", r"\binfrastructure\b", r"\beks\b"],
+    "refactor": [r"\brefactor\b", r"\brestructure\b", r"\brewrite\b", r"\bclean up\b", r"\bsimplify\b"],
+    "review": [r"\breview\b", r"\baudit\b", r"\bcheck\b", r"\bassess\b"],
+}
+
+# Compiled pattern cache (compiled once at import time)
+_COMPILED_TASK_PATTERNS: dict[str, list[re.Pattern]] = {
+    category: [re.compile(pat, re.IGNORECASE) for pat in patterns]
+    for category, patterns in TASK_KEYWORD_PATTERNS.items()
+}
+
+# Workflow name mapping per task category
+WORKFLOW_MAP: dict[str, str] = {
+    "feature": "feature-request",
+    "bug": "bugfix",
+    "infra": "infra",
+    "refactor": "refactor",
+    "review": "review",
+}
+
+# Hard threshold bounds (safety — prevent learned thresholds from drifting too far)
+HARD_INLINE_MAX_CEILING = 0.30
+HARD_FULL_MIN_FLOOR = 0.40
 
 # Complexity signals and their weights
 COMPLEXITY_SIGNALS: dict[str, dict] = {
@@ -81,6 +115,21 @@ def _compute_keyword_score(prompt: str) -> float:
         score += 0.1
 
     return score
+
+
+def _extract_task_keywords(prompt: str) -> list[str]:
+    """
+    Return a list of matched task category names for the given prompt.
+
+    Uses pre-compiled word-boundary regex patterns (not substring matching)
+    to avoid false positives (e.g. "fixed" matching "fix" mid-word).
+    Categories are returned in the order they appear in TASK_KEYWORD_PATTERNS.
+    """
+    matched: list[str] = []
+    for category, patterns in _COMPILED_TASK_PATTERNS.items():
+        if any(pat.search(prompt) for pat in patterns):
+            matched.append(category)
+    return matched
 
 
 def _build_reasoning(prompt: str, score: float) -> str:
@@ -204,11 +253,67 @@ def get_learned_thresholds(db: sqlite3.Connection) -> dict:
     else:
         full_min = DEFAULT_FULL_MIN
 
+    # Apply hard safety bounds so learned thresholds never drift out of range
+    inline_max = min(inline_max, HARD_INLINE_MAX_CEILING)
+    full_min = max(full_min, HARD_FULL_MIN_FLOOR)
+
     return {
         "inline_max": inline_max,
         "full_min": full_min,
         "source": "learned",
     }
+
+
+# Maximum allowed drift from default before anomaly revert (50%)
+_MAX_THRESHOLD_DRIFT = 0.50
+
+
+def _detect_threshold_anomaly(thresholds: dict) -> dict:
+    """
+    Detect if learned thresholds have drifted >50% from defaults.
+
+    If drift exceeds the limit, revert to default and log a warning.
+    This prevents data poisoning from manipulating routing thresholds.
+
+    Returns a (possibly corrected) thresholds dict.
+    """
+    if thresholds.get("source") != "learned":
+        return thresholds
+
+    inline_max = thresholds["inline_max"]
+    full_min = thresholds["full_min"]
+    reverted = False
+
+    # Check inline_max drift: >50% deviation from DEFAULT_INLINE_MAX (0.2)
+    inline_drift = abs(inline_max - DEFAULT_INLINE_MAX) / DEFAULT_INLINE_MAX
+    if inline_drift > _MAX_THRESHOLD_DRIFT:
+        logger.warning(
+            "ANOMALY: learned inline_max=%.4f drifted %.0f%% from default=%.2f; "
+            "reverting to default. Possible data poisoning.",
+            inline_max,
+            inline_drift * 100,
+            DEFAULT_INLINE_MAX,
+        )
+        thresholds["inline_max"] = DEFAULT_INLINE_MAX
+        reverted = True
+
+    # Check full_min drift: >50% deviation from DEFAULT_FULL_MIN (0.5)
+    full_drift = abs(full_min - DEFAULT_FULL_MIN) / DEFAULT_FULL_MIN
+    if full_drift > _MAX_THRESHOLD_DRIFT:
+        logger.warning(
+            "ANOMALY: learned full_min=%.4f drifted %.0f%% from default=%.2f; "
+            "reverting to default. Possible data poisoning.",
+            full_min,
+            full_drift * 100,
+            DEFAULT_FULL_MIN,
+        )
+        thresholds["full_min"] = DEFAULT_FULL_MIN
+        reverted = True
+
+    if reverted:
+        thresholds["source"] = "reverted"
+
+    return thresholds
 
 
 def _record_decision(
@@ -256,10 +361,33 @@ def route(
     # Clamp score to [0, 1]
     score = max(0.0, min(1.0, score))
 
-    # Get thresholds (learned or default)
-    thresholds = get_learned_thresholds(db)
+    # Use learned thresholds only when there are 50+ decisions with outcomes;
+    # otherwise fall back to defaults so early routing isn't skewed by sparse data.
+    try:
+        outcome_count_row = db.execute(
+            "SELECT COUNT(*) FROM routing_decisions WHERE outcome IS NOT NULL"
+        ).fetchone()
+        outcome_count = outcome_count_row[0] if outcome_count_row else 0
+    except Exception:
+        outcome_count = 0
+
+    if outcome_count >= 50:
+        thresholds = get_learned_thresholds(db)
+        # Anomaly detection: revert if learned thresholds drifted >50% from defaults
+        thresholds = _detect_threshold_anomaly(thresholds)
+    else:
+        thresholds = {
+            "inline_max": DEFAULT_INLINE_MAX,
+            "full_min": DEFAULT_FULL_MIN,
+            "source": "default",
+        }
+
     inline_max = thresholds["inline_max"]
     full_min = thresholds["full_min"]
+
+    # Apply hard safety bounds (covers the default path as well)
+    inline_max = min(inline_max, HARD_INLINE_MAX_CEILING)
+    full_min = max(full_min, HARD_FULL_MIN_FLOOR)
 
     # Classify tier
     if score < inline_max:
@@ -268,6 +396,14 @@ def route(
         tier = Tier.FULL
     else:
         tier = Tier.LIGHTWEIGHT
+
+    # Extract task keywords for workflow dispatch
+    task_keywords = _extract_task_keywords(prompt)
+
+    # Resolve workflow name for dispatchable tiers
+    workflow_name: Optional[str] = None
+    if tier in (Tier.LIGHTWEIGHT, Tier.FULL) and task_keywords:
+        workflow_name = WORKFLOW_MAP.get(task_keywords[0])
 
     # Build decision
     agents = _estimate_agents(tier, prompt)
@@ -284,4 +420,6 @@ def route(
         estimated_cost=cost,
         complexity_score=score,
         decision_id=decision_id,
+        workflow_name=workflow_name,
+        task_keywords=task_keywords,
     )

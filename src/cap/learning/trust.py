@@ -26,6 +26,15 @@ DENY_THRESHOLD = 0.3
 # Default trust for new agent+action combos
 DEFAULT_TRUST = 0.5
 
+# Trust ceiling — no agent can exceed this score regardless of success history
+MAX_TRUST_CEILING = 0.85
+
+# Trust floor — agents remain usable even after repeated failures (just reviewed more)
+MIN_TRUST_FLOOR = 0.1
+
+# Number of seconds in one day (used for lazy decay calculation)
+_SECONDS_PER_DAY = 86400.0
+
 
 class TrustManager:
     """
@@ -48,6 +57,10 @@ class TrustManager:
         """
         Get the current trust score for an agent+action pair.
 
+        Applies lazy decay on read: if the record has not been updated for
+        more than 7 days, the returned score is reduced by 0.01 per day since
+        last update, floored at 0.5.  The decay is NOT written back to the DB.
+
         Args:
             agent_type: Type of agent (e.g., 'dev', 'devops', 'security', 'sre').
             action_type: Type of action (e.g., 'refactor', 'deploy', 'general').
@@ -56,13 +69,22 @@ class TrustManager:
             Trust score between 0.0 and 1.0. Returns 0.5 if no history exists.
         """
         row = self.db.execute(
-            """SELECT trust_score FROM trust_levels
+            """SELECT trust_score, last_updated FROM trust_levels
                WHERE agent_type = ? AND action_type = ?""",
             (agent_type, action_type),
         ).fetchone()
 
         if row:
-            return row[0] if isinstance(row, tuple) else row["trust_score"]
+            score = row[0] if isinstance(row, tuple) else row["trust_score"]
+            last_updated = row[1] if isinstance(row, tuple) else row["last_updated"]
+
+            if last_updated is not None:
+                days_since_update = (time.time() - last_updated) / _SECONDS_PER_DAY
+                if days_since_update > 7:
+                    decay = 0.01 * days_since_update
+                    score = max(0.5, score - decay)
+
+            return score
         return DEFAULT_TRUST
 
     def record_outcome(
@@ -105,6 +127,10 @@ class TrustManager:
 
             # Bayesian posterior mean with Beta(1,1) prior
             new_score = (successes + 1) / (successes + failures + 2)
+            # Cap at ceiling — prevent unbounded trust accumulation
+            new_score = min(new_score, MAX_TRUST_CEILING)
+            # Floor — agents stay usable even after many failures
+            new_score = max(new_score, MIN_TRUST_FLOOR)
 
             self.db.execute(
                 """UPDATE trust_levels
@@ -118,6 +144,10 @@ class TrustManager:
             failures = 0 if success else 1
             # Beta posterior: (1+1)/(1+0+2) = 0.667 for success, (0+1)/(0+1+2) = 0.333 for failure
             new_score = (successes + 1) / (successes + failures + 2)
+            # Cap at ceiling on first record too
+            new_score = min(new_score, MAX_TRUST_CEILING)
+            # Floor — agents stay usable even after many failures
+            new_score = max(new_score, MIN_TRUST_FLOOR)
 
             self.db.execute(
                 """INSERT INTO trust_levels

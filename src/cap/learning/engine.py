@@ -40,19 +40,6 @@ class RoutingDecision:
             self.task_hash = _compute_task_hash(self.task_description)
 
 
-@dataclass
-class RoutingRecord:
-    """A stored routing decision with its database ID and timestamp."""
-
-    decision_id: int
-    timestamp: float
-    session_id: str
-    task_description: str
-    complexity_score: float
-    tier_selected: str
-    agents_used: list[str]
-
-
 def _compute_task_hash(task_description: str) -> str:
     """Compute a stable hash for deduplication of similar tasks."""
     # Normalize: lowercase, strip whitespace, first 200 chars for stability
@@ -145,9 +132,10 @@ def record_outcome(
         _check_correction_from_outcome(decision_id, db)
 
     # Compute accuracy: successes / total with outcomes
+    # Using SUM(CASE WHEN ...) instead of COUNT(*) FILTER for portable SQLite support
     row = db.execute(
         """SELECT
-               COUNT(*) FILTER (WHERE outcome = 'success') AS successes,
+               SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS successes,
                COUNT(*) AS total
            FROM routing_decisions
            WHERE outcome IS NOT NULL"""
@@ -156,8 +144,8 @@ def record_outcome(
     if row:
         total = row[1] if isinstance(row, tuple) else row["total"]
         successes = row[0] if isinstance(row, tuple) else row["successes"]
-        if total > 0:
-            return successes / total
+        if total and total > 0:
+            return (successes or 0) / total
 
     return 0.0
 
@@ -202,11 +190,12 @@ def get_learned_thresholds(db: sqlite3.Connection) -> dict:
         }
 
     # Compute per-tier accuracy
+    # Using SUM(CASE WHEN ...) instead of COUNT(*) FILTER for portable SQLite support
     accuracy_per_tier = {}
     for tier in ("inline", "lightweight", "full"):
         row = db.execute(
             """SELECT
-                   COUNT(*) FILTER (WHERE outcome = 'success') AS s,
+                   SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS s,
                    COUNT(*) AS t
                FROM routing_decisions
                WHERE tier_selected = ? AND outcome IS NOT NULL""",
@@ -215,7 +204,7 @@ def get_learned_thresholds(db: sqlite3.Connection) -> dict:
         if row:
             t = row[1] if isinstance(row, tuple) else row["t"]
             s = row[0] if isinstance(row, tuple) else row["s"]
-            accuracy_per_tier[tier] = s / t if t > 0 else 0.0
+            accuracy_per_tier[tier] = (s or 0) / t if t and t > 0 else 0.0
         else:
             accuracy_per_tier[tier] = 0.0
 
@@ -246,6 +235,108 @@ def get_learned_thresholds(db: sqlite3.Connection) -> dict:
         "source": "default",
         "sample_counts": sample_counts,
         "accuracy_per_tier": accuracy_per_tier,
+    }
+
+
+def compute_thresholds_from_session_events(
+    sessions_db: sqlite3.Connection,
+    routing_db: sqlite3.Connection,
+) -> dict:
+    """
+    Correlate session workflow_complete events with routing decisions to update
+    outcome fields and compute aggregate success metrics.
+
+    Queries session_events for event_type = 'workflow_complete', parses JSON
+    content for workflow name, success/failure, and duration.  Correlates each
+    event with the nearest routing_decision within 60 seconds (by timestamp)
+    and updates its outcome column.
+
+    Args:
+        sessions_db: SQLite connection to the sessions database containing
+                     the session_events table.
+        routing_db:  SQLite connection to the routing database containing
+                     the routing_decisions table.
+
+    Returns:
+        Dict with:
+        - success_rate: fraction of correlated events that were successful
+        - avg_duration: mean workflow duration in seconds (0.0 if unavailable)
+        - sample_count: total number of correlated events processed
+    """
+    try:
+        events = sessions_db.execute(
+            """SELECT id, timestamp, content
+               FROM session_events
+               WHERE event_type = 'workflow_complete'
+               ORDER BY timestamp ASC"""
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # session_events table does not exist yet
+        return {"success_rate": 0.0, "avg_duration": 0.0, "sample_count": 0}
+
+    successes = 0
+    total_duration = 0.0
+    duration_count = 0
+    sample_count = 0
+
+    for event_row in events:
+        event_id = event_row[0] if isinstance(event_row, tuple) else event_row["id"]
+        event_ts = event_row[1] if isinstance(event_row, tuple) else event_row["timestamp"]
+        raw_content = event_row[2] if isinstance(event_row, tuple) else event_row["content"]
+
+        # Parse JSON content — skip malformed rows
+        try:
+            content = json.loads(raw_content) if isinstance(raw_content, str) else raw_content
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        is_success = content.get("success", content.get("status") == "success")
+        duration = content.get("duration") or content.get("duration_seconds")
+
+        # Find nearest routing_decision within 60 seconds of this event
+        try:
+            decision_row = routing_db.execute(
+                """SELECT id FROM routing_decisions
+                   WHERE ABS(timestamp - ?) <= 60
+                   ORDER BY ABS(timestamp - ?) ASC
+                   LIMIT 1""",
+                (event_ts, event_ts),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            decision_row = None
+
+        if decision_row:
+            decision_id = decision_row[0] if isinstance(decision_row, tuple) else decision_row["id"]
+            outcome = "success" if is_success else "failure"
+            try:
+                routing_db.execute(
+                    "UPDATE routing_decisions SET outcome = ? WHERE id = ? AND outcome IS NULL",
+                    (outcome, decision_id),
+                )
+            except sqlite3.OperationalError:
+                pass
+
+        sample_count += 1
+        if is_success:
+            successes += 1
+
+        if duration is not None:
+            try:
+                total_duration += float(duration)
+                duration_count += 1
+            except (TypeError, ValueError):
+                pass
+
+    if sample_count > 0:
+        try:
+            routing_db.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    return {
+        "success_rate": successes / sample_count if sample_count > 0 else 0.0,
+        "avg_duration": total_duration / duration_count if duration_count > 0 else 0.0,
+        "sample_count": sample_count,
     }
 
 
@@ -392,8 +483,9 @@ def auto_generate_baseline(
                     0.9,                 # composite_score (starts high)
                 ),
             )
-        except sqlite3.IntegrityError:
-            # Entry already exists (shouldn't happen with UUID, but be safe)
+        except (sqlite3.IntegrityError, sqlite3.OperationalError):
+            # IntegrityError: entry already exists (shouldn't happen with UUID, but be safe)
+            # OperationalError: memory_active table does not exist — skip gracefully
             pass
 
         generated.append(cid)
@@ -402,40 +494,6 @@ def auto_generate_baseline(
         db.commit()
 
     return generated
-
-
-def retrieval_feedback(
-    entry_id: str,
-    was_used: bool,
-    db: sqlite3.Connection,
-) -> None:
-    """
-    Adjust relevance score of a memory entry based on retrieval feedback.
-
-    Boost +0.05 if the entry was used after retrieval.
-    Decay -0.01 if the entry was shown but not used.
-
-    Args:
-        entry_id: The memory_active entry ID.
-        was_used: Whether the entry was actually used by the agent.
-        db: SQLite connection.
-    """
-    if was_used:
-        db.execute(
-            """UPDATE memory_active
-               SET relevance_score = MIN(1.0, relevance_score + 0.05),
-                   last_accessed = ?
-               WHERE id = ?""",
-            (time.time(), entry_id),
-        )
-    else:
-        db.execute(
-            """UPDATE memory_active
-               SET relevance_score = MAX(0.0, relevance_score - 0.01)
-               WHERE id = ?""",
-            (entry_id,),
-        )
-    db.commit()
 
 
 def update_trust(

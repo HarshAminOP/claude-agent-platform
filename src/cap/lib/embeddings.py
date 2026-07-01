@@ -91,8 +91,15 @@ class EmbeddingClient:
         if self.config.profile:
             session_kwargs["profile_name"] = self.config.profile
 
-        session = boto3.Session(**session_kwargs)
-        self._client = session.client("bedrock-runtime")
+        try:
+            session = boto3.Session(**session_kwargs)
+            self._client = session.client("bedrock-runtime")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Failed to initialise Bedrock client — embeddings unavailable: %s", exc
+            )
+            self._client = None
+            self._available = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -113,6 +120,9 @@ class EmbeddingClient:
             A list of floats (the embedding vector) on success, or None on
             any unrecoverable failure.
         """
+        if self._client is None:
+            return None
+
         if not text or not text.strip():
             logger.debug("embed_single: empty text, returning None")
             return None

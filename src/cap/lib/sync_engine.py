@@ -22,6 +22,15 @@ from typing import Optional
 
 from cap.lib.graph import add_edge
 
+# KB reliability modules — optional; sync still works if not yet installed
+try:
+    from cap.lib.chunker import chunk_content, detect_strategy, Chunk, ChunkStrategy
+    from cap.lib.dedup import content_hash as _dedup_content_hash, fetch_existing_hashes, deduplicated_batch
+    from cap.lib.secret_scanner import scan_for_secrets, SKIP_FILE_PATTERNS
+    _KB_RELIABILITY_AVAILABLE = True
+except ImportError:
+    _KB_RELIABILITY_AVAILABLE = False
+
 logger = logging.getLogger("cap.sync")
 
 # ── File classification ──────────────────────────────────────────────────────
@@ -83,12 +92,15 @@ class SyncStats:
     files_scanned: int = 0
     files_indexed: int = 0
     files_skipped: int = 0
+    files_skipped_secrets: int = 0
     files_unchanged: int = 0
     files_updated: int = 0
     graph_edges_created: int = 0
     embeddings_queued: int = 0
     structures_indexed: int = 0
     repo_summaries_generated: int = 0
+    chunks_created: int = 0
+    chunks_deduped: int = 0
     errors: list = field(default_factory=list)
 
 
@@ -118,10 +130,21 @@ def sync_workspace(
 
     last_sync_at = _get_last_sync_time(db, workspace) if not full else None
 
-    existing_hashes = _get_existing_hashes(db, workspace)
+    # Pre-load known hashes — prefer dedup module when available
+    if _KB_RELIABILITY_AVAILABLE:
+        existing_hashes = fetch_existing_hashes(db)
+    else:
+        existing_hashes = _get_existing_hashes(db, workspace)
 
     for file_path in _walk_workspace(workspace_path):
         stats.files_scanned += 1
+
+        # Secret-scanner: skip files matching SKIP_FILE_PATTERNS before reading
+        if _KB_RELIABILITY_AVAILABLE:
+            fname = file_path.name
+            if any(fname == pat or fname.endswith(pat) for pat in SKIP_FILE_PATTERNS):
+                stats.files_skipped += 1
+                continue
 
         if not full and last_sync_at:
             mtime = datetime.fromtimestamp(
@@ -142,9 +165,18 @@ def sync_workspace(
             stats.files_skipped += 1
             continue
 
-        content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
+        # Secret scan: skip file if secrets detected
+        if _KB_RELIABILITY_AVAILABLE:
+            secrets_found = scan_for_secrets(content)
+            if secrets_found:
+                logger.warning("Skipping %s — secrets detected: %s", file_path, secrets_found)
+                stats.files_skipped += 1
+                stats.files_skipped_secrets += 1
+                continue
 
-        if content_hash in existing_hashes:
+        file_content_hash = hashlib.sha256(content.encode()).hexdigest()[:32]
+
+        if file_content_hash in existing_hashes:
             stats.files_unchanged += 1
             continue
 
@@ -153,29 +185,87 @@ def sync_workspace(
         content_type = CONTENT_TYPE_MAP.get(ext, "text")
         title = _derive_title(file_path, content, content_type)
 
-        entry_id = _upsert_entry(
-            db, workspace, rel_path, content_type, title, content, content_hash
-        )
-
-        if entry_id:
-            stats.files_indexed += 1
-            existing_hashes.add(content_hash)
-
-            db.execute(
-                "INSERT INTO embedding_queue (entry_id) VALUES (?)",
-                (entry_id,)
-            )
-            stats.embeddings_queued += 1
-
-            edges = _extract_graph_edges(file_path, content, content_type, workspace)
-            for edge in edges:
-                try:
-                    add_edge(db, **edge)
-                    stats.graph_edges_created += 1
-                except Exception:
-                    pass
+        # Chunking: split large files; wrap small ones in a single Chunk
+        if _KB_RELIABILITY_AVAILABLE and len(content) > 2048:
+            strategy = detect_strategy(ext)
+            chunks = chunk_content(content, strategy)
+        elif _KB_RELIABILITY_AVAILABLE:
+            import hashlib as _hashlib
+            chunks = [Chunk(
+                text=content,
+                index=0,
+                start_pos=0,
+                end_pos=len(content),
+                content_hash=_hashlib.sha256(content.encode("utf-8")).hexdigest()[:32],
+            )]
         else:
-            stats.files_updated += 1
+            chunks = None  # legacy path
+
+        if chunks is not None:
+            file_indexed = False
+            for chunk in chunks:
+                chunk_hash = _dedup_content_hash(chunk.text)
+                if chunk_hash in existing_hashes:
+                    stats.chunks_deduped += 1
+                    continue
+
+                chunk_source_path = f"{rel_path}#chunk{chunk.index}" if chunk.index > 0 else rel_path
+                chunk_title = title if chunk.index == 0 else f"{title} (part {chunk.index + 1})"
+
+                entry_id = _upsert_entry(
+                    db, workspace, chunk_source_path, content_type,
+                    chunk_title, chunk.text, chunk_hash,
+                    chunk_index=chunk.index,
+                )
+
+                if entry_id:
+                    existing_hashes.add(chunk_hash)
+                    stats.chunks_created += 1
+                    if not file_indexed:
+                        stats.files_indexed += 1
+                        file_indexed = True
+
+                    db.execute(
+                        "INSERT INTO embedding_queue (entry_id) VALUES (?)",
+                        (entry_id,)
+                    )
+                    stats.embeddings_queued += 1
+                else:
+                    stats.files_updated += 1
+
+            if file_indexed:
+                edges = _extract_graph_edges(file_path, content, content_type, workspace)
+                for edge in edges:
+                    try:
+                        add_edge(db, **edge)
+                        stats.graph_edges_created += 1
+                    except Exception:
+                        pass
+        else:
+            # Legacy path: no chunking modules available
+            entry_id = _upsert_entry(
+                db, workspace, rel_path, content_type, title, content, file_content_hash
+            )
+
+            if entry_id:
+                stats.files_indexed += 1
+                existing_hashes.add(file_content_hash)
+
+                db.execute(
+                    "INSERT INTO embedding_queue (entry_id) VALUES (?)",
+                    (entry_id,)
+                )
+                stats.embeddings_queued += 1
+
+                edges = _extract_graph_edges(file_path, content, content_type, workspace)
+                for edge in edges:
+                    try:
+                        add_edge(db, **edge)
+                        stats.graph_edges_created += 1
+                    except Exception:
+                        pass
+            else:
+                stats.files_updated += 1
 
     _update_sync_state(db, workspace, stats)
 
@@ -185,10 +275,12 @@ def sync_workspace(
     db.commit()
 
     logger.info(
-        "Sync complete: scanned=%d indexed=%d unchanged=%d edges=%d structures=%d summaries=%d",
+        "Sync complete: scanned=%d indexed=%d unchanged=%d edges=%d structures=%d summaries=%d "
+        "chunks_created=%d chunks_deduped=%d secrets_skipped=%d",
         stats.files_scanned, stats.files_indexed,
         stats.files_unchanged, stats.graph_edges_created,
         stats.structures_indexed, stats.repo_summaries_generated,
+        stats.chunks_created, stats.chunks_deduped, stats.files_skipped_secrets,
     )
     return stats
 
@@ -260,6 +352,7 @@ def _upsert_entry(
     title: str,
     content: str,
     content_hash: str,
+    chunk_index: int = 0,
 ) -> Optional[int]:
     """Insert or update a knowledge entry. Returns entry_id for new entries, None for updates."""
     existing = db.execute(
@@ -284,7 +377,7 @@ def _upsert_entry(
                (uuid, workspace, source_path, source_type, content_type, title, content, content_hash, metadata)
                VALUES (?, ?, ?, 'file', ?, ?, ?, ?, ?)""",
             (entry_uuid, workspace, source_path, content_type, title, content, content_hash,
-             json.dumps({"synced_at": now}))
+             json.dumps({"synced_at": now, "chunk_index": chunk_index}))
         )
         row = db.execute(
             "SELECT id FROM knowledge_entries WHERE uuid = ?", (entry_uuid,)

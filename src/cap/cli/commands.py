@@ -18,6 +18,11 @@ from rich import box
 
 console = Console(stderr=True)
 
+try:
+    from cap.lib.embeddings import EmbeddingClient
+except Exception:  # noqa: BLE001 — optional dep; may be absent in test environments
+    EmbeddingClient = None  # type: ignore[assignment,misc]
+
 
 def _get_db() -> sqlite3.Connection:
     """Get the CAP database connection."""
@@ -251,75 +256,274 @@ def dlq_retry_all():
 @click.argument("workflow_id")
 def resume(workflow_id: str):
     """Resume a workflow from its last checkpoint."""
-    from cap.orchestration.checkpoint import resume_from_checkpoint
-    from cap.orchestration.dag import StepState
+    console.print(f"[red]resume is not available: checkpoint module removed[/red]")
+    raise SystemExit(1)
 
-    db = _get_db()
 
+@click.command("doctor")
+def doctor():
+    """Comprehensive platform health diagnostics."""
+    ok = click.style("✔", fg="green", bold=True)
+    warn = click.style("!", fg="yellow", bold=True)
+    err = click.style("✘", fg="red", bold=True)
+
+    cap_home = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
+    data_dir = cap_home / "data"
+    cap_db_path = Path(os.path.expanduser("~/.cap/cap.db"))
+
+    click.echo(click.style("\n=== cap doctor ===", bold=True))
+
+    # ── 1. Knowledge DB health ─────────────────────────────────────────────────
+    click.echo(click.style("\n1. Knowledge DB", bold=True))
+    knowledge_db = data_dir / "knowledge.db"
+    if not knowledge_db.exists():
+        click.echo(f"  {err} knowledge.db not found at {knowledge_db}")
+    else:
+        size_bytes = knowledge_db.stat().st_size
+        size_kb = size_bytes / 1024
+        size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb/1024:.1f} MB"
+        click.echo(f"  {ok} knowledge.db exists  ({size_str})")
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(knowledge_db))
+            conn.execute("PRAGMA busy_timeout=2000")
+            total = conn.execute("SELECT COUNT(*) FROM knowledge_entries").fetchone()[0]
+            failed_emb = conn.execute(
+                "SELECT COUNT(*) FROM knowledge_entries WHERE embedding_status = 'failed'"
+            ).fetchone()[0]
+            # last consolidation — stored as updated_at on consolidated_into entries
+            last_consol_row = conn.execute(
+                "SELECT MAX(updated_at) FROM knowledge_entries WHERE consolidated_into IS NOT NULL"
+            ).fetchone()
+            conn.close()
+            click.echo(f"  {ok} Entries: {total}")
+            if failed_emb == 0:
+                click.echo(f"  {ok} Failed embeddings: 0")
+            else:
+                click.echo(f"  {warn} Failed embeddings: {failed_emb}")
+            if last_consol_row and last_consol_row[0]:
+                click.echo(f"  {ok} Last consolidation: {last_consol_row[0]}")
+            else:
+                click.echo(f"  {warn} Last consolidation: never")
+        except Exception as exc:
+            click.echo(f"  {err} Cannot query knowledge.db: {exc}")
+
+    # ── 2. Embedder health ─────────────────────────────────────────────────────
+    click.echo(click.style("\n2. Embedder health", bold=True))
+    if EmbeddingClient is None:
+        click.echo(f"  {err} EmbeddingClient not available (cap.lib.embeddings could not be imported)")
+    else:
+        try:
+            client = EmbeddingClient()
+            avail = client.is_available
+            if avail is True:
+                click.echo(f"  {ok} EmbeddingClient available (last call succeeded)")
+            elif avail is False:
+                click.echo(f"  {err} EmbeddingClient unavailable (Bedrock init failed — check AWS credentials/model access)")
+            else:
+                click.echo(f"  {warn} EmbeddingClient imported (availability unknown — no calls made yet)")
+                if client._client is None:
+                    click.echo(f"  {err} Bedrock client did not initialise (no AWS credentials?)")
+                else:
+                    click.echo(f"  {ok} Bedrock client initialised (run `cap embed` to confirm connectivity)")
+        except Exception as exc:
+            click.echo(f"  {err} Embedder check failed: {exc}")
+
+    # ── 3. MCP server registration ─────────────────────────────────────────────
+    click.echo(click.style("\n3. MCP server registration", bold=True))
+    expected_servers = [
+        "cap-knowledge", "cap-session", "cap-fleet",
+        "cap-workflow-engine", "cap-diagram", "cap-backlog",
+        "cap-ast", "cap-code-intel", "cap-orchestrator",
+    ]
+    claude_json_path = Path.home() / ".claude.json"
+    configured_servers: set[str] = set()
+    if claude_json_path.exists():
+        try:
+            data = json.loads(claude_json_path.read_text())
+            configured_servers = set(data.get("mcpServers", {}).keys())
+        except Exception:
+            pass
+
+    for srv in expected_servers:
+        if srv in configured_servers:
+            click.echo(f"  {ok} {srv}")
+        else:
+            click.echo(f"  {err} {srv}  (not registered — run `cap init` to fix)")
+
+    extra = configured_servers - set(expected_servers)
+    if extra:
+        click.echo(f"  {ok} Additional servers: {', '.join(sorted(extra))}")
+
+    # ── 4. Learning health ─────────────────────────────────────────────────────
+    click.echo(click.style("\n4. Learning health", bold=True))
+    if not cap_db_path.exists():
+        click.echo(f"  {warn} cap.db not found at {cap_db_path} (run `cap init` first)")
+    else:
+        try:
+            conn = sqlite3.connect(str(cap_db_path))
+            conn.execute("PRAGMA busy_timeout=2000")
+
+            trust_rows = conn.execute(
+                "SELECT agent_type, action_type, trust_score, success_count, failure_count "
+                "FROM trust_levels ORDER BY trust_score DESC LIMIT 5"
+            ).fetchall()
+            routing_count = conn.execute(
+                "SELECT COUNT(*) FROM routing_decisions"
+            ).fetchone()[0]
+            outcomes_count = conn.execute(
+                "SELECT COUNT(*) FROM routing_decisions WHERE outcome IS NOT NULL"
+            ).fetchone()[0]
+            conn.close()
+
+            if trust_rows:
+                click.echo(f"  {ok} Top 5 agent trust scores:")
+                for row in trust_rows:
+                    agent, action, score, succ, fail = row
+                    color = "green" if score >= 0.7 else ("yellow" if score >= 0.4 else "red")
+                    score_str = click.style(f"{score:.2f}", fg=color)
+                    click.echo(f"       {agent}/{action}: {score_str}  (ok={succ} fail={fail})")
+            else:
+                click.echo(f"  {warn} No trust scores recorded yet (defaults active)")
+
+            click.echo(f"  {ok} Routing decisions: {routing_count}  |  Outcomes recorded: {outcomes_count}")
+            threshold_src = "learned" if routing_count >= 10 else "defaults"
+            icon = ok if threshold_src == "learned" else warn
+            click.echo(f"  {icon} Threshold source: {threshold_src}")
+        except Exception as exc:
+            click.echo(f"  {err} Cannot query cap.db: {exc}")
+
+    # ── 5. Circuit breaker status ──────────────────────────────────────────────
+    click.echo(click.style("\n5. Circuit breaker status", bold=True))
+    if not cap_db_path.exists():
+        click.echo(f"  {warn} cap.db missing — no circuit breaker state")
+    else:
+        try:
+            from cap.reliability.circuit_breaker import CircuitBreaker
+
+            db_cb = _get_db()
+            cb_conn = sqlite3.connect(str(cap_db_path))
+            cb_conn.execute("PRAGMA busy_timeout=2000")
+            agent_types = ["dev", "devops", "security", "sre", "code-review", "test", "docs", "explore"]
+            any_open = False
+            for at in agent_types:
+                cb = CircuitBreaker(at, db_cb)
+                state = cb.get_state()
+                failure_row = cb_conn.execute(
+                    "SELECT failure_count FROM circuit_breaker_state WHERE agent_type = ?", (at,)
+                ).fetchone()
+                failures = failure_row[0] if failure_row else 0
+                if state == "CLOSED":
+                    icon = ok
+                elif state == "HALF_OPEN":
+                    icon = warn
+                    any_open = True
+                else:
+                    icon = err
+                    any_open = True
+                state_str = click.style(state, fg={"CLOSED": "green", "OPEN": "red", "HALF_OPEN": "yellow"}.get(state, "white"))
+                click.echo(f"  {icon} {at}: {state_str}  (failures={failures})")
+            cb_conn.close()
+            if not any_open:
+                click.echo(f"\n  {ok} All circuit breakers CLOSED")
+        except Exception as exc:
+            click.echo(f"  {err} Circuit breaker check failed: {exc}")
+
+    # ── 6. Harness section ─────────────────────────────────────────────────────
+    click.echo(click.style("\n6. Harness", bold=True))
     try:
-        dag, context_thread = resume_from_checkpoint(workflow_id, db)
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-        raise SystemExit(1)
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
+        _platform_db = _Path.home() / ".claude-platform" / "data" / "platform.db"
+        _claude_json = _Path.home() / ".claude.json"
 
-    # Compute state summary
-    states: dict[str, int] = {}
-    for step in dag.steps.values():
-        state_name = step.state.value
-        states[state_name] = states.get(state_name, 0) + 1
+        # Harness server registered?
+        _harness_registered = False
+        if _claude_json.exists():
+            try:
+                _cj = json.loads(_claude_json.read_text())
+                _harness_registered = "cap-harness" in _cj.get("mcpServers", {})
+            except Exception:
+                pass
+        _reg_icon = ok if _harness_registered else warn
+        click.echo(f"  {_reg_icon} Harness server registered: {'yes' if _harness_registered else 'no'}")
 
-    console.print(Panel(
-        f"[bold]Workflow:[/bold] {workflow_id}\n"
-        f"[bold]Status:[/bold]   Resumed from checkpoint\n"
-        f"[bold]Steps:[/bold]    {len(dag.steps)} total\n\n"
-        f"  Completed: [green]{states.get('completed', 0)}[/green]\n"
-        f"  Pending:   [cyan]{states.get('pending', 0)}[/cyan]\n"
-        f"  Failed:    [red]{states.get('failed', 0)}[/red]\n"
-        f"  Skipped:   [yellow]{states.get('skipped', 0)}[/yellow]",
-        title="Workflow Resumed",
-        box=box.ROUNDED,
-    ))
+        # Executor available?
+        _executor_ok = False
+        try:
+            from cap.harness.executor import AgentExecutor  # noqa: F401
+            _executor_ok = True
+        except Exception:
+            pass
+        _exec_icon = ok if _executor_ok else warn
+        click.echo(f"  {_exec_icon} Executor available: {'yes' if _executor_ok else 'no'}")
 
-    # Show steps detail
-    table = Table(title="Steps", box=box.SIMPLE_HEAD, show_edge=False)
-    table.add_column("ID", style="dim", width=18)
-    table.add_column("Agent", width=12)
-    table.add_column("State")
-    table.add_column("Description", max_width=50)
-    table.add_column("Depends On", max_width=25)
+        if _platform_db.exists():
+            _conn = _sqlite3.connect(str(_platform_db), timeout=2)
+            _conn.execute("PRAGMA busy_timeout=2000")
 
-    for step_id, step in dag.steps.items():
-        deps = ", ".join(d[:12] for d in step.depends_on) if step.depends_on else "--"
-        table.add_row(
-            step_id[:18],
-            step.agent_type,
-            _status_color(step.state.value),
-            step.description[:50],
-            deps,
-        )
+            # Active agents count
+            try:
+                _active = _conn.execute(
+                    "SELECT COUNT(*) FROM agents WHERE status = 'active'"
+                ).fetchone()[0]
+                click.echo(f"  {ok} Active agents: {_active}")
+            except Exception:
+                click.echo(f"  {warn} Active agents: (table unavailable)")
 
-    console.print(table)
-    console.print(
-        f"\n[dim]To execute: use cap_execute via MCP or run the orchestrator server.[/dim]"
-    )
+            # Today cost from budget_remaining
+            try:
+                from cap.harness.cost_meter import budget_remaining
+                _remaining = budget_remaining(db=_sqlite3.connect(str(_platform_db), timeout=2))
+                _daily = 5.0
+                _spent = max(0.0, _daily - _remaining)
+                click.echo(f"  {ok} Today cost: ${_spent:.4f} (remaining: ${_remaining:.4f})")
+            except Exception:
+                click.echo(f"  {warn} Today cost: (unavailable)")
+
+            # Governance policy loaded?
+            try:
+                from cap.harness.governance import load_policy
+                _policy = load_policy()
+                click.echo(f"  {ok} Governance policy loaded: yes (daily_budget=${_policy.daily_budget_usd:.2f})")
+            except Exception as _pe:
+                click.echo(f"  {warn} Governance policy loaded: no ({_pe})")
+
+            # Audit entries today
+            try:
+                import time as _time
+                _today_start = _time.time() - 86400
+                _audit_count = _conn.execute(
+                    "SELECT COUNT(*) FROM audit_log WHERE timestamp >= ?",
+                    (_today_start,),
+                ).fetchone()[0]
+                click.echo(f"  {ok} Audit entries today: {_audit_count}")
+            except Exception:
+                click.echo(f"  {warn} Audit entries today: (audit_log unavailable)")
+
+            _conn.close()
+        else:
+            click.echo(f"  {warn} platform.db not found — run `cap init` to initialize")
+    except Exception as _harness_exc:
+        click.echo(f"  {warn} Harness check skipped: {_harness_exc}")
+
+    click.echo("")
 
 
 @click.command("orchestrator-status")
 def orchestrator_status():
     """Overall orchestration system status."""
-    from cap.orchestration.checkpoint import list_checkpoints
     from cap.reliability.dlq import list_dlq
     from cap.health.monitor import AgentHealthMonitor
     from cap.reliability.circuit_breaker import CircuitBreaker
 
     db = _get_db()
 
-    # Checkpoints summary
-    all_checkpoints = list_checkpoints(db)
-    running = [c for c in all_checkpoints if c["phase"] == "running"]
-    planned = [c for c in all_checkpoints if c["phase"] == "planned"]
-    completed = [c for c in all_checkpoints if c["phase"] == "completed"]
-    failed = [c for c in all_checkpoints if c["phase"] == "failed"]
+    # Checkpoints summary (checkpoint module removed — show zeros)
+    running = []
+    planned = []
+    completed = []
+    failed = []
 
     # DLQ count
     dlq_items = list_dlq(db)

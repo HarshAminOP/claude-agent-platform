@@ -7,7 +7,7 @@ Creates and migrates all four platform databases:
   fleet.db     — fleet manager
 
 Each database uses WAL mode, busy_timeout=5000, foreign_keys=ON and is
-created with 0600 permissions via umask.
+created with 0600 permissions via os.chmod.
 """
 
 import os
@@ -18,7 +18,7 @@ from pathlib import Path
 # ── Schema versions ────────────────────────────────────────────────────────────
 
 _PLATFORM_VERSION = 2   # existing schema is version 1; we add tables here
-_KNOWLEDGE_VERSION = 1
+_KNOWLEDGE_VERSION = 2
 _SESSIONS_VERSION = 1
 _FLEET_VERSION = 1
 
@@ -164,6 +164,54 @@ CREATE TRIGGER knowledge_fts_update AFTER UPDATE ON knowledge_entries BEGIN
 END;
 """
 
+_KNOWLEDGE_V2_NEW_TABLES_SQL = """
+CREATE TABLE IF NOT EXISTS embedding_cache (
+    content_hash TEXT PRIMARY KEY,
+    vector BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    accessed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ec_accessed ON embedding_cache(accessed_at);
+
+CREATE TABLE IF NOT EXISTS consolidation_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    expired_removed INTEGER DEFAULT 0,
+    duplicates_removed INTEGER DEFAULT 0,
+    failed_requeued INTEGER DEFAULT 0,
+    error TEXT
+);
+"""
+
+# Each ALTER is applied individually so a "duplicate column" error on one
+# does not prevent the remaining columns from being added.
+_KNOWLEDGE_V2_ALTER_COLUMNS = [
+    "ALTER TABLE knowledge_entries ADD COLUMN chunk_index INTEGER DEFAULT 0",
+    "ALTER TABLE knowledge_entries ADD COLUMN parent_entry_id INTEGER",
+    "ALTER TABLE knowledge_entries ADD COLUMN source_agent TEXT",
+    "ALTER TABLE knowledge_entries ADD COLUMN verified INTEGER DEFAULT 0",
+]
+
+
+def _apply_knowledge_v2(conn: sqlite3.Connection) -> None:
+    """Apply schema v2 additions to knowledge.db.
+
+    New tables are created with IF NOT EXISTS (safe to re-run).
+    ALTER TABLE statements are each wrapped in their own try/except so that
+    an 'already exists' error on one column does not abort the others.
+    SQLite ALTER TABLE cannot be rolled back, hence the per-statement guards.
+    """
+    conn.executescript(_KNOWLEDGE_V2_NEW_TABLES_SQL)
+    for stmt in _KNOWLEDGE_V2_ALTER_COLUMNS:
+        try:
+            conn.execute(stmt)
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
+    conn.commit()
+
+
 _SESSIONS_SQL = """
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
@@ -301,16 +349,13 @@ def _configure(conn: sqlite3.Connection) -> None:
 def create_database(path: Path) -> sqlite3.Connection:
     """Create a SQLite database at *path* with 0600 permissions.
 
-    Uses the umask trick: temporarily set umask to 0177 so that the file
-    sqlite3.connect() creates gets mode 0600.  The original umask is restored
-    immediately after the file exists.
+    Uses os.chmod after creation instead of umask (which is not thread-safe).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    old_umask = os.umask(0o177)
-    try:
-        conn = sqlite3.connect(str(path), check_same_thread=False)
-    finally:
-        os.umask(old_umask)
+    db_existed = path.exists()
+    conn = sqlite3.connect(str(path), check_same_thread=False)
+    if not db_existed and path.exists():
+        os.chmod(str(path), 0o600)
     _configure(conn)
     return conn
 
@@ -445,10 +490,18 @@ def init_knowledge_db(data_dir: Path) -> sqlite3.Connection:
     else:
         conn = create_database(path)
 
-    if _version(conn) < _KNOWLEDGE_VERSION:
+    current = _version(conn)
+
+    if current < 1:
         conn.executescript(_KNOWLEDGE_SQL)
         _try_create_virtual(conn, _KNOWLEDGE_FTS_SQL)
         _try_create_triggers(conn, _KNOWLEDGE_TRIGGERS_SQL)
+        _set_version(conn, 1)
+        conn.commit()
+        current = 1
+
+    if current < 2:
+        _apply_knowledge_v2(conn)
         _set_version(conn, _KNOWLEDGE_VERSION)
         conn.commit()
 

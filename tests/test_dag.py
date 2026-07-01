@@ -27,13 +27,13 @@ class TestCycleDetection:
     """Test DAG cycle detection."""
 
     def test_no_cycle_in_valid_dag(self):
-        """A valid DAG should return empty cycle list."""
+        """A valid DAG should return None (no cycle)."""
         dag = _make_dag([
             ("a", "dev", []),
             ("b", "dev", ["a"]),
             ("c", "dev", ["b"]),
         ])
-        assert dag.detect_cycle() == []
+        assert dag.detect_cycle() is None
 
     def test_simple_cycle_detected(self):
         """A -> B -> C -> A should be detected as a cycle."""

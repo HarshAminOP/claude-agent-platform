@@ -82,6 +82,18 @@ def main():
         except sqlite3.OperationalError:
             pass  # Tables may not exist yet if cap init hasn't run
 
+        # Notify harness hooks layer — best effort, must never crash
+        try:
+            output_str = str(tool_output) if tool_output else ""
+            from cap.harness.hooks import hooks_post_task
+            hooks_post_task(
+                agent_id="posttool",
+                success=True,
+                output_summary=output_str[:200],
+            )
+        except Exception:
+            pass  # posttool must NEVER crash
+
     # ── Bash with git pull/fetch: record sync trigger ─────────────────────────
     if tool_name == "Bash":
         # Check both command input and output for git operations

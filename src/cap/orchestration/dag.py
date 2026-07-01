@@ -92,12 +92,12 @@ class TaskDAG:
                 ready.append(step)
         return ready
 
-    def detect_cycle(self) -> list[str]:
+    def detect_cycle(self) -> Optional[list[str]]:
         """
         Detect cycles using DFS with 3-color marking.
 
         Returns:
-            List of step IDs forming the cycle if found, else empty list.
+            List of step IDs forming the cycle if found, else None.
         """
         WHITE, GRAY, BLACK = 0, 1, 2
         color = {sid: WHITE for sid in self.steps}
@@ -125,7 +125,7 @@ class TaskDAG:
                 cycle = dfs(sid)
                 if cycle:
                     return cycle
-        return []
+        return None
 
     def critical_path(self) -> list[str]:
         """
@@ -158,9 +158,13 @@ class TaskDAG:
         all_chains = [longest(sid) for sid in self.steps]
         return max(all_chains, key=len) if all_chains else []
 
-    def mark_failed_dependents(self) -> list[str]:
+    def mark_failed_dependents(self, _failed_step_id: Optional[str] = None) -> list[str]:
         """
         Skip all steps that depend on a FAILED step.
+
+        Args:
+            _failed_step_id: Optional hint for which step just failed; ignored
+                internally since the method scans all steps for FAILED state.
 
         Returns:
             List of step IDs that were skipped.

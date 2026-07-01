@@ -27,6 +27,7 @@ Cold Start Flow (from CAP System Design v1 Section 10):
 """
 
 import hashlib
+import importlib
 import json
 import os
 import shutil
@@ -445,6 +446,14 @@ _CAP_MCP_PERMISSIONS = [
     "mcp__cap-orchestrator__cap_status",
     "mcp__cap-orchestrator__cap_dlq_list",
     "mcp__cap-orchestrator__cap_health",
+    # Harness server tools
+    "mcp__cap-harness__agent_spawn",
+    "mcp__cap-harness__agent_execute",
+    "mcp__cap-harness__agent_status",
+    "mcp__cap-harness__agent_terminate",
+    "mcp__cap-harness__agent_cost",
+    "mcp__cap-harness__agent_health",
+    "mcp__cap-harness__agent_pool",
 ]
 
 
@@ -838,7 +847,7 @@ def _get_cap_mcp_servers(cap_home: Path, data_dir: Path) -> list[dict]:
             "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
         },
         {
-            "name": "workflow-engine",
+            "name": "cap-workflow-engine",
             "command": python_bin,
             "args": [str(servers_dir / "workflow_server.py")],
             "env": [f"PLATFORM_DATA_DIR={data_dir}", f"PYTHONPATH={cap_home}"],
@@ -872,6 +881,12 @@ def _get_cap_mcp_servers(cap_home: Path, data_dir: Path) -> list[dict]:
             "command": python_bin,
             "args": [str(servers_dir / "orchestrator_server.py")],
             "env": [f"CAP_ORCHESTRATOR_DB={data_dir / 'platform.db'}", f"PYTHONPATH={cap_home}"],
+        },
+        {
+            "name": "cap-harness",
+            "command": python_bin,
+            "args": ["-m", "cap.servers.harness_server"],
+            "env": [f"CAP_HOME={cap_home}", f"PYTHONPATH={cap_home}"],
         },
     ]
 
@@ -1145,28 +1160,161 @@ def _run_health_check(cap_home: Path, data_dir: Path, claude_dir: Path) -> list[
     return checks
 
 
+# ── Workspace auto-detection ─────────────────────────────────────────────────
+
+def _resolve_workspace(workspace_arg: str | None) -> Path:
+    """Resolve workspace path from CLI arg or CWD.
+
+    If no arg given, uses CWD. If CWD itself is inside a git repo, walks up
+    to find the git root and uses that as the workspace root.
+    """
+    if workspace_arg:
+        return Path(workspace_arg).resolve()
+
+    cwd = Path.cwd()
+    # Walk up to find the nearest .git directory
+    candidate = cwd
+    while True:
+        if (candidate / ".git").exists():
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            # Reached filesystem root — just use CWD
+            break
+        candidate = parent
+    return cwd
+
+
+# ── Python version check ──────────────────────────────────────────────────────
+
+_MIN_PYTHON = (3, 11)
+
+
+def _check_python_version() -> tuple[bool, str]:
+    """Return (ok, message). ok=False if Python is too old."""
+    major, minor = sys.version_info[:2]
+    if (major, minor) < _MIN_PYTHON:
+        return (
+            False,
+            f"Python {major}.{minor} detected. CAP requires Python "
+            f"{_MIN_PYTHON[0]}.{_MIN_PYTHON[1]}+. "
+            f"Upgrade with: brew install python@{_MIN_PYTHON[0]}.{_MIN_PYTHON[1]} "
+            f"or https://python.org/downloads",
+        )
+    return True, f"Python {major}.{minor} OK"
+
+
+# ── Post-init self-check ──────────────────────────────────────────────────────
+
+def _run_post_init_verification(data_dir: Path) -> list[tuple[str, str, str]]:
+    """Run a quick self-check after init completes.
+
+    Returns list of (check, status, detail) rows for display.
+    Status is one of: "yes", "no", or a count string.
+    """
+    rows: list[tuple[str, str, str]] = []
+
+    # 1. Can we import cap?
+    try:
+        importlib.import_module("cap")
+        rows.append(("cap importable", "yes", ""))
+    except ImportError as exc:
+        rows.append(("cap importable", "no", str(exc)[:60]))
+
+    # 2. MCP servers registered (count from ~/.claude.json)
+    claude_json = _claude_json_path()
+    if claude_json.exists():
+        try:
+            data = json.loads(claude_json.read_text())
+            count = len(data.get("mcpServers", {}))
+            rows.append(("MCP servers registered", str(count), ""))
+        except (json.JSONDecodeError, OSError):
+            rows.append(("MCP servers registered", "0", "parse error"))
+    else:
+        rows.append((
+            "MCP servers registered",
+            "0",
+            f"~/.claude.json not found — expected at {claude_json}",
+        ))
+
+    # 3. knowledge.db created?
+    knowledge_db = data_dir / "knowledge.db"
+    if knowledge_db.exists():
+        rows.append(("knowledge.db created", "yes", f"{knowledge_db.stat().st_size // 1024} KB"))
+    else:
+        rows.append(("knowledge.db created", "no", f"expected at {knowledge_db}"))
+
+    return rows
+
+
+# ── Claude settings file check ────────────────────────────────────────────────
+
+def _warn_if_settings_missing() -> str | None:
+    """Return a warning string if settings.json does not exist yet, else None."""
+    settings = _settings_json_path()
+    if not settings.exists():
+        return (
+            f"Claude settings file not found at expected path: {settings}\n"
+            "  CAP will create it. If Claude Code is not installed, hooks and\n"
+            "  permissions will be written when you first launch Claude Code."
+        )
+    return None
+
+
+# ── PATH check ────────────────────────────────────────────────────────────────
+
+def _cap_on_path() -> bool:
+    """Return True if the `cap` binary is resolvable on PATH right now."""
+    return shutil.which("cap") is not None
+
+
+# ── Minimal MCP server filter ─────────────────────────────────────────────────
+
+#: Servers kept when --minimal is passed (KB + session + hooks, no heavy stack)
+_MINIMAL_CAP_SERVER_NAMES = {"cap-knowledge", "cap-session"}
+
+
+def _filter_cap_servers_minimal(servers: list[dict]) -> list[dict]:
+    """Return only the servers needed for a minimal (KB-only) setup."""
+    return [s for s in servers if s["name"] in _MINIMAL_CAP_SERVER_NAMES]
+
+
 # ── cap init ──────────────────────────────────────────────────────────────────
 
 @click.command()
-@click.option("--minimal", is_flag=True, help="Only create databases + config (no agents/workflows)")
+@click.option("--minimal", is_flag=True, help="Only install knowledge + session servers and hooks (lightweight KB-only setup)")
 @click.option("--force", is_flag=True, help="Overwrite existing files")
 @click.option("--skip-mcp", is_flag=True, help="Don't register MCP servers with Claude")
-@click.option("--workspace", type=click.Path(exists=True), default=None, help="Workspace root (default: CWD)")
+@click.option("--workspace", type=click.Path(), default=None, help="Workspace root (default: git root of CWD, or CWD)")
 @click.option("--skip-fetch", is_flag=True, help="Don't run git fetch on detected repos")
 def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip_fetch: bool):
     """Initialize the CAP platform (run after install).
 
     Follows the Cold Start Flow from CAP System Design v1 Section 10:
     7 phases from directory creation to health-checked readiness in ~10s.
+
+    Use --minimal for a lightweight KB-only setup (knowledge + session servers
+    and hooks only; skips orchestrator, code-intel, fleet, diagram, backlog,
+    and workflow-engine).
     """
     from cap.lib.db_init import initialize_all_databases
 
     t_start = time.time()
 
+    # ── Pre-flight checks ────────────────────────────────────────────────────
+    py_ok, py_msg = _check_python_version()
+    if not py_ok:
+        console.print(f"[bold red]Error:[/bold red] {py_msg}")
+        raise SystemExit(1)
+
+    settings_warning = _warn_if_settings_missing()
+    if settings_warning:
+        console.print(f"[yellow]Note:[/yellow] {settings_warning}\n")
+
     cap_home = _cap_home()
     data_dir = cap_home / "data"
     claude_dir = _claude_dir()
-    workspace_path = Path(workspace) if workspace else Path.cwd()
+    workspace_path = _resolve_workspace(workspace)
 
     console.print(Panel(
         f"[bold]CAP — Claude Agent Platform[/bold] v0.5.0\n"
@@ -1272,6 +1420,20 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
     else:
         console.print(f"  [dim]─[/dim] Hook entries already configured")
 
+    # Copy .harness/ governance defaults to workspace
+    harness_src = bundled / "harness"
+    harness_dest = workspace_path / ".harness"
+    if harness_src.exists():
+        harness_dest.mkdir(parents=True, exist_ok=True)
+        for f in harness_src.iterdir():
+            if f.suffix == ".json":
+                dest_file = harness_dest / f.name
+                if not dest_file.exists() or force:
+                    shutil.copy2(f, dest_file)
+        console.print(f"  [green]✓[/green] .harness/mcp-policy.json provisioned to workspace")
+    else:
+        console.print(f"  [dim]─[/dim] No bundled harness defaults found")
+
     t_phase2 = time.time() - t_start
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1371,8 +1533,10 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
         if platform_registered > 0:
             console.print(f"  [green]✓[/green] {platform_registered} platform MCP servers registered")
 
-        # CAP servers
+        # CAP servers — in minimal mode only install knowledge + session
         cap_servers = _get_cap_mcp_servers(cap_home, data_dir)
+        if minimal:
+            cap_servers = _filter_cap_servers_minimal(cap_servers)
         registered = []
         for srv in cap_servers:
             if force:
@@ -1465,9 +1629,30 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
     console.print(f"\n[bold cyan]Phase 7[/bold cyan] [dim]({t_phase6:.1f}s)[/dim] — Complete")
     console.print("\n" + "─" * 60)
 
+    # ── Post-init self-check ─────────────────────────────────────────────────
+    console.print("\n[bold]Post-init verification[/bold]")
+    verify_rows = _run_post_init_verification(data_dir)
+    verify_table = Table(box=box.SIMPLE_HEAD, show_edge=False, show_header=True)
+    verify_table.add_column("Check", style="bold")
+    verify_table.add_column("Status", justify="center")
+    verify_table.add_column("Detail", style="dim")
+    for check, status, detail in verify_rows:
+        if status == "yes":
+            status_str = "[green]yes[/green]"
+        elif status == "no":
+            status_str = "[red]no[/red]"
+        else:
+            status_str = f"[cyan]{status}[/cyan]"
+        verify_table.add_row(check, status_str, detail)
+    console.print(verify_table)
+
+    # ── Shell restart hint (only if cap not yet on PATH) ─────────────────────
+    needs_restart = not _cap_on_path()
+
     summary_lines = [
         "[bold green]CAP initialized successfully![/bold green]",
         f"  Total time: {t_total:.1f}s | Repos: {len(detected_repos)} | Files indexed: {indexed_count}",
+        f"  Mode: {'minimal (KB-only)' if minimal else 'full'}",
         "",
         "[bold]What's ready now:[/bold]",
         "  - FTS5 search across workspace README/manifests/configs",
@@ -1487,6 +1672,17 @@ def init(minimal: bool, force: bool, skip_mcp: bool, workspace: str | None, skip
         "[bold]In Claude Code:[/bold]",
         "  Reload window (Cmd+Shift+P → Reload) to pick up new MCP servers.",
         "  Then ask anything — Claude will use knowledge_search automatically.",
+    ]
+
+    if needs_restart:
+        summary_lines += [
+            "",
+            "[bold yellow]Shell restart required:[/bold yellow]",
+            "  `cap` was not found on PATH. Restart your shell (or run",
+            "  `source ~/.zshrc` / `source ~/.bashrc`) so `cap` is available.",
+        ]
+
+    summary_lines += [
         "",
         "[bold]Safety:[/bold]",
         f"  Config backups stored in {_backups_dir()}",

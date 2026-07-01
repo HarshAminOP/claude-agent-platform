@@ -47,15 +47,26 @@ db = init_knowledge_db(DATA_DIR)
 VECTORS_DIR = DATA_DIR / "knowledge_vectors"
 VECTORS_DIR.mkdir(parents=True, exist_ok=True)
 
-embedding_client = EmbeddingClient(EmbeddingConfig(
-    region=config.bedrock.region,
-    profile=config.bedrock.profile,
-    dimensions=config.bedrock.embedding_dimensions,
-    max_concurrent=config.bedrock.embedding_max_concurrent,
-    max_retries=config.bedrock.max_retries,
-    base_delay_s=config.bedrock.base_delay_ms / 1000.0,
-    max_delay_s=config.bedrock.max_delay_ms / 1000.0,
-))
+try:
+    embedding_client = EmbeddingClient(EmbeddingConfig(
+        region=config.bedrock.region,
+        profile=config.bedrock.profile,
+        dimensions=config.bedrock.embedding_dimensions,
+        max_concurrent=config.bedrock.embedding_max_concurrent,
+        max_retries=config.bedrock.max_retries,
+        base_delay_s=config.bedrock.base_delay_ms / 1000.0,
+        max_delay_s=config.bedrock.max_delay_ms / 1000.0,
+    ))
+except Exception as _emb_init_err:
+    logger.warning("EmbeddingClient init failed — semantic search disabled: %s", _emb_init_err)
+    embedding_client = None
+
+try:
+    from cap.lib.embed_cache import PersistentEmbedCache
+    _embed_cache = PersistentEmbedCache(DATA_DIR / "embed_cache.db")
+except ImportError:
+    logger.warning("PersistentEmbedCache not available — embedding cache disabled")
+    _embed_cache = None
 
 vectors_table = None
 try:
@@ -79,6 +90,16 @@ def _now() -> str:
 def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
+
+try:
+    from cap.lib.consolidator import consolidate as _consolidate
+except ImportError:
+    logger.warning("consolidator module not available — auto-consolidation disabled")
+    _consolidate = None
+
+# --- Consolidation-on-nth-search state ---
+_search_count = 0
+_last_consolidation = 0.0
 
 # --- Search result cache (LRU-style, TTL-based) ---
 _SEARCH_CACHE: dict[str, tuple[float, list]] = {}
@@ -307,6 +328,17 @@ async def call_tool(name: str, arguments: dict):
 
 
 async def _handle_search(args: dict):
+    global _search_count, _last_consolidation
+    _search_count += 1
+    if _search_count % 50 == 0 and _consolidate is not None:
+        if time.time() - _last_consolidation > 6 * 3600:
+            try:
+                consolidation_result = _consolidate(db)
+                _last_consolidation = time.time()
+                logger.info("Auto-consolidation triggered at search #%d: %s", _search_count, consolidation_result)
+            except Exception as _cons_err:
+                logger.warning("Auto-consolidation failed (non-fatal): %s", _cons_err)
+
     query = args["query"]
     workspace = args.get("workspace")
     if workspace == "all":
@@ -323,8 +355,13 @@ async def _handle_search(args: dict):
         return cached
 
     query_vector = None
-    if strategy in ("hybrid", "semantic") and embedding_client.is_available is not False:
-        query_vector = await embedding_client.embed_single(query)
+    if strategy in ("hybrid", "semantic") and embedding_client is not None and embedding_client.is_available is not False:
+        if _embed_cache is not None:
+            query_vector = _embed_cache.get(query)
+        if query_vector is None:
+            query_vector = await embedding_client.embed_single(query)
+            if query_vector is not None and _embed_cache is not None:
+                _embed_cache.put(query, query_vector)
 
     results = hybrid_search(
         conn=db,
@@ -379,6 +416,12 @@ async def _handle_ingest(args: dict):
 
     content = sanitize_content(content)
     chash = _content_hash(content)
+
+    # Provenance: capture source_agent from caller metadata
+    source_agent = metadata.get("source_agent") if metadata else None
+    if source_agent:
+        metadata = dict(metadata)  # avoid mutating caller's dict
+        metadata.setdefault("source_agent", source_agent)
 
     existing = db.execute(
         "SELECT id FROM knowledge_entries WHERE content_hash = ? AND workspace = ?",
@@ -595,6 +638,20 @@ async def _handle_status(args: dict):
 
     bk_count = db.execute(f"SELECT COUNT(*) FROM business_knowledge {where}", params).fetchone()[0]
 
+    if embedding_client is None:
+        embedder_health = "degraded"
+    elif embedding_client.is_available is False:
+        embedder_health = "degraded"
+    else:
+        embedder_health = "available"
+
+    search_path = "hybrid" if (embedding_client is not None and embedding_client.is_available is not False and vectors_table is not None) else "keyword_only"
+
+    last_consolidation_iso = (
+        datetime.fromtimestamp(_last_consolidation, tz=timezone.utc).isoformat()
+        if _last_consolidation > 0.0 else None
+    )
+
     return [TextContent(type="text", text=json.dumps({
         "total_entries": total,
         "embedded": embedded,
@@ -604,8 +661,11 @@ async def _handle_status(args: dict):
         "graph_nodes": graph_nodes,
         "graph_edges": graph_edges,
         "business_knowledge_entries": bk_count,
-        "semantic_search_available": embedding_client.is_available is not False,
+        "semantic_search_available": embedding_client is not None and embedding_client.is_available is not False,
         "lancedb_available": vectors_table is not None,
+        "last_consolidation": last_consolidation_iso,
+        "embedder_health": embedder_health,
+        "search_path": search_path,
     }))]
 
 
@@ -675,14 +735,43 @@ async def _process_embedding_queue():
                 await asyncio.sleep(30)
                 continue
 
+            if embedding_client is None:
+                await asyncio.sleep(30)
+                continue
+
             texts = [row[2][:config.bedrock.embedding_max_input_tokens * 4] for row in pending]
-            vectors = await embedding_client.embed_batch(texts)
+
+            # Use embed_cache to avoid redundant Bedrock calls
+            vectors = []
+            cache_misses_indices = []
+            for i, (row, text) in enumerate(zip(pending, texts)):
+                cached_vec = _embed_cache.get(text) if _embed_cache is not None else None
+                vectors.append(cached_vec)
+                if cached_vec is None:
+                    cache_misses_indices.append(i)
+
+            if cache_misses_indices:
+                miss_texts = [texts[i] for i in cache_misses_indices]
+                fresh_vectors = await embedding_client.embed_batch(miss_texts)
+                for list_pos, orig_idx in enumerate(cache_misses_indices):
+                    vec = fresh_vectors[list_pos]
+                    vectors[orig_idx] = vec
+                    if vec is not None and _embed_cache is not None:
+                        _embed_cache.put(texts[orig_idx], vec)
 
             for row, vector in zip(pending, vectors):
                 eq_id, entry_id, _, entry_uuid, attempts = row
                 if vector is not None:
+                    # Duplicate prevention: skip LanceDB add if already embedded in SQLite
+                    already_embedded = db.execute(
+                        "SELECT 1 FROM knowledge_entries WHERE id = ? AND embedding_status = 'embedded'",
+                        (entry_id,)
+                    ).fetchone()
+                    if already_embedded:
+                        db.execute("UPDATE embedding_queue SET status = 'done', processed_at = ? WHERE id = ?", (_now(), eq_id))
+                        continue
+
                     if vectors_table is not None:
-                        import pyarrow as pa
                         entry = db.execute(
                             "SELECT content_type, title, source_path, workspace FROM knowledge_entries WHERE id = ?",
                             (entry_id,)

@@ -14,9 +14,12 @@ from cap.lib.hooks import (
 
 @pytest.fixture(autouse=True)
 def clean_hooks():
+    import cap.lib.hooks as _hooks_mod
     clear_hooks()
+    _hooks_mod._builtins_registered = False
     yield
     clear_hooks()
+    _hooks_mod._builtins_registered = False
 
 
 def test_register_and_emit():

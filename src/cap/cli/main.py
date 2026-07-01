@@ -123,11 +123,12 @@ from cap.eval.cli import eval_group
 cli.add_command(eval_group)
 
 # Register orchestration commands
-from cap.cli.commands import health, dlq, resume, orchestrator_status
+from cap.cli.commands import health, dlq, resume, orchestrator_status, doctor
 cli.add_command(health)
 cli.add_command(dlq)
 cli.add_command(resume)
 cli.add_command(orchestrator_status, name="orch-status")
+cli.add_command(doctor)
 
 # Register witness commands
 from cap.cli.witness import witness
@@ -351,12 +352,12 @@ def status():
 
 # ── cap doctor ─────────────────────────────────────────────────────────────────
 
-@cli.command()
+@cli.command("db-doctor")
 @click.option("--fix", is_flag=True, help="Attempt fixes (dry-run without --yes)")
 @click.option("--yes", is_flag=True, help="Actually apply fixes")
 @click.option("--db", "db_filter", type=str, default=None, help="Check specific database only")
-def doctor(fix: bool, yes: bool, db_filter: str | None):
-    """Diagnose and repair platform issues."""
+def db_doctor(fix: bool, yes: bool, db_filter: str | None):
+    """Diagnose and repair database integrity issues."""
     from cap.lib.config import load_config
     from cap.lib.db_maintenance import DBMaintenance
 
@@ -2142,16 +2143,8 @@ def conflicts_list(status: str | None, limit: int):
 @click.option("--once", is_flag=True, help="Render once and exit (no live refresh)")
 def dashboard(poll: float, once: bool):
     """Real-time status dashboard (TUI)."""
-    from cap.lib.dashboard import Dashboard
-
-    data_dir = _data_dir()
-    dash = Dashboard(data_dir, poll_interval=poll)
-
-    if once:
-        layout = dash.render_once()
-        console.print(layout)
-    else:
-        dash.run()
+    console.print("[red]dashboard is not available: dashboard module removed[/red]")
+    raise SystemExit(1)
 
 
 # ── cap git ───────────────────────────────────────────────────────────────────
@@ -2299,6 +2292,25 @@ def passthrough(workspace: str, ttl: int, reason: str, do_disable: bool, do_chec
         + (f"  Reason: {result['reason']}\n" if result.get('reason') else "")
         + f"  [dim]Enforcement is paused. Max 3 activations per hour.[/dim]"
     )
+
+
+# ── cap daemon ────────────────────────────────────────────────────────────────
+
+@cli.command("daemon")
+@click.option("--interval", default=21600, type=int, show_default=True, help="Seconds between maintenance runs")
+@click.option("--once", is_flag=True, help="Run once and exit")
+def daemon_cmd(interval: int, once: bool):
+    """Run CAP background maintenance daemon."""
+    import json as _json
+    from cap.harness.daemon import CapDaemon
+
+    d = CapDaemon(interval_seconds=interval)
+    if once:
+        results = d.run_once()
+        click.echo(_json.dumps(results, indent=2, default=str))
+    else:
+        click.echo(f"CAP daemon starting (interval={interval}s). Ctrl+C to stop.")
+        d.start()
 
 
 # ── Entrypoint ─────────────────────────────────────────────────────────────────

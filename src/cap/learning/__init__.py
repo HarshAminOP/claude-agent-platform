@@ -10,14 +10,12 @@ Modules:
 from cap.learning.engine import (
     CORRECTION_THRESHOLD,
     RoutingDecision,
-    RoutingRecord,
     auto_generate_baseline,
     get_learned_thresholds,
     get_trust,
     record_correction,
     record_outcome,
     record_routing,
-    retrieval_feedback,
     update_trust,
 )
 from cap.learning.feedback import (
@@ -36,14 +34,12 @@ __all__ = [
     # engine
     "CORRECTION_THRESHOLD",
     "RoutingDecision",
-    "RoutingRecord",
     "auto_generate_baseline",
     "get_learned_thresholds",
     "get_trust",
     "record_correction",
     "record_outcome",
     "record_routing",
-    "retrieval_feedback",
     "update_trust",
     # trust
     "AUTO_APPROVE_THRESHOLD",
