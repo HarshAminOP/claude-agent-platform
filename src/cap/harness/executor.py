@@ -13,6 +13,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import boto3
@@ -21,15 +22,52 @@ from botocore.exceptions import ClientError, NoCredentialsError, NoRegionError
 logger = logging.getLogger("cap.harness.executor")
 
 # ---------------------------------------------------------------------------
+# Config loading
+# ---------------------------------------------------------------------------
+
+
+def _load_config() -> dict:
+    """Load config from .harness/config.json if available.
+
+    Walks up from this file's location to find the project root (identified
+    by the presence of pyproject.toml), then loads .harness/config.json.
+    Returns an empty dict if the file does not exist or cannot be parsed.
+    """
+    current = Path(__file__).resolve().parent
+    for _ in range(10):
+        if (current / "pyproject.toml").exists():
+            config_path = current / ".harness" / "config.json"
+            if config_path.exists():
+                import json as _json
+                try:
+                    return _json.loads(config_path.read_text())
+                except Exception as exc:
+                    logging.getLogger("cap.harness.executor").warning(
+                        "Failed to load .harness/config.json: %s", exc
+                    )
+            break
+        current = current.parent
+    return {}
+
+
+_CONFIG = _load_config()
+
+# ---------------------------------------------------------------------------
 # Model resolution
 # ---------------------------------------------------------------------------
 
-#: Logical name → Bedrock cross-region inference profile ID (us.*).
+#: Logical name → Bedrock cross-region inference profile ID (eu.*).
 MODEL_ALIASES: dict[str, str] = {
-    "haiku": "us.anthropic.claude-haiku-4-5-20251001",
-    "sonnet": "us.anthropic.claude-sonnet-4-6-20250514",
-    "opus": "us.anthropic.claude-opus-4-6-20250610",
+    "haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "opus": "eu.anthropic.claude-opus-4-6-v1",
 }
+
+# Override MODEL_ALIASES from config if present
+if "models" in _CONFIG:
+    for _key, _value in _CONFIG["models"].items():
+        if _key in MODEL_ALIASES:
+            MODEL_ALIASES[_key] = _value
 
 #: Per-model pricing in USD per 1 000 000 tokens.
 MODEL_PRICING: dict[str, dict[str, float]] = {
@@ -40,6 +78,9 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
 
 # Prefix → tier mapping used to look up pricing for resolved model IDs.
 _MODEL_ID_TO_TIER: dict[str, str] = {
+    "eu.anthropic.claude-haiku": "haiku",
+    "eu.anthropic.claude-sonnet": "sonnet",
+    "eu.anthropic.claude-opus": "opus",
     "us.anthropic.claude-haiku": "haiku",
     "us.anthropic.claude-sonnet": "sonnet",
     "us.anthropic.claude-opus": "opus",

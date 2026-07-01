@@ -103,16 +103,10 @@ async def list_tools():
         ),
         Tool(
             name="cap_status",
-            description="Get the current status of a workflow: step states, progress, and completion info.",
+            description="Get current orchestrator status: active agents, budget, top spenders.",
             inputSchema={
                 "type": "object",
-                "properties": {
-                    "workflow_id": {
-                        "type": "string",
-                        "description": "Workflow ID to query",
-                    },
-                },
-                "required": ["workflow_id"],
+                "properties": {},
             },
         ),
         Tool(
@@ -144,7 +138,7 @@ async def list_tools():
                 "properties": {
                     "agent_type": {
                         "type": "string",
-                        "description": "Agent role: dev, devops, security, sre, code-review, test, docs, optimization, aws-architect",
+                        "description": "Agent role: dev, devops, security, sre, code-review, test, docs, optimization, aws-architect, explore, cicd",
                     },
                     "task": {
                         "type": "string",
@@ -171,6 +165,42 @@ async def list_tools():
                 "required": ["agent_type", "task"],
             },
         ),
+        Tool(
+            name="cap_orchestrate",
+            description="Route a task to the best specialist agent and execute it end-to-end via AWS Bedrock. Combines routing + execution in a single call. Returns the agent's full response with cost tracking.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "The task to execute.",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional context to prepend (knowledge base results, prior agent output).",
+                    },
+                    "workspace": {
+                        "type": "string",
+                        "description": "Working directory for file/bash operations.",
+                    },
+                },
+                "required": ["task"],
+            },
+        ),
+        Tool(
+            name="cap_resume",
+            description="Resume a failed agent execution by re-running the agent's last task.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "The agent ID to resume (from a previous cap_execute or cap_orchestrate result).",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        ),
     ]
 
 
@@ -189,6 +219,10 @@ async def call_tool(name: str, arguments: dict):
             return await _handle_health(arguments)
         elif name == "cap_execute":
             return await _handle_execute(arguments)
+        elif name == "cap_orchestrate":
+            return await _handle_orchestrate(arguments)
+        elif name == "cap_resume":
+            return await _handle_resume(arguments)
         else:
             return [TextContent(type="text", text=json.dumps({"error": f"Unknown tool: {name}"}))]
     except Exception as e:
@@ -214,18 +248,100 @@ async def _handle_route(args: dict):
 
 
 async def _handle_plan(args: dict):
-    """Generate a TaskDAG plan from a task description."""
-    return [TextContent(type="text", text=json.dumps({
-        "error": "cap_plan is not available: planner module removed",
-    }))]
+    """Generate a TaskDAG plan using Bedrock to decompose the task."""
+    import os
+    from cap.harness.converse_executor import ConverseExecutor
+
+    task_description = args["task_description"]
+
+    # Use haiku for planning (fast + cheap)
+    executor = ConverseExecutor(
+        profile=os.environ.get("AWS_PROFILE"),
+        region=os.environ.get("AWS_DEFAULT_REGION", "eu-central-1"),
+        budget_limit_usd=float(os.environ.get("CAP_DAILY_LIMIT_USD", "5.0")),
+    )
+
+    plan_prompt = f"""Decompose this task into a sequence of sub-tasks for specialist agents.
+
+Available agent types: dev, devops, security, sre, code-review, test, docs, explore, aws-architect, optimization, cicd
+
+Task: {task_description}
+
+Return a JSON object with this exact structure:
+{{
+  "steps": [
+    {{"id": "step-1", "agent_type": "agent-name", "task": "specific sub-task description", "depends_on": []}},
+    {{"id": "step-2", "agent_type": "agent-name", "task": "specific sub-task description", "depends_on": ["step-1"]}}
+  ],
+  "parallel_groups": [["step-1"], ["step-2"]],
+  "estimated_cost_usd": 0.05
+}}
+
+Return ONLY the JSON. No explanation."""
+
+    result = executor.execute(
+        agent_id=f"planner-{uuid.uuid4().hex[:8]}",
+        agent_type="dev",
+        prompt=plan_prompt,
+        model="haiku",
+        max_tokens=4096,
+        temperature=0.3,
+    )
+
+    if result.error:
+        return [TextContent(type="text", text=json.dumps({
+            "error": f"Planning failed: {result.error}",
+        }))]
+
+    # Extract JSON from response (handle markdown code blocks)
+    response_text = result.response or ""
+    if "```json" in response_text:
+        response_text = response_text.split("```json")[1].split("```")[0]
+    elif "```" in response_text:
+        response_text = response_text.split("```")[1].split("```")[0]
+
+    try:
+        plan = json.loads(response_text.strip())
+        plan["workflow_id"] = _generate_workflow_id()
+        plan["planning_cost_usd"] = result.total_cost_usd
+        plan["planning_model"] = result.model
+        return [TextContent(type="text", text=json.dumps(plan))]
+    except (json.JSONDecodeError, IndexError) as exc:
+        return [TextContent(type="text", text=json.dumps({
+            "error": f"Failed to parse plan: {exc}",
+            "raw_response": (result.response or "")[:1000],
+        }))]
 
 
 async def _handle_status(args: dict):
-    """Get workflow status. Execution is handled by external workflow scripts."""
-    workflow_id = args["workflow_id"]
+    """Get active agent and execution status."""
+    from cap.harness.agent_store import list_agents
+    import cap.harness.cost_meter as cost_meter
+
+    try:
+        active = list_agents(status="active")
+    except Exception:
+        active = []
+
+    try:
+        remaining = cost_meter.budget_remaining()
+    except Exception:
+        remaining = None
+
+    try:
+        spenders = cost_meter.top_spenders(n=5)
+    except Exception:
+        spenders = []
+
     return [TextContent(type="text", text=json.dumps({
-        "error": "cap_status: workflow execution is handled by external workflow scripts. Query the workflow engine directly.",
-        "workflow_id": workflow_id,
+        "active_agents": [
+            {"agent_id": a.agent_id, "agent_type": a.agent_type, "status": a.status, "model": a.model}
+            for a in active
+        ],
+        "active_count": len(active),
+        "budget_remaining_usd": remaining,
+        "top_spenders": spenders[:5] if spenders else [],
+        "timestamp": _now(),
     }))]
 
 
@@ -284,6 +400,19 @@ async def _handle_health(args: dict):
     }))]
 
 
+def _load_harness_config() -> dict:
+    """Load .harness/config.json if it exists, else return defaults."""
+    config_path = Path.cwd() / ".harness" / "config.json"
+    if not config_path.exists():
+        config_path = Path(__file__).parent.parent / "data" / "harness" / "config.json"
+    if config_path.exists():
+        try:
+            return json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
 async def _handle_execute(args: dict):
     """Full agent execution: spawn -> execute -> record -> learn."""
     import os
@@ -298,6 +427,15 @@ async def _handle_execute(args: dict):
     context = args.get("context")
     max_tokens = int(args.get("max_tokens", 8192))
 
+    # Load config
+    config = _load_harness_config()
+    aws_config = config.get("aws", {})
+    budget_config = config.get("budget", {})
+
+    profile = os.environ.get("AWS_PROFILE") or aws_config.get("profile")
+    region = os.environ.get("AWS_DEFAULT_REGION") or aws_config.get("region", "eu-central-1")
+    budget_limit = float(os.environ.get("CAP_DAILY_LIMIT_USD", budget_config.get("daily_limit_usd", 5.0)))
+
     # Spawn agent record
     try:
         record = spawn_agent(agent_type, model=None)
@@ -306,9 +444,9 @@ async def _handle_execute(args: dict):
 
     # Create executor
     executor = ConverseExecutor(
-        profile=os.environ.get("AWS_PROFILE"),
-        region=os.environ.get("AWS_DEFAULT_REGION", "eu-central-1"),
-        budget_limit_usd=float(os.environ.get("CAP_DAILY_LIMIT_USD", "5.0")),
+        profile=profile,
+        region=region,
+        budget_limit_usd=budget_limit,
     )
 
     # Execute
@@ -348,6 +486,7 @@ async def _handle_execute(args: dict):
             execution_id=record.agent_id,
             success=result.error is None,
             output_summary=(result.response or "")[:500] if result.response else None,
+            agent_type=agent_type,
         )
     except Exception as exc:
         logger.warning("cap_execute: hooks_post_task failed: %s", exc)
@@ -368,6 +507,112 @@ async def _handle_execute(args: dict):
     }
 
     return [TextContent(type="text", text=json.dumps(payload))]
+
+
+async def _handle_orchestrate(args: dict):
+    """Route a task to the best specialist agent and execute it end-to-end.
+
+    This is the Ruflo-equivalent "just do it" entrypoint:
+    1. Determine best agent_type via agentdb_semantic_route (keyword + history)
+    2. Determine best model via hooks_route (embedding + tier)
+    3. Execute via ConverseExecutor (real Bedrock call)
+    4. Record cost + update trust
+    5. Return result with full routing metadata
+    """
+    from cap.harness.hooks import hooks_route
+    from cap.harness.agentdb import agentdb_semantic_route
+
+    task = args["task"]
+    context = args.get("context")
+    workspace = args.get("workspace")
+
+    # Step 1: Determine agent_type (who handles this task)
+    agent_routing = agentdb_semantic_route(task)
+    agent_type = agent_routing.get("recommended_agent_type", "dev")
+    agent_confidence = agent_routing.get("confidence", 0.3)
+
+    # Step 2: Determine model — prefer agent's configured default, then hooks_route
+    config = _load_harness_config()
+    agent_defaults = config.get("agent_defaults", {})
+    agent_default_model = agent_defaults.get(agent_type)
+
+    if agent_default_model:
+        short_model = agent_default_model
+    else:
+        model_routing = hooks_route(task, agent_type=agent_type)
+        recommended_model = model_routing.get("recommended_model", "claude-sonnet-4-6")
+        _full_to_short: dict[str, str] = {
+            "claude-haiku-4-5": "haiku",
+            "claude-sonnet-4-6": "sonnet",
+            "claude-sonnet-4-5": "sonnet",
+            "claude-opus-4-6": "opus",
+            "haiku": "haiku",
+            "sonnet": "sonnet",
+            "opus": "opus",
+        }
+        short_model = _full_to_short.get(recommended_model, "sonnet")
+
+    model_routing = hooks_route(task, agent_type=agent_type)
+    tier = model_routing.get("tier", "lightweight")
+
+    # Step 3: Execute via cap_execute
+    execute_args = {
+        "agent_type": agent_type,
+        "task": task,
+        "model": short_model,
+    }
+    if context:
+        execute_args["context"] = context
+    if workspace:
+        execute_args["workspace"] = workspace
+
+    result_contents = await _handle_execute(execute_args)
+
+    # Step 4: Enrich result with routing metadata
+    try:
+        result_payload = json.loads(result_contents[0].text)
+        result_payload["routing"] = {
+            "agent_type": agent_type,
+            "agent_confidence": agent_confidence,
+            "agent_alternatives": agent_routing.get("alternatives", []),
+            "based_on_patterns": agent_routing.get("based_on_patterns", 0),
+            "model_alias": short_model,
+            "tier": tier,
+            "model_confidence": model_routing.get("confidence"),
+            "model_reason": model_routing.get("reason"),
+            "routing_method": model_routing.get("routing_method", "keyword"),
+        }
+        return [TextContent(type="text", text=json.dumps(result_payload))]
+    except (json.JSONDecodeError, IndexError, AttributeError):
+        return result_contents
+
+
+async def _handle_resume(args: dict):
+    """Resume a failed agent execution by re-running the same task."""
+    from cap.harness.agent_store import get_agent
+
+    agent_id = args.get("agent_id") or args.get("workflow_id")
+    if not agent_id:
+        return [TextContent(type="text", text=json.dumps({"error": "agent_id or workflow_id required"}))]
+
+    try:
+        agent = get_agent(agent_id)
+    except Exception as exc:
+        return [TextContent(type="text", text=json.dumps({"error": f"agent not found: {exc}"}))]
+
+    if agent is None:
+        return [TextContent(type="text", text=json.dumps({"error": f"no agent with id {agent_id}"}))]
+
+    last_task = agent.get("last_task") or agent.get("task_description", "")
+    if not last_task:
+        return [TextContent(type="text", text=json.dumps({"error": "no task recorded for this agent — cannot resume"}))]
+
+    execute_args = {
+        "agent_type": agent.get("agent_type", "dev"),
+        "task": last_task,
+        "model": agent.get("model"),
+    }
+    return await _handle_execute(execute_args)
 
 
 async def main():

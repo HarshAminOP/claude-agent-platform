@@ -365,6 +365,7 @@ def hooks_post_task(
     execution_id: str,
     success: bool,
     output_summary: Optional[str] = None,
+    agent_type: Optional[str] = None,
     _db_path: Optional[Path] = None,
 ) -> dict:
     """
@@ -404,6 +405,7 @@ def hooks_post_task(
         if success and output_summary:
             pattern_id = uuid.uuid4().hex
             prompt_summary = f"agent={agent_id} exec={execution_id}"
+            stored_agent_type = agent_type or "dev"
             conn.execute(
                 """INSERT OR IGNORE INTO patterns
                    (id, task_type, prompt_hash, prompt_summary, model, agent_type,
@@ -415,7 +417,7 @@ def hooks_post_task(
                     execution_id[:16],  # use execution_id as a proxy hash
                     prompt_summary,
                     None,               # model unknown at this level
-                    agent_id,
+                    stored_agent_type,
                     None,               # cost unknown
                     None,               # duration unknown
                     1,

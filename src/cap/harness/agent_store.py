@@ -27,7 +27,7 @@ from typing import Optional
 PLATFORM_DB_PATH = Path.home() / ".claude-platform" / "data" / "platform.db"
 
 # Agent types with explicit model defaults (matches CAP agent roster)
-_SONNET_AGENTS = frozenset({"dev", "devops", "test", "docs"})
+_SONNET_AGENTS = frozenset({"dev", "devops", "test", "docs", "sre", "cicd", "explore"})
 _OPUS_AGENTS = frozenset({"security", "code-review", "aws-architect"})
 _HAIKU_AGENTS = frozenset({"optimization"})
 
