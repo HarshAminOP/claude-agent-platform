@@ -1,8 +1,33 @@
 {
   "_comment": "Template for CAP harness config. Generated config lives at ~/.claude-platform/harness-config.json. Run 'cap init' to configure.",
+  "provider": "aws-bedrock",
   "aws": {
     "profile": "__SET_BY_CAP_INIT__",
-    "region": "eu-central-1"
+    "region": "eu-central-1",
+    "auth_method": "sso-profile"
+  },
+  "anthropic": {
+    "_comment": "Used when provider=anthropic-api. API key is NEVER stored here — only the env var name.",
+    "api_key_env": "ANTHROPIC_API_KEY"
+  },
+  "azure": {
+    "_comment": "Used when provider=azure-openai.",
+    "endpoint": "",
+    "api_key_env": "AZURE_OPENAI_API_KEY",
+    "deployments": {
+      "haiku": "claude-haiku",
+      "sonnet": "claude-sonnet",
+      "opus": "claude-opus"
+    }
+  },
+  "local": {
+    "_comment": "Used when provider=local (Ollama, vLLM, etc.).",
+    "base_url": "http://localhost:11434",
+    "models": {
+      "haiku": "llama3",
+      "sonnet": "codestral",
+      "opus": "llama3:70b"
+    }
   },
   "models": {
     "haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",

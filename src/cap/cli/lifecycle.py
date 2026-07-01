@@ -1281,8 +1281,45 @@ def _filter_cap_servers_minimal(servers: list[dict]) -> list[dict]:
 
 # ── Setup Wizard helpers ──────────────────────────────────────────────────────
 
+# Provider constants
+PROVIDER_AWS_BEDROCK = "aws-bedrock"
+PROVIDER_ANTHROPIC_API = "anthropic-api"
+PROVIDER_AZURE_OPENAI = "azure-openai"
+PROVIDER_LOCAL = "local"
+
+# Auth method constants for aws-bedrock
+AUTH_SSO_PROFILE = "sso-profile"
+AUTH_ENV_VARS = "env-vars"
+AUTH_STATIC_CREDENTIALS = "static-credentials"
+AUTH_INSTANCE_ROLE = "instance-role"
+
+# Default model IDs per provider
+_PROVIDER_MODEL_DEFAULTS = {
+    PROVIDER_AWS_BEDROCK: {
+        "haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "opus": "eu.anthropic.claude-opus-4-6-v1",
+    },
+    PROVIDER_ANTHROPIC_API: {
+        "haiku": "claude-haiku-4-5-20251001",
+        "sonnet": "claude-sonnet-4-5-20250929",
+        "opus": "claude-opus-4-6-20250918",
+    },
+    PROVIDER_AZURE_OPENAI: {
+        "haiku": "claude-haiku",
+        "sonnet": "claude-sonnet",
+        "opus": "claude-opus",
+    },
+    PROVIDER_LOCAL: {
+        "haiku": "llama3",
+        "sonnet": "codestral",
+        "opus": "llama3:70b",
+    },
+}
+
+
 def _detect_aws_profiles() -> list[str]:
-    """Parse ~/.aws/config for available profile names."""
+    """Parse ~/.aws/config for available profile names (SSO and non-SSO)."""
     aws_config = Path.home() / ".aws" / "config"
     profiles = []
     if aws_config.exists():
@@ -1294,6 +1331,19 @@ def _detect_aws_profiles() -> list[str]:
                 profiles.insert(0, "default")
             elif section.startswith("profile "):
                 profiles.append(section[8:])  # Strip "profile " prefix
+    return profiles
+
+
+def _detect_aws_credential_profiles() -> list[str]:
+    """Parse ~/.aws/credentials for available static credential profile names."""
+    aws_creds = Path.home() / ".aws" / "credentials"
+    profiles = []
+    if aws_creds.exists():
+        import configparser
+        config = configparser.RawConfigParser()
+        config.read(str(aws_creds))
+        for section in config.sections():
+            profiles.append(section)
     return profiles
 
 
@@ -1328,6 +1378,7 @@ _MODEL_TIERS = {
 def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dict:
     """Interactive setup wizard for first-time CAP configuration.
 
+    Supports multiple LLM providers and AWS authentication methods.
     Returns the complete harness config dict.
     """
     config_path = Path.home() / ".claude-platform" / "harness-config.json"
@@ -1341,59 +1392,209 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
 
     console.print("\n[bold cyan]Setup Wizard[/bold cyan] — Configuring CAP for your environment\n")
 
-    # 1. AWS Profile
-    profiles = _detect_aws_profiles()
+    # ── Step 1: LLM Provider Selection ───────────────────────────────────────
+    provider_choices = [PROVIDER_AWS_BEDROCK, PROVIDER_ANTHROPIC_API, PROVIDER_AZURE_OPENAI, PROVIDER_LOCAL]
+
     if non_interactive:
-        aws_profile = profiles[0] if profiles else ""
+        provider = PROVIDER_AWS_BEDROCK
     else:
-        if profiles:
-            console.print("[bold]Available AWS profiles:[/bold]")
-            for i, p in enumerate(profiles, 1):
-                console.print(f"  [cyan]{i}[/cyan]. {p}")
+        console.print("[bold]LLM Provider:[/bold]")
+        console.print(f"  [cyan]1[/cyan]. aws-bedrock (default) — Claude via AWS Bedrock")
+        console.print(f"  [cyan]2[/cyan]. anthropic-api — Direct Anthropic API")
+        console.print(f"  [cyan]3[/cyan]. azure-openai — Azure OpenAI Service")
+        console.print(f"  [cyan]4[/cyan]. local — Local model (Ollama, vLLM, etc.)")
+        console.print()
+        choice = click.prompt(
+            "Select LLM provider (number or name)",
+            default="1",
+            type=str,
+        )
+        if choice.isdigit() and 1 <= int(choice) <= len(provider_choices):
+            provider = provider_choices[int(choice) - 1]
+        elif choice in provider_choices:
+            provider = choice
+        else:
+            provider = PROVIDER_AWS_BEDROCK
+
+    # ── Step 2: Provider-specific configuration ──────────────────────────────
+    aws_config: dict = {}
+    anthropic_config: dict = {}
+    azure_config: dict = {}
+    local_config: dict = {}
+
+    if provider == PROVIDER_AWS_BEDROCK:
+        # Auth method selection
+        auth_choices = [AUTH_SSO_PROFILE, AUTH_ENV_VARS, AUTH_STATIC_CREDENTIALS, AUTH_INSTANCE_ROLE]
+
+        if non_interactive:
+            auth_method = AUTH_ENV_VARS
+            aws_profile = ""
+            aws_region = "eu-central-1"
+        else:
+            console.print("\n[bold]AWS Authentication Method:[/bold]")
+            console.print(f"  [cyan]1[/cyan]. sso-profile — AWS SSO profile from ~/.aws/config")
+            console.print(f"  [cyan]2[/cyan]. env-vars — AWS_ACCESS_KEY_ID etc. set at runtime")
+            console.print(f"  [cyan]3[/cyan]. static-credentials — Profile from ~/.aws/credentials")
+            console.print(f"  [cyan]4[/cyan]. instance-role — EC2/ECS instance role (no config needed)")
             console.print()
-            choice = click.prompt(
-                "Select AWS profile (number or name)",
+            auth_choice = click.prompt(
+                "Select auth method (number or name)",
                 default="1",
                 type=str,
             )
-            # Accept either number or name
-            if choice.isdigit() and 1 <= int(choice) <= len(profiles):
-                aws_profile = profiles[int(choice) - 1]
-            elif choice in profiles:
-                aws_profile = choice
+            if auth_choice.isdigit() and 1 <= int(auth_choice) <= len(auth_choices):
+                auth_method = auth_choices[int(auth_choice) - 1]
+            elif auth_choice in auth_choices:
+                auth_method = auth_choice
             else:
-                aws_profile = choice  # Let them type a custom one
+                auth_method = AUTH_SSO_PROFILE
+
+            # Profile selection based on auth method
+            if auth_method == AUTH_SSO_PROFILE:
+                profiles = _detect_aws_profiles()
+                if profiles:
+                    console.print("\n[bold]Available AWS SSO profiles:[/bold]")
+                    for i, p in enumerate(profiles, 1):
+                        console.print(f"  [cyan]{i}[/cyan]. {p}")
+                    console.print()
+                    choice = click.prompt(
+                        "Select AWS profile (number or name)",
+                        default="1",
+                        type=str,
+                    )
+                    if choice.isdigit() and 1 <= int(choice) <= len(profiles):
+                        aws_profile = profiles[int(choice) - 1]
+                    elif choice in profiles:
+                        aws_profile = choice
+                    else:
+                        aws_profile = choice
+                else:
+                    console.print("[yellow]No AWS profiles found in ~/.aws/config[/yellow]")
+                    aws_profile = click.prompt("AWS profile name", default="")
+            elif auth_method == AUTH_STATIC_CREDENTIALS:
+                cred_profiles = _detect_aws_credential_profiles()
+                if cred_profiles:
+                    console.print("\n[bold]Available credential profiles (~/.aws/credentials):[/bold]")
+                    for i, p in enumerate(cred_profiles, 1):
+                        console.print(f"  [cyan]{i}[/cyan]. {p}")
+                    console.print()
+                    choice = click.prompt(
+                        "Select credential profile (number or name)",
+                        default="1",
+                        type=str,
+                    )
+                    if choice.isdigit() and 1 <= int(choice) <= len(cred_profiles):
+                        aws_profile = cred_profiles[int(choice) - 1]
+                    elif choice in cred_profiles:
+                        aws_profile = choice
+                    else:
+                        aws_profile = choice
+                else:
+                    console.print("[yellow]No profiles found in ~/.aws/credentials[/yellow]")
+                    aws_profile = click.prompt("Credential profile name", default="default")
+            elif auth_method == AUTH_ENV_VARS:
+                aws_profile = ""
+                console.print("\n  [dim]Note: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally")
+                console.print("  AWS_SESSION_TOKEN must be set in the environment at runtime.[/dim]")
+            elif auth_method == AUTH_INSTANCE_ROLE:
+                aws_profile = ""
+                console.print("\n  [dim]Note: Using default boto3 credential chain (instance role).[/dim]")
+            else:
+                aws_profile = ""
+
+            aws_region = click.prompt("AWS region", default="eu-central-1")
+
+        aws_config = {
+            "profile": aws_profile,
+            "region": aws_region,
+            "auth_method": auth_method,
+        }
+
+    elif provider == PROVIDER_ANTHROPIC_API:
+        if non_interactive:
+            api_key_env = "ANTHROPIC_API_KEY"
         else:
-            console.print("[yellow]No AWS profiles found in ~/.aws/config[/yellow]")
-            aws_profile = click.prompt("AWS profile name", default="")
+            console.print("\n[bold]Anthropic API Configuration:[/bold]")
+            console.print("  [dim]The API key is NOT stored in config. Instead, we store the name")
+            console.print("  of the environment variable that contains it (default: ANTHROPIC_API_KEY).[/dim]\n")
+            api_key_env = click.prompt(
+                "Environment variable name for API key",
+                default="ANTHROPIC_API_KEY",
+            )
+            # Validate that the env var is set (warning only)
+            if not os.environ.get(api_key_env):
+                console.print(f"  [yellow]Warning:[/yellow] ${api_key_env} is not currently set. "
+                              f"Set it before running CAP agents.")
 
-    # 2. Region
-    aws_region = "eu-central-1" if non_interactive else click.prompt("AWS region", default="eu-central-1")
+        anthropic_config = {
+            "api_key_env": api_key_env,
+        }
 
-    # 3. Budget
+    elif provider == PROVIDER_AZURE_OPENAI:
+        if non_interactive:
+            azure_config = {
+                "endpoint": "",
+                "api_key_env": "AZURE_OPENAI_API_KEY",
+                "deployments": {"haiku": "claude-haiku", "sonnet": "claude-sonnet", "opus": "claude-opus"},
+            }
+        else:
+            console.print("\n[bold]Azure OpenAI Configuration:[/bold]")
+            endpoint = click.prompt("Azure OpenAI endpoint URL", default="")
+            api_key_env = click.prompt(
+                "Environment variable name for Azure API key",
+                default="AZURE_OPENAI_API_KEY",
+            )
+            console.print("\n  [dim]Enter deployment names for each model tier:[/dim]")
+            deploy_haiku = click.prompt("  Haiku deployment name", default="claude-haiku")
+            deploy_sonnet = click.prompt("  Sonnet deployment name", default="claude-sonnet")
+            deploy_opus = click.prompt("  Opus deployment name", default="claude-opus")
+            azure_config = {
+                "endpoint": endpoint,
+                "api_key_env": api_key_env,
+                "deployments": {"haiku": deploy_haiku, "sonnet": deploy_sonnet, "opus": deploy_opus},
+            }
+
+    elif provider == PROVIDER_LOCAL:
+        if non_interactive:
+            local_config = {
+                "base_url": "http://localhost:11434",
+                "models": {"haiku": "llama3", "sonnet": "codestral", "opus": "llama3:70b"},
+            }
+        else:
+            console.print("\n[bold]Local Model Configuration:[/bold]")
+            base_url = click.prompt("Base URL", default="http://localhost:11434")
+            console.print("\n  [dim]Enter model names for each tier:[/dim]")
+            model_haiku = click.prompt("  Haiku-equivalent model", default="llama3")
+            model_sonnet = click.prompt("  Sonnet-equivalent model", default="codestral")
+            model_opus = click.prompt("  Opus-equivalent model", default="llama3:70b")
+            local_config = {
+                "base_url": base_url,
+                "models": {"haiku": model_haiku, "sonnet": model_sonnet, "opus": model_opus},
+            }
+
+    # ── Step 3: Region (for non-bedrock, still useful for API routing) ───────
+    # Already handled in the bedrock path above
+
+    # ── Step 4: Budget ───────────────────────────────────────────────────────
     daily_budget = 5.0 if non_interactive else click.prompt("Daily budget limit (USD)", default=5.0, type=float)
 
-    # 4. Model tier
+    # ── Step 5: Model tier ───────────────────────────────────────────────────
     tier = "balanced" if non_interactive else click.prompt(
         "Model tier (economy=cheapest, balanced=default, quality=best)",
         type=click.Choice(["economy", "balanced", "quality"]),
         default="balanced",
     )
 
-    config = {
-        "aws": {
-            "profile": aws_profile,
-            "region": aws_region,
-        },
-        "models": {
-            "haiku": "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-            "sonnet": "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-            "opus": "eu.anthropic.claude-opus-4-6-v1",
-        },
+    # ── Build config ─────────────────────────────────────────────────────────
+    models = _PROVIDER_MODEL_DEFAULTS.get(provider, _PROVIDER_MODEL_DEFAULTS[PROVIDER_AWS_BEDROCK])
+
+    config: dict = {
+        "provider": provider,
         "budget": {
             "daily_limit_usd": daily_budget,
             "alert_threshold_pct": 80,
         },
+        "models": models,
         "agent_defaults": _MODEL_TIERS[tier],
         "execution": {
             "max_tool_iterations": 15,
@@ -1404,13 +1605,37 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         },
     }
 
+    # Add provider-specific config sections
+    if provider == PROVIDER_AWS_BEDROCK:
+        config["aws"] = aws_config
+    elif provider == PROVIDER_ANTHROPIC_API:
+        config["anthropic"] = anthropic_config
+    elif provider == PROVIDER_AZURE_OPENAI:
+        config["azure"] = azure_config
+    elif provider == PROVIDER_LOCAL:
+        config["local"] = local_config
+
+    # Backward compat: always include aws section (may be empty for non-bedrock)
+    if "aws" not in config:
+        config["aws"] = {"profile": "", "region": "eu-central-1", "auth_method": ""}
+
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2) + "\n")
 
     # Print configuration summary
     console.print("\n[bold]Configuration Summary:[/bold]")
-    console.print(f"  AWS Profile:  [cyan]{aws_profile}[/cyan]")
-    console.print(f"  Region:       [cyan]{aws_region}[/cyan]")
+    console.print(f"  Provider:     [cyan]{provider}[/cyan]")
+    if provider == PROVIDER_AWS_BEDROCK:
+        console.print(f"  Auth Method:  [cyan]{aws_config.get('auth_method', '')}[/cyan]")
+        if aws_config.get("profile"):
+            console.print(f"  AWS Profile:  [cyan]{aws_config['profile']}[/cyan]")
+        console.print(f"  Region:       [cyan]{aws_config.get('region', 'eu-central-1')}[/cyan]")
+    elif provider == PROVIDER_ANTHROPIC_API:
+        console.print(f"  API Key Env:  [cyan]${anthropic_config.get('api_key_env', 'ANTHROPIC_API_KEY')}[/cyan]")
+    elif provider == PROVIDER_AZURE_OPENAI:
+        console.print(f"  Endpoint:     [cyan]{azure_config.get('endpoint', '')}[/cyan]")
+    elif provider == PROVIDER_LOCAL:
+        console.print(f"  Base URL:     [cyan]{local_config.get('base_url', '')}[/cyan]")
     console.print(f"  Daily Budget: [cyan]${daily_budget:.2f}[/cyan]")
     console.print(f"  Model Tier:   [cyan]{tier}[/cyan]")
     console.print(f"\n  [green]✓[/green] Configuration written to {config_path}")

@@ -52,6 +52,9 @@ migrate(db)
 
 server = Server("cap-orchestrator")
 
+# Module-level singleton for embedding-based routing (lazy-initialized)
+_embedding_router = None
+
 def _now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
@@ -231,20 +234,51 @@ async def call_tool(name: str, arguments: dict):
 
 
 async def _handle_route(args: dict):
-    """Route a task to the appropriate tier."""
+    """Route a task to the appropriate tier, using EmbeddingRouter first."""
     task_description = args["task_description"]
     session_id = args.get("session_id", "unknown")
 
+    # Try embedding-based routing first for agent_type recommendation
+    global _embedding_router
+    routing_method = "keyword"
+    embed_recommendation = None
+
+    try:
+        if _embedding_router is None:
+            from cap.harness.embed_router import EmbeddingRouter
+            _embedding_router = EmbeddingRouter()
+        embed_recommendation = _embedding_router.route(task_description)
+    except Exception as exc:
+        logger.debug("EmbeddingRouter failed in _handle_route: %s", exc)
+        embed_recommendation = None
+
+    if embed_recommendation and embed_recommendation.get("confidence", 0) > 0.5:
+        routing_method = "embedding"
+
+    # Standard tier routing (complexity-based)
     decision = route(task_description, db, session_id)
 
-    return [TextContent(type="text", text=json.dumps({
+    response = {
         "tier": decision.tier.value,
         "reasoning": decision.reasoning,
         "estimated_agents": decision.estimated_agents,
         "estimated_cost": decision.estimated_cost,
         "complexity_score": decision.complexity_score,
         "decision_id": decision.decision_id,
-    }))]
+        "routing_method": routing_method,
+    }
+
+    # If embedding routing succeeded, include its recommendation
+    if embed_recommendation and routing_method == "embedding":
+        response["embedding_recommendation"] = {
+            "recommended_agent_type": embed_recommendation["recommended_agent_type"],
+            "confidence": embed_recommendation["confidence"],
+            "model": embed_recommendation.get("model", "sonnet"),
+            "alternatives": embed_recommendation.get("alternatives", []),
+            "based_on_patterns": embed_recommendation.get("based_on_patterns", 0),
+        }
+
+    return [TextContent(type="text", text=json.dumps(response))]
 
 
 async def _handle_plan(args: dict):
@@ -333,6 +367,20 @@ async def _handle_status(args: dict):
     except Exception:
         spenders = []
 
+    # Check embedding router availability
+    embedding_router_available = False
+    try:
+        global _embedding_router
+        if _embedding_router is None:
+            from cap.harness.embed_router import EmbeddingRouter
+            _embedding_router = EmbeddingRouter()
+        # Check if the underlying embedder is functional
+        from cap.harness.vector_patterns import PatternEmbedder
+        pe = PatternEmbedder()
+        embedding_router_available = pe.is_available
+    except Exception:
+        embedding_router_available = False
+
     return [TextContent(type="text", text=json.dumps({
         "active_agents": [
             {"agent_id": a.agent_id, "agent_type": a.agent_type, "status": a.status, "model": a.model}
@@ -341,6 +389,11 @@ async def _handle_status(args: dict):
         "active_count": len(active),
         "budget_remaining_usd": remaining,
         "top_spenders": spenders[:5] if spenders else [],
+        "routing": {
+            "primary": "embedding" if embedding_router_available else "keyword",
+            "fallback": "keyword",
+            "embedding_router_available": embedding_router_available,
+        },
         "timestamp": _now(),
     }))]
 
@@ -513,10 +566,10 @@ async def _handle_orchestrate(args: dict):
     """Route a task to the best specialist agent and execute it end-to-end.
 
     This is the Ruflo-equivalent "just do it" entrypoint:
-    1. Determine best agent_type via agentdb_semantic_route (keyword + history)
+    1. Try EmbeddingRouter (vector-based) FIRST, fall back to keyword routing
     2. Determine best model via hooks_route (embedding + tier)
     3. Execute via ConverseExecutor (real Bedrock call)
-    4. Record cost + update trust
+    4. Record cost + update trust + store pattern embedding
     5. Return result with full routing metadata
     """
     from cap.harness.hooks import hooks_route
@@ -526,31 +579,56 @@ async def _handle_orchestrate(args: dict):
     context = args.get("context")
     workspace = args.get("workspace")
 
-    # Step 1: Determine agent_type (who handles this task)
-    agent_routing = agentdb_semantic_route(task)
-    agent_type = agent_routing.get("recommended_agent_type", "dev")
-    agent_confidence = agent_routing.get("confidence", 0.3)
+    # Step 1: Determine agent_type — EmbeddingRouter first, keyword fallback
+    global _embedding_router
+    routing_method = "keyword"
+    embed_result = None
+    agent_routing = {}
 
-    # Step 2: Determine model — prefer agent's configured default, then hooks_route
-    config = _load_harness_config()
-    agent_defaults = config.get("agent_defaults", {})
-    agent_default_model = agent_defaults.get(agent_type)
+    try:
+        if _embedding_router is None:
+            from cap.harness.embed_router import EmbeddingRouter
+            _embedding_router = EmbeddingRouter()
+        embed_result = _embedding_router.route(task)
+    except Exception as exc:
+        logger.debug("EmbeddingRouter failed in _handle_orchestrate: %s", exc)
+        embed_result = None
 
-    if agent_default_model:
-        short_model = agent_default_model
+    if embed_result and embed_result.get("confidence", 0) > 0.5:
+        agent_type = embed_result["recommended_agent_type"]
+        agent_confidence = embed_result["confidence"]
+        short_model = embed_result.get("model", "sonnet")
+        routing_method = "embedding"
+        agent_routing = embed_result
     else:
-        model_routing = hooks_route(task, agent_type=agent_type)
-        recommended_model = model_routing.get("recommended_model", "claude-sonnet-4-6")
-        _full_to_short: dict[str, str] = {
-            "claude-haiku-4-5": "haiku",
-            "claude-sonnet-4-6": "sonnet",
-            "claude-sonnet-4-5": "sonnet",
-            "claude-opus-4-6": "opus",
-            "haiku": "haiku",
-            "sonnet": "sonnet",
-            "opus": "opus",
-        }
-        short_model = _full_to_short.get(recommended_model, "sonnet")
+        # Fall back to keyword routing
+        agent_routing = agentdb_semantic_route(task)
+        agent_type = agent_routing.get("recommended_agent_type", "dev")
+        agent_confidence = agent_routing.get("confidence", 0.3)
+        short_model = None  # will be determined below
+
+    # Step 2: Determine model — if embedding already chose one, prefer it;
+    # otherwise use agent's configured default, then hooks_route
+    if short_model is None or routing_method != "embedding":
+        config = _load_harness_config()
+        agent_defaults = config.get("agent_defaults", {})
+        agent_default_model = agent_defaults.get(agent_type)
+
+        if agent_default_model:
+            short_model = agent_default_model
+        else:
+            model_routing = hooks_route(task, agent_type=agent_type)
+            recommended_model = model_routing.get("recommended_model", "claude-sonnet-4-6")
+            _full_to_short: dict[str, str] = {
+                "claude-haiku-4-5": "haiku",
+                "claude-sonnet-4-6": "sonnet",
+                "claude-sonnet-4-5": "sonnet",
+                "claude-opus-4-6": "opus",
+                "haiku": "haiku",
+                "sonnet": "sonnet",
+                "opus": "opus",
+            }
+            short_model = _full_to_short.get(recommended_model, "sonnet")
 
     model_routing = hooks_route(task, agent_type=agent_type)
     tier = model_routing.get("tier", "lightweight")
@@ -568,7 +646,18 @@ async def _handle_orchestrate(args: dict):
 
     result_contents = await _handle_execute(execute_args)
 
-    # Step 4: Enrich result with routing metadata
+    # Step 4: Store pattern embedding for future routing (continuous learning)
+    try:
+        from cap.harness.vector_patterns import PatternEmbedder
+        _pattern_embedder = PatternEmbedder()
+        if _pattern_embedder.is_available:
+            import hashlib
+            pattern_id = hashlib.sha256(task[:500].encode()).hexdigest()[:32]
+            _pattern_embedder.embed_pattern(pattern_id, task[:500])
+    except Exception as exc:
+        logger.debug("Pattern embedding storage failed: %s", exc)
+
+    # Step 5: Enrich result with routing metadata
     try:
         result_payload = json.loads(result_contents[0].text)
         result_payload["routing"] = {
@@ -580,7 +669,7 @@ async def _handle_orchestrate(args: dict):
             "tier": tier,
             "model_confidence": model_routing.get("confidence"),
             "model_reason": model_routing.get("reason"),
-            "routing_method": model_routing.get("routing_method", "keyword"),
+            "routing_method": routing_method,
         }
         return [TextContent(type="text", text=json.dumps(result_payload))]
     except (json.JSONDecodeError, IndexError, AttributeError):

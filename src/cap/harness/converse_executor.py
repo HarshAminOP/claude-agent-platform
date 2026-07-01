@@ -1,4 +1,10 @@
-"""Multi-turn Bedrock Converse executor with tool use support.
+"""Multi-turn Converse executor with tool use support.
+
+Supports multiple LLM providers:
+- aws-bedrock: Bedrock Converse API (default)
+- anthropic-api: Direct Anthropic Messages API
+- azure-openai: Azure OpenAI (not yet implemented)
+- local: Local models via OpenAI-compatible API (not yet implemented)
 
 Uses the Bedrock Converse API for multi-turn conversations where agents
 can call tools (file_read, bash_exec, knowledge_search) iteratively
@@ -310,6 +316,265 @@ class ConversationResult:
 
 
 # ---------------------------------------------------------------------------
+# Provider Abstraction Layer
+# ---------------------------------------------------------------------------
+
+
+class AnthropicProvider:
+    """Thin wrapper translating Converse-style calls to Anthropic Messages API.
+
+    This allows the ConverseExecutor to use the direct Anthropic SDK
+    when configured with provider=anthropic-api. The API key is resolved
+    from an environment variable (never stored in config).
+    """
+
+    def __init__(self, api_key: str) -> None:
+        try:
+            import anthropic
+        except ImportError:
+            raise ImportError(
+                "The 'anthropic' package is required for provider=anthropic-api. "
+                "Install it with: pip install anthropic"
+            )
+        self._client = anthropic.Anthropic(api_key=api_key)
+
+    def converse(
+        self,
+        model_id: str,
+        messages: list,
+        system: list | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = 0.7,
+        tool_config: dict | None = None,
+    ) -> dict:
+        """Translate a Bedrock Converse-style call to Anthropic Messages API.
+
+        Converts:
+        - system: [{"text": "..."}] -> system="..."
+        - messages: Bedrock format -> Anthropic format
+        - toolConfig: Bedrock format -> Anthropic tools format
+        - Response: Anthropic format -> Bedrock Converse response format
+        """
+        # Build system prompt
+        system_text = None
+        if system:
+            system_text = "\n".join(s.get("text", "") for s in system)
+
+        # Convert messages from Bedrock to Anthropic format
+        anthropic_messages = self._convert_messages_to_anthropic(messages)
+
+        # Convert tool config
+        tools = None
+        if tool_config and "tools" in tool_config:
+            tools = self._convert_tools_to_anthropic(tool_config["tools"])
+
+        # Make the API call
+        kwargs: dict[str, Any] = {
+            "model": model_id,
+            "messages": anthropic_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if system_text:
+            kwargs["system"] = system_text
+        if tools:
+            kwargs["tools"] = tools
+
+        response = self._client.messages.create(**kwargs)
+
+        # Convert response back to Bedrock Converse format
+        return self._convert_response_to_converse(response)
+
+    def converse_stream(
+        self,
+        model_id: str,
+        messages: list,
+        system: list | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+        temperature: float = 0.7,
+    ) -> dict:
+        """Streaming call translated to Anthropic streaming API.
+
+        Returns a dict with a 'stream' key containing an iterable of events
+        in Bedrock Converse stream format.
+        """
+        system_text = None
+        if system:
+            system_text = "\n".join(s.get("text", "") for s in system)
+
+        anthropic_messages = self._convert_messages_to_anthropic(messages)
+
+        kwargs: dict[str, Any] = {
+            "model": model_id,
+            "messages": anthropic_messages,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        if system_text:
+            kwargs["system"] = system_text
+
+        # Use streaming
+        with self._client.messages.stream(**kwargs) as stream:
+            events = []
+            text_parts = []
+            for text in stream.text_stream:
+                text_parts.append(text)
+                events.append({
+                    "contentBlockDelta": {
+                        "delta": {"text": text}
+                    }
+                })
+
+            # Get final message for token usage
+            final_message = stream.get_final_message()
+            events.append({
+                "metadata": {
+                    "usage": {
+                        "inputTokens": final_message.usage.input_tokens,
+                        "outputTokens": final_message.usage.output_tokens,
+                    }
+                }
+            })
+
+        return {"stream": events}
+
+    def _convert_messages_to_anthropic(self, messages: list) -> list:
+        """Convert Bedrock Converse messages to Anthropic format."""
+        result = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg.get("content", [])
+
+            if isinstance(content, str):
+                result.append({"role": role, "content": content})
+                continue
+
+            # Convert content blocks
+            anthropic_content = []
+            for block in content:
+                if "text" in block:
+                    anthropic_content.append({"type": "text", "text": block["text"]})
+                elif "toolUse" in block:
+                    tu = block["toolUse"]
+                    anthropic_content.append({
+                        "type": "tool_use",
+                        "id": tu["toolUseId"],
+                        "name": tu["name"],
+                        "input": tu.get("input", {}),
+                    })
+                elif "toolResult" in block:
+                    tr = block["toolResult"]
+                    tool_content = []
+                    for tc in tr.get("content", []):
+                        if "text" in tc:
+                            tool_content.append({"type": "text", "text": tc["text"]})
+                    anthropic_content.append({
+                        "type": "tool_result",
+                        "tool_use_id": tr["toolUseId"],
+                        "content": tool_content,
+                    })
+
+            result.append({"role": role, "content": anthropic_content})
+
+        return result
+
+    def _convert_tools_to_anthropic(self, bedrock_tools: list) -> list:
+        """Convert Bedrock toolConfig tools to Anthropic tools format."""
+        tools = []
+        for tool_def in bedrock_tools:
+            spec = tool_def.get("toolSpec", {})
+            schema = spec.get("inputSchema", {}).get("json", {})
+            tools.append({
+                "name": spec["name"],
+                "description": spec.get("description", ""),
+                "input_schema": schema,
+            })
+        return tools
+
+    def _convert_response_to_converse(self, response: Any) -> dict:
+        """Convert Anthropic Messages response to Bedrock Converse format."""
+        content_blocks = []
+        for block in response.content:
+            if block.type == "text":
+                content_blocks.append({"text": block.text})
+            elif block.type == "tool_use":
+                content_blocks.append({
+                    "toolUse": {
+                        "toolUseId": block.id,
+                        "name": block.name,
+                        "input": block.input,
+                    }
+                })
+
+        # Map stop_reason to Bedrock stopReason
+        stop_reason_map = {
+            "end_turn": "end_turn",
+            "max_tokens": "max_tokens",
+            "tool_use": "tool_use",
+        }
+        stop_reason = stop_reason_map.get(response.stop_reason, "end_turn")
+
+        return {
+            "output": {
+                "message": {
+                    "role": "assistant",
+                    "content": content_blocks,
+                }
+            },
+            "stopReason": stop_reason,
+            "usage": {
+                "inputTokens": response.usage.input_tokens,
+                "outputTokens": response.usage.output_tokens,
+            },
+        }
+
+
+def _create_provider_client(config: dict | None = None):
+    """Factory method to create the appropriate LLM client based on provider config.
+
+    Returns:
+    - For aws-bedrock: None (ConverseExecutor creates boto3 client internally)
+    - For anthropic-api: AnthropicProvider instance
+    - For azure-openai: raises NotImplementedError
+    - For local: raises NotImplementedError
+
+    Parameters
+    ----------
+    config:
+        Harness config dict. If None, loaded from harness_config.
+    """
+    if config is None:
+        from cap.lib.harness_config import load_harness_config
+        config = load_harness_config()
+
+    provider = config.get("provider", "aws-bedrock")
+
+    if provider == "aws-bedrock":
+        # ConverseExecutor handles boto3 client creation internally
+        return None
+
+    elif provider == "anthropic-api":
+        from cap.lib.harness_config import get_anthropic_api_key
+        api_key = get_anthropic_api_key(config)
+        if not api_key:
+            anthropic_cfg = config.get("anthropic", {})
+            env_var = anthropic_cfg.get("api_key_env", "ANTHROPIC_API_KEY")
+            raise ValueError(
+                f"Anthropic API key not found. Set the ${env_var} environment variable."
+            )
+        return AnthropicProvider(api_key=api_key)
+
+    elif provider == "azure-openai":
+        raise NotImplementedError("Azure provider coming soon")
+
+    elif provider == "local":
+        raise NotImplementedError("Local provider coming soon")
+
+    else:
+        raise ValueError(f"Unknown provider: {provider!r}")
+
+
+# ---------------------------------------------------------------------------
 # ConverseExecutor
 # ---------------------------------------------------------------------------
 
@@ -335,20 +600,41 @@ class ConverseExecutor:
         region: str = "eu-central-1",
         budget_limit_usd: float = 5.0,
         allowed_tools: Optional[list] = None,
+        provider_client: Optional[Any] = None,
     ) -> None:
         self._profile = profile
         self._region = region
         self._budget_limit_usd = budget_limit_usd
         self._allowed_tools = allowed_tools
         self._client = None
+        self._provider_client = provider_client  # AnthropicProvider or None
         self._available: Optional[bool] = None
 
     # ------------------------------------------------------------------
     # Client initialization
     # ------------------------------------------------------------------
 
+    def _get_client(self):
+        """Get the appropriate client based on provider configuration.
+
+        Returns the provider_client if set (for anthropic-api), otherwise
+        returns the boto3 bedrock-runtime client (for aws-bedrock).
+        """
+        if self._provider_client is not None:
+            return self._provider_client
+        return self._client
+
     def _ensure_client(self) -> None:
-        """Create the boto3 Bedrock Runtime client on first use."""
+        """Create the boto3 Bedrock Runtime client on first use.
+
+        If a provider_client (e.g. AnthropicProvider) was passed at init,
+        we skip boto3 client creation entirely.
+        """
+        if self._provider_client is not None:
+            # Provider client already available — no boto3 needed
+            self._available = True
+            return
+
         if self._client is not None or self._available is False:
             return
 
@@ -423,9 +709,25 @@ class ConverseExecutor:
     ) -> dict:
         """Make a single Converse API call with exponential backoff retry.
 
-        Returns the raw API response dict.
+        Routes to the appropriate provider:
+        - If provider_client is set (AnthropicProvider), uses its converse() method
+        - Otherwise, uses the boto3 bedrock-runtime client
+
+        Returns the raw API response dict (in Bedrock Converse format regardless of provider).
         Raises on unrecoverable errors.
         """
+        # Use provider client if available (e.g. AnthropicProvider)
+        if self._provider_client is not None:
+            return self._provider_client.converse(
+                model_id=model_id,
+                messages=messages,
+                system=system,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                tool_config=tool_config,
+            )
+
+        # Default: boto3 Bedrock Converse API
         kwargs: dict[str, Any] = {
             "modelId": model_id,
             "messages": messages,
@@ -521,7 +823,7 @@ class ConverseExecutor:
             )
 
         # Check availability
-        if self._available is False or self._client is None:
+        if self._available is False or (self._client is None and self._provider_client is None):
             return _error_result("bedrock unavailable: client not initialised")
 
         # Check budget
@@ -769,7 +1071,7 @@ class ConverseExecutor:
         resolved_model = _resolve_model(model)
         start_ts = time.monotonic()
 
-        if self._available is False or self._client is None:
+        if self._available is False or (self._client is None and self._provider_client is None):
             return ConversationResult(
                 agent_id=agent_id,
                 agent_type=agent_type,
@@ -788,6 +1090,61 @@ class ConverseExecutor:
 
         system_messages = [{"text": system_prompt}] if system_prompt else None
         messages: list[dict] = [{"role": "user", "content": [{"text": prompt}]}]
+
+        # Use provider client for streaming if available
+        if self._provider_client is not None:
+            try:
+                response = self._provider_client.converse_stream(
+                    model_id=resolved_model,
+                    messages=messages,
+                    system=system_messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                # Process streamed events (same format as boto3 stream)
+                text_parts = []
+                input_tokens = 0
+                output_tokens = 0
+                stream = response.get("stream", [])
+                for event in stream:
+                    if "contentBlockDelta" in event:
+                        delta = event["contentBlockDelta"].get("delta", {})
+                        if "text" in delta:
+                            text_parts.append(delta["text"])
+                    elif "metadata" in event:
+                        usage = event["metadata"].get("usage", {})
+                        input_tokens = usage.get("inputTokens", 0)
+                        output_tokens = usage.get("outputTokens", 0)
+
+                final_text = "".join(text_parts)
+                self._available = True
+                elapsed = int((time.monotonic() - start_ts) * 1000)
+                return ConversationResult(
+                    agent_id=agent_id,
+                    agent_type=agent_type,
+                    model=resolved_model,
+                    response=final_text,
+                    error=None,
+                    total_input_tokens=input_tokens,
+                    total_output_tokens=output_tokens,
+                    total_cost_usd=_compute_cost(resolved_model, input_tokens, output_tokens),
+                    duration_ms=elapsed,
+                    turns=1,
+                )
+            except Exception as exc:  # noqa: BLE001
+                elapsed = int((time.monotonic() - start_ts) * 1000)
+                return ConversationResult(
+                    agent_id=agent_id,
+                    agent_type=agent_type,
+                    model=resolved_model,
+                    response=None,
+                    error=str(exc),
+                    total_input_tokens=0,
+                    total_output_tokens=0,
+                    total_cost_usd=0.0,
+                    duration_ms=elapsed,
+                    turns=1,
+                )
 
         kwargs: dict[str, Any] = {
             "modelId": resolved_model,
