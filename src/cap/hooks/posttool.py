@@ -88,6 +88,7 @@ def main():
             from cap.harness.hooks import hooks_post_task
             hooks_post_task(
                 agent_id="posttool",
+                execution_id=f"posttool-{session_id}-{int(now)}",
                 success=True,
                 output_summary=output_str[:200],
             )
