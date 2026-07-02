@@ -23,6 +23,8 @@ This directory contains Architecture Decision Records (ADRs) documenting key des
 | [ADR-017](ADR-017-code-intelligence.md) | Tree-sitter based code graph (ast-grep, HCL excluded) | Accepted | 2026-06-30 |
 | [ADR-018](ADR-018-auto-sync.md) | Automatic knowledge freshness (5 sync triggers) | Accepted | 2026-06-30 |
 | [ADR-019](ADR-019-degree-aware-graph.md) | Hub-aware graph traversal (two-phase BFS) | Accepted | 2026-06-30 |
+| [ADR-012](ADR-012-kb-enforcement-hooks.md) | Knowledge-Base-First Enforcement via PreToolUse Hooks | Accepted | 2026-07-02 |
+| [ADR-013](ADR-013-workspace-registry.md) | Workspace & Endpoint Registry in harness-config.json | Accepted | 2026-07-02 |
 
 ## Decision Principles
 

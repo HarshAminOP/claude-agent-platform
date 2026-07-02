@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "claude-agent-platform"
-version = "2.0.0"
+version = "2.2.0"
 description = "Claude Agent Platform — multi-agent orchestration, hybrid retrieval, workflow engine, and session memory for Claude Code"
 readme = "README.md"
 license = "MIT"
@@ -78,8 +78,6 @@ Issues = "https://github.com/moia-dev/claude-agent-platform/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/cap"]
 
-[tool.hatch.build.targets.wheel.force-include]
-"src/cap/data" = "cap/data"
 
 [tool.hatch.build.targets.sdist]
 include = [
