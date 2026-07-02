@@ -296,7 +296,7 @@ class TaskDecomposer:
             executor: A ``ConverseExecutor`` instance.  Created lazily on first
                 LLM call if not provided.
             db_path: Override the SQLite database path.  Defaults to the CAP
-                default (``~/.cap/cap.db``).
+                default (``CAP_HOME/data/platform.db``).
         """
         self._executor = executor
         self._db_path = db_path

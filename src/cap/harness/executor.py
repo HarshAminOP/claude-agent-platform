@@ -198,17 +198,36 @@ class AgentExecutor:
         if self._client is not None or self._available is False:
             return
 
+        from botocore.config import Config as BotoConfig
+        from cap.lib.harness_config import load_harness_config
+
         session_kwargs: dict = {"region_name": self._region}
         if self._profile:
             session_kwargs["profile_name"] = self._profile
 
         try:
+            harness_cfg = load_harness_config()
+        except Exception:
+            harness_cfg = {}
+
+        execution_cfg = harness_cfg.get("execution", {})
+        read_timeout = execution_cfg.get("read_timeout_s", 600)
+        connect_timeout = execution_cfg.get("connect_timeout_s", 10)
+
+        boto_config = BotoConfig(
+            read_timeout=read_timeout,
+            connect_timeout=connect_timeout,
+            retries={"max_attempts": execution_cfg.get("max_retries", 2), "mode": "adaptive"},
+        )
+
+        try:
             session = boto3.Session(**session_kwargs)
-            self._client = session.client("bedrock-runtime")
+            self._client = session.client("bedrock-runtime", config=boto_config)
             logger.debug(
-                "AgentExecutor: Bedrock client initialised (region=%s, profile=%s)",
+                "AgentExecutor: Bedrock client initialised (region=%s, profile=%s, read_timeout=%ds)",
                 self._region,
                 self._profile or "<ambient>",
+                read_timeout,
             )
         except (NoCredentialsError, NoRegionError) as exc:
             logger.warning(

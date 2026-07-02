@@ -4,6 +4,10 @@
 Owner of sessions.db.
 Provides: start, checkpoint, record, recall, end, feedback, history tools.
 
+Data directory is resolved from the ``CAP_HOME`` environment variable at
+start-up time (not at import time) so that the entry-point binary honours
+the value set by ``cap init``.  Fallback: ``~/.claude-platform``.
+
 CRITICAL: stdout is reserved for MCP JSON-RPC. All logging goes to stderr.
 """
 
@@ -19,12 +23,6 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from lib.config import load_config
-from lib.db_init import init_sessions_db
-from lib.security import sanitize_content
-from lib.repo_resolver import reset_session_counter
-
 logger = logging.getLogger("cap.session")
 logging.basicConfig(
     stream=sys.stderr,
@@ -32,12 +30,56 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-config = load_config()
-DATA_DIR = config.data_dir
-DATA_DIR.mkdir(parents=True, exist_ok=True)
+# ---------------------------------------------------------------------------
+# Module-level globals — populated by _ensure_initialized() on first tool call
+# ---------------------------------------------------------------------------
 
-db = init_sessions_db(DATA_DIR)
+_initialized: bool = False
+_init_error: str | None = None
+
+config = None
+db = None
 server = Server("cap-session")
+
+
+def _cap_data_dir() -> Path:
+    """Resolve the data directory from CAP_HOME env var at call time."""
+    from cap.config import get_data_dir
+    return get_data_dir()
+
+
+def _ensure_initialized() -> None:
+    """Lazily load config and open sessions.db on first use.
+
+    Deferring import and DB open to here (rather than module level) means
+    the CAP_HOME environment variable that ``claude mcp add ... -e CAP_HOME=...``
+    injects is already present when we resolve the data directory.
+    """
+    global _initialized, _init_error, config, db
+
+    if _initialized:
+        return
+
+    try:
+        from cap.lib.config import load_config
+        config = load_config()
+        data_dir = config.data_dir
+    except Exception as cfg_err:
+        logger.warning(
+            "_ensure_initialized: load_config() failed (%s); falling back to CAP_HOME", cfg_err
+        )
+        data_dir = _cap_data_dir()
+
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        from cap.lib.db_init import init_sessions_db
+        db = init_sessions_db(data_dir)
+        logger.info("Session DB opened at %s", data_dir)
+    except Exception as db_err:
+        _init_error = str(db_err)
+        logger.error("init_sessions_db() failed: %s", db_err)
+
+    _initialized = True
 
 
 def _now() -> str:
@@ -545,11 +587,16 @@ async def _handle_history(args: dict):
     }))]
 
 
-async def main():
+async def _async_main():
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the cap-session-server console script."""
     import asyncio
-    asyncio.run(main())
+    asyncio.run(_async_main())
+
+
+if __name__ == "__main__":
+    main()

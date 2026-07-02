@@ -24,7 +24,8 @@ from typing import Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-PLATFORM_DB_PATH = Path.home() / ".claude-platform" / "data" / "platform.db"
+from cap.config import get_platform_db_path
+PLATFORM_DB_PATH = get_platform_db_path()
 
 # Agent types with explicit model defaults (matches CAP agent roster)
 _OPUS_AGENTS = frozenset({

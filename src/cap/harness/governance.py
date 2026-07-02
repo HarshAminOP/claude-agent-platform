@@ -33,7 +33,8 @@ logger = logging.getLogger("cap.harness.governance")
 try:
     from cap.harness.agent_store import PLATFORM_DB_PATH
 except ImportError:
-    PLATFORM_DB_PATH = Path.home() / ".claude-platform" / "data" / "platform.db"
+    from cap.config import get_platform_db_path
+    PLATFORM_DB_PATH = get_platform_db_path()
 
 _AUDIT_DDL = """
 CREATE TABLE IF NOT EXISTS audit_log (

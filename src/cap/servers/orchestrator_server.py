@@ -33,6 +33,7 @@ from cap.orchestration.dag import TaskDAG
 from cap.reliability.circuit_breaker import CircuitBreaker
 from cap.reliability.dlq import list_dlq, retry_task, dismiss_task
 from cap.health.monitor import AgentHealthMonitor, HealthState
+from cap.lib.workflow_store import save_workflow, update_heartbeat, load_workflow, mark_failed_stale, list_active_workflows
 
 logger = logging.getLogger("cap.orchestrator")
 logging.basicConfig(
@@ -41,11 +42,9 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-# Database setup
-DB_PATH = os.environ.get(
-    "CAP_ORCHESTRATOR_DB",
-    os.path.expanduser("~/.cap/cap.db"),
-)
+# Database setup — centralized path resolution
+from cap.config import get_platform_db_path, get_knowledge_db_path
+DB_PATH = os.environ.get("CAP_ORCHESTRATOR_DB", str(get_platform_db_path()))
 
 db = get_db(DB_PATH)
 migrate(db)
@@ -60,6 +59,16 @@ _task_decomposer = None
 
 # Module-level singleton for knowledge graph (lazy-initialized)
 _knowledge_graph = None
+
+# ── Background workflow tracking ──────────────────────────────────────────────
+_running_workflows: dict[str, dict] = {}  # workflow_id -> {task, status, result, error, ...}
+
+# Thresholds for determining default blocking behavior
+_SIMPLE_COMPLEXITIES = {"simple"}
+_NONBLOCKING_COMPLEXITIES = {"moderate", "complex"}
+
+# TTL for completed/failed workflows (1 hour)
+_WORKFLOW_TTL_SECONDS = 3600
 
 
 def _get_decomposer():
@@ -82,11 +91,9 @@ def _get_knowledge_graph():
         return _knowledge_graph
     try:
         from cap.lib.knowledge_graph import KnowledgeGraph
-        import os
-        db_path_env = os.environ.get("CAP_ORCHESTRATOR_DB", os.path.expanduser("~/.cap/cap.db"))
-        # KnowledgeGraph accepts a path or an existing sqlite3.Connection.
-        # We pass the DB path so it manages its own connection.
-        _knowledge_graph = KnowledgeGraph(db_path_env)
+        # CRITICAL FIX: KnowledgeGraph uses knowledge.db, NOT the orchestrator/platform DB.
+        knowledge_db = str(get_knowledge_db_path())
+        _knowledge_graph = KnowledgeGraph(knowledge_db)
         return _knowledge_graph
     except Exception as exc:
         logger.debug("KnowledgeGraph init failed (will retry next call): %s", exc)
@@ -205,6 +212,258 @@ def _generate_workflow_id() -> str:
     return f"orch-{uuid.uuid4().hex[:12]}"
 
 
+def _prune_stale_workflows() -> None:
+    """Remove workflows older than _WORKFLOW_TTL_SECONDS from _running_workflows."""
+    now = time.time()
+    stale_ids = [
+        wf_id
+        for wf_id, wf in _running_workflows.items()
+        if wf.get("completed_at") and (now - wf["completed_at"]) > _WORKFLOW_TTL_SECONDS
+    ]
+    for wf_id in stale_ids:
+        del _running_workflows[wf_id]
+
+
+async def _run_orchestration_bg(workflow_id: str, args: dict) -> None:
+    """Background coroutine that executes the full orchestration and updates _running_workflows.
+
+    This function mirrors the logic in _handle_orchestrate but updates step-level
+    progress in _running_workflows[workflow_id] as it executes.
+    """
+    wf = _running_workflows[workflow_id]
+    t0 = time.time()
+
+    async def _heartbeat(wf_id: str) -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                update_heartbeat(wf_id)
+            except Exception:
+                pass
+
+    hb_task = asyncio.create_task(_heartbeat(workflow_id))
+
+    try:
+        wf["current_step"] = {"phase": "routing", "description": "Determining agent type and complexity"}
+        wf["steps_completed"] = 0
+        try:
+            save_workflow(
+                workflow_id,
+                status=wf["status"],
+                steps_completed=wf["steps_completed"],
+                steps_total=wf["steps_total"],
+                current_step=wf.get("current_step"),
+                args=args,
+            )
+        except Exception as _pe:
+            logger.debug("_run_orchestration_bg: save_workflow (init) failed: %s", _pe)
+
+        from cap.harness.hooks import hooks_route
+        from cap.harness.agentdb import agentdb_semantic_route
+
+        task = args["task"]
+        context = args.get("context")
+        workspace = args.get("workspace")
+
+        # Check complexity to decide execution path.
+        try:
+            decomposer = _get_decomposer()
+            complexity = decomposer._classify_complexity(task)
+        except Exception as exc:
+            logger.warning("_run_orchestration_bg: complexity check failed (%s); defaulting to simple", exc)
+            complexity = "simple"
+
+        wf["complexity"] = complexity
+        wf["steps_completed"] = 1
+        wf["current_step"] = {"phase": "execution", "description": "Executing task"}
+
+        if complexity in ("moderate", "complex"):
+            try:
+                logger.info(
+                    "_run_orchestration_bg: complexity=%s — using CoordinationEngine for workflow %s",
+                    complexity,
+                    workflow_id,
+                )
+                wf["steps_total"] = 4  # route -> decompose -> execute steps -> synthesize
+                wf["current_step"] = {"phase": "coordination", "description": "Running multi-step coordination"}
+                result_contents = await _run_coordination(task, context or "", workspace or "")
+                wf["steps_completed"] = wf["steps_total"]
+                wf["current_step"] = {"phase": "done", "description": "Completed"}
+                wf["status"] = "completed"
+                wf["result"] = json.loads(result_contents[0].text)
+                wf["duration_ms"] = int((time.time() - t0) * 1000)
+                wf["completed_at"] = time.time()
+                try:
+                    save_workflow(
+                        workflow_id,
+                        status=wf["status"],
+                        steps_completed=wf["steps_completed"],
+                        steps_total=wf["steps_total"],
+                        current_step=wf.get("current_step"),
+                        result=wf.get("result"),
+                    )
+                except Exception as _pe:
+                    logger.debug("_run_orchestration_bg: save_workflow (coord complete) failed: %s", _pe)
+                return
+            except Exception as exc:
+                logger.warning(
+                    "_run_orchestration_bg: CoordinationEngine failed (%s); falling back to single-agent path",
+                    exc,
+                )
+
+        # Single-agent path
+        wf["steps_total"] = 3  # route -> execute -> record
+        wf["current_step"] = {"phase": "routing", "description": "Selecting agent via embedding/keyword routing"}
+
+        global _embedding_router
+        routing_method = "keyword"
+        embed_result = None
+        agent_routing = {}
+
+        try:
+            if _embedding_router is None:
+                from cap.harness.embed_router import EmbeddingRouter
+                _embedding_router = EmbeddingRouter()
+            embed_result = _embedding_router.route(task)
+        except Exception as exc:
+            logger.debug("EmbeddingRouter failed in _run_orchestration_bg: %s", exc)
+            embed_result = None
+
+        if embed_result and embed_result.get("confidence", 0) > 0.5:
+            agent_type = embed_result["recommended_agent_type"]
+            agent_confidence = embed_result["confidence"]
+            short_model = embed_result.get("model", "sonnet")
+            routing_method = "embedding"
+            agent_routing = embed_result
+        else:
+            agent_routing = agentdb_semantic_route(task)
+            agent_type = agent_routing.get("recommended_agent_type", "dev")
+            agent_confidence = agent_routing.get("confidence", 0.3)
+            short_model = None
+
+        # Determine model
+        if short_model is None or routing_method != "embedding":
+            config = _load_harness_config()
+            agent_defaults = config.get("agent_defaults", {})
+            agent_default_model = agent_defaults.get(agent_type)
+
+            if agent_default_model:
+                short_model = agent_default_model
+            else:
+                model_routing = hooks_route(task, agent_type=agent_type)
+                recommended_model = model_routing.get("recommended_model", "claude-sonnet-4-6")
+                _full_to_short: dict[str, str] = {
+                    "claude-haiku-4-5": "haiku",
+                    "claude-sonnet-4-6": "sonnet",
+                    "claude-sonnet-4-5": "sonnet",
+                    "claude-opus-4-6": "opus",
+                    "haiku": "haiku",
+                    "sonnet": "sonnet",
+                    "opus": "opus",
+                }
+                short_model = _full_to_short.get(recommended_model, "sonnet")
+
+        model_routing = hooks_route(task, agent_type=agent_type)
+        tier = model_routing.get("tier", "lightweight")
+
+        wf["steps_completed"] = 2
+        wf["current_step"] = {"phase": "execution", "description": f"Executing via {agent_type} agent ({short_model})"}
+        try:
+            save_workflow(
+                workflow_id,
+                status=wf["status"],
+                steps_completed=wf["steps_completed"],
+                steps_total=wf["steps_total"],
+                current_step=wf.get("current_step"),
+            )
+        except Exception as _pe:
+            logger.debug("_run_orchestration_bg: save_workflow (step 2) failed: %s", _pe)
+
+        # Execute via cap_execute
+        execute_args = {
+            "agent_type": agent_type,
+            "task": task,
+            "model": short_model,
+        }
+        if context:
+            execute_args["context"] = context
+        if workspace:
+            execute_args["workspace"] = workspace
+
+        result_contents = await _handle_execute(execute_args)
+
+        # Store pattern embedding for future routing
+        try:
+            from cap.harness.vector_patterns import PatternEmbedder
+            _pattern_embedder = PatternEmbedder()
+            if _pattern_embedder.is_available:
+                import hashlib
+                pattern_id = hashlib.sha256(task[:500].encode()).hexdigest()[:32]
+                _pattern_embedder.embed_pattern(pattern_id, task[:500])
+        except Exception as exc:
+            logger.debug("Pattern embedding storage failed: %s", exc)
+
+        # Enrich result with routing metadata
+        try:
+            result_payload = json.loads(result_contents[0].text)
+            result_payload["routing"] = {
+                "agent_type": agent_type,
+                "agent_confidence": agent_confidence,
+                "agent_alternatives": agent_routing.get("alternatives", []),
+                "based_on_patterns": agent_routing.get("based_on_patterns", 0),
+                "model_alias": short_model,
+                "tier": tier,
+                "model_confidence": model_routing.get("confidence"),
+                "model_reason": model_routing.get("reason"),
+                "routing_method": routing_method,
+            }
+            wf["result"] = result_payload
+        except (json.JSONDecodeError, IndexError, AttributeError):
+            wf["result"] = json.loads(result_contents[0].text) if result_contents else None
+
+        wf["steps_completed"] = wf["steps_total"]
+        wf["current_step"] = {"phase": "done", "description": "Completed"}
+        wf["status"] = "completed"
+        wf["duration_ms"] = int((time.time() - t0) * 1000)
+        wf["cost_usd"] = wf["result"].get("cost_usd") if wf["result"] else None
+        wf["completed_at"] = time.time()
+        try:
+            save_workflow(
+                workflow_id,
+                status=wf["status"],
+                steps_completed=wf["steps_completed"],
+                steps_total=wf["steps_total"],
+                current_step=wf.get("current_step"),
+                result=wf.get("result"),
+            )
+        except Exception as _pe:
+            logger.debug("_run_orchestration_bg: save_workflow (single complete) failed: %s", _pe)
+
+    except Exception as exc:
+        logger.error("_run_orchestration_bg workflow %s failed: %s", workflow_id, exc, exc_info=True)
+        wf["status"] = "failed"
+        wf["error"] = str(exc)
+        wf["duration_ms"] = int((time.time() - t0) * 1000)
+        wf["completed_at"] = time.time()
+        # Preserve any partial results already stored
+        if "result" not in wf:
+            wf["result"] = None
+        try:
+            save_workflow(
+                workflow_id,
+                status=wf["status"],
+                steps_completed=wf.get("steps_completed", 0),
+                steps_total=wf.get("steps_total", 0),
+                current_step=wf.get("current_step"),
+                error=wf.get("error"),
+            )
+        except Exception as _pe:
+            logger.debug("_run_orchestration_bg: save_workflow (failed) failed: %s", _pe)
+
+    finally:
+        hb_task.cancel()
+
+
 @server.list_tools()
 async def list_tools():
     return [
@@ -311,7 +570,7 @@ async def list_tools():
         ),
         Tool(
             name="cap_orchestrate",
-            description="Route a task to the best specialist agent and execute it end-to-end via AWS Bedrock. Combines routing + execution in a single call. Returns the agent's full response with cost tracking.",
+            description="Route a task to the best specialist agent and execute it end-to-end via AWS Bedrock. Combines routing + execution in a single call. When blocking=false (default for moderate/complex tasks), returns immediately with a workflow_id for polling via cap_result.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -327,8 +586,26 @@ async def list_tools():
                         "type": "string",
                         "description": "Working directory for file/bash operations.",
                     },
+                    "blocking": {
+                        "type": "boolean",
+                        "description": "If true, wait for completion and return full result inline. If false, return immediately with workflow_id. Default: true for simple tasks, false for moderate/complex.",
+                    },
                 },
                 "required": ["task"],
+            },
+        ),
+        Tool(
+            name="cap_result",
+            description="Get the result or progress of a background workflow started by cap_orchestrate (non-blocking mode).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "workflow_id": {
+                        "type": "string",
+                        "description": "The workflow_id returned by cap_orchestrate.",
+                    },
+                },
+                "required": ["workflow_id"],
             },
         ),
         Tool(
@@ -393,6 +670,8 @@ async def call_tool(name: str, arguments: dict):
             return await _handle_execute(arguments)
         elif name == "cap_orchestrate":
             return await _handle_orchestrate(arguments)
+        elif name == "cap_result":
+            return await _handle_result(arguments)
         elif name == "cap_resume":
             return await _handle_resume(arguments)
         elif name == "cap_coordinate":
@@ -527,6 +806,26 @@ async def _handle_status(args: dict):
     except Exception:
         embedding_router_available = False
 
+    # Background workflow summary
+    running_wfs = [
+        {
+            "workflow_id": wf_id,
+            "status": wf["status"],
+            "complexity": wf.get("complexity"),
+            "steps_completed": wf.get("steps_completed", 0),
+            "steps_total": wf.get("steps_total", 0),
+            "elapsed_ms": int((time.time() - wf["started_at"]) * 1000) if wf["status"] == "running" else wf.get("duration_ms"),
+        }
+        for wf_id, wf in _running_workflows.items()
+    ]
+
+    # Count persisted active workflows in SQLite
+    persisted_active_count = 0
+    try:
+        persisted_active_count = len(list_active_workflows())
+    except Exception as _se:
+        logger.debug("_handle_status: list_active_workflows failed: %s", _se)
+
     return [TextContent(type="text", text=json.dumps({
         "active_agents": [
             {"agent_id": a.agent_id, "agent_type": a.agent_type, "status": a.status, "model": a.model}
@@ -539,6 +838,14 @@ async def _handle_status(args: dict):
             "primary": "embedding" if embedding_router_available else "keyword",
             "fallback": "keyword",
             "embedding_router_available": embedding_router_available,
+        },
+        "background_workflows": {
+            "total": len(running_wfs),
+            "running": sum(1 for w in running_wfs if w["status"] == "running"),
+            "completed": sum(1 for w in running_wfs if w["status"] == "completed"),
+            "failed": sum(1 for w in running_wfs if w["status"] == "failed"),
+            "persisted_active": persisted_active_count,
+            "workflows": running_wfs,
         },
         "timestamp": _now(),
     }))]
@@ -600,7 +907,15 @@ async def _handle_health(args: dict):
 
 
 def _load_harness_config() -> dict:
-    """Load .harness/config.json if it exists, else return defaults."""
+    """Load harness config from the canonical location (~/.claude-platform/harness-config.json).
+
+    Falls back to .harness/config.json in CWD for backward compat.
+    """
+    from cap.lib.harness_config import load_harness_config
+    try:
+        return load_harness_config()
+    except Exception:
+        pass
     config_path = Path.cwd() / ".harness" / "config.json"
     if not config_path.exists():
         config_path = Path(__file__).parent.parent / "data" / "harness" / "config.json"
@@ -688,6 +1003,7 @@ async def _handle_execute(args: dict):
         profile=profile,
         region=region,
         budget_limit_usd=budget_limit,
+        config=config,
     )
 
     # Execute
@@ -847,6 +1163,7 @@ async def _run_coordination(task: str, context: str, workspace: str) -> list:
         profile=profile,
         region=region,
         budget_limit_usd=budget_limit,
+        config=config,
     )
     shared = SharedState(session_id=session_id)
     bus = AgentBus(session_id=session_id)
@@ -884,32 +1201,118 @@ async def _run_coordination(task: str, context: str, workspace: str) -> list:
 async def _handle_orchestrate(args: dict):
     """Route a task to the best specialist agent and execute it end-to-end.
 
+    Supports both blocking and non-blocking execution modes:
+    - blocking=true (explicit or default for simple tasks): awaits inline, returns full result.
+    - blocking=false (explicit or default for moderate/complex): spawns background task,
+      returns immediately with workflow_id for polling via cap_result.
+
     Routing tiers:
-    - simple complexity  → single-agent path (unchanged; EmbeddingRouter + keyword)
-    - moderate/complex   → multi-step CoordinationEngine path
+    - simple complexity  -> single-agent path (unchanged; EmbeddingRouter + keyword)
+    - moderate/complex   -> multi-step CoordinationEngine path
     If the new modules are unavailable, falls back to the single-agent path.
 
-    Original single-agent steps:
+    Original single-agent steps (blocking path):
     1. Try EmbeddingRouter (vector-based) FIRST, fall back to keyword routing
     2. Determine best model via hooks_route (embedding + tier)
     3. Execute via ConverseExecutor (real Bedrock call)
     4. Record cost + update trust + store pattern embedding
     5. Return result with full routing metadata
     """
-    from cap.harness.hooks import hooks_route
-    from cap.harness.agentdb import agentdb_semantic_route
-
     task = args["task"]
-    context = args.get("context")
-    workspace = args.get("workspace")
+    blocking_param = args.get("blocking")  # None means auto-detect
 
-    # Check complexity to decide execution path.
+    # Prune stale workflows on each call (cheap O(n) scan)
+    _prune_stale_workflows()
+
+    # Determine complexity to decide default blocking behavior
     try:
         decomposer = _get_decomposer()
         complexity = decomposer._classify_complexity(task)
     except Exception as exc:
         logger.warning("_handle_orchestrate: complexity check failed (%s); defaulting to simple", exc)
         complexity = "simple"
+
+    # Determine effective blocking mode
+    if blocking_param is not None:
+        blocking = bool(blocking_param)
+    else:
+        # Auto: simple -> blocking, moderate/complex -> non-blocking
+        blocking = complexity in _SIMPLE_COMPLEXITIES
+
+    if blocking:
+        # ── BLOCKING PATH (original behavior, unchanged) ──
+        return await _handle_orchestrate_blocking(args, complexity)
+    else:
+        # ── NON-BLOCKING PATH ──
+        workflow_id = _generate_workflow_id()
+
+        # Build initial plan summary for immediate response
+        plan_summary = {
+            "complexity": complexity,
+            "execution_mode": "non-blocking",
+        }
+
+        # Store workflow metadata
+        _running_workflows[workflow_id] = {
+            "status": "running",
+            "task": task,
+            "complexity": complexity,
+            "started_at": time.time(),
+            "completed_at": None,
+            "steps_completed": 0,
+            "steps_total": 3 if complexity == "simple" else 4,
+            "current_step": {"phase": "initializing", "description": "Starting background execution"},
+            "result": None,
+            "error": None,
+            "duration_ms": None,
+            "cost_usd": None,
+            "task_ref": None,  # Will hold asyncio.Task reference
+        }
+
+        # Spawn background task
+        bg_task = asyncio.create_task(_run_orchestration_bg(workflow_id, args))
+        _running_workflows[workflow_id]["task_ref"] = bg_task
+
+        # Add a done callback to handle unexpected errors
+        def _on_done(t: asyncio.Task) -> None:
+            if t.cancelled():
+                wf = _running_workflows.get(workflow_id)
+                if wf and wf["status"] == "running":
+                    wf["status"] = "failed"
+                    wf["error"] = "Task was cancelled"
+                    wf["completed_at"] = time.time()
+            elif t.exception():
+                wf = _running_workflows.get(workflow_id)
+                if wf and wf["status"] == "running":
+                    wf["status"] = "failed"
+                    wf["error"] = str(t.exception())
+                    wf["completed_at"] = time.time()
+
+        bg_task.add_done_callback(_on_done)
+
+        logger.info(
+            "_handle_orchestrate: non-blocking dispatch workflow_id=%s complexity=%s task=%.80s",
+            workflow_id,
+            complexity,
+            task,
+        )
+
+        return [TextContent(type="text", text=json.dumps({
+            "workflow_id": workflow_id,
+            "status": "running",
+            "plan": plan_summary,
+            "message": "Workflow started in background. Poll with cap_result to get progress/results.",
+        }))]
+
+
+async def _handle_orchestrate_blocking(args: dict, complexity: str):
+    """Blocking execution path for cap_orchestrate (original behavior preserved)."""
+    from cap.harness.hooks import hooks_route
+    from cap.harness.agentdb import agentdb_semantic_route
+
+    task = args["task"]
+    context = args.get("context")
+    workspace = args.get("workspace")
 
     if complexity in ("moderate", "complex"):
         try:
@@ -1022,6 +1425,94 @@ async def _handle_orchestrate(args: dict):
         return result_contents
 
 
+async def _handle_result(args: dict):
+    """Get the result or progress of a background workflow.
+
+    Returns:
+    - If running: status, steps_completed, steps_total, current_step
+    - If completed: status, result, cost_usd, duration_ms
+    - If failed: status, error, partial_results
+    - If not found: error message
+    """
+    workflow_id = args.get("workflow_id")
+    if not workflow_id:
+        return [TextContent(type="text", text=json.dumps({"error": "workflow_id is required"}))]
+
+    wf = _running_workflows.get(workflow_id)
+    if wf is None:
+        # Try SQLite fallback before returning not_found
+        try:
+            mark_failed_stale()
+            persisted = load_workflow(workflow_id)
+        except Exception as _se:
+            logger.debug("_handle_result: SQLite fallback failed: %s", _se)
+            persisted = None
+
+        if persisted is None:
+            return [TextContent(type="text", text=json.dumps({
+                "error": "not_found",
+                "message": f"No workflow with id '{workflow_id}'. It may have been pruned (TTL: 1 hour) or never existed.",
+            }))]
+
+        # Build response from persisted state
+        p_status = persisted["status"]
+        try:
+            p_result = json.loads(persisted["result_json"]) if persisted.get("result_json") else None
+        except (json.JSONDecodeError, TypeError):
+            p_result = None
+        return [TextContent(type="text", text=json.dumps({
+            "workflow_id": workflow_id,
+            "status": p_status,
+            "result": p_result,
+            "error": persisted.get("error"),
+            "steps_completed": persisted.get("steps_completed", 0),
+            "steps_total": persisted.get("steps_total", 0),
+            "source": "persisted",
+        }))]
+
+    status = wf["status"]
+
+    if status == "running":
+        elapsed_ms = int((time.time() - wf["started_at"]) * 1000)
+        return [TextContent(type="text", text=json.dumps({
+            "workflow_id": workflow_id,
+            "status": "running",
+            "steps_completed": wf.get("steps_completed", 0),
+            "steps_total": wf.get("steps_total", 0),
+            "current_step": wf.get("current_step"),
+            "complexity": wf.get("complexity"),
+            "elapsed_ms": elapsed_ms,
+        }))]
+
+    elif status == "completed":
+        return [TextContent(type="text", text=json.dumps({
+            "workflow_id": workflow_id,
+            "status": "completed",
+            "result": wf.get("result"),
+            "cost_usd": wf.get("cost_usd"),
+            "duration_ms": wf.get("duration_ms"),
+            "complexity": wf.get("complexity"),
+        }))]
+
+    elif status == "failed":
+        return [TextContent(type="text", text=json.dumps({
+            "workflow_id": workflow_id,
+            "status": "failed",
+            "error": wf.get("error"),
+            "partial_results": wf.get("result"),
+            "duration_ms": wf.get("duration_ms"),
+            "steps_completed": wf.get("steps_completed", 0),
+            "steps_total": wf.get("steps_total", 0),
+        }))]
+
+    else:
+        return [TextContent(type="text", text=json.dumps({
+            "workflow_id": workflow_id,
+            "status": status,
+            "message": "Unknown workflow state",
+        }))]
+
+
 async def _handle_coordinate(args: dict):
     """Explicitly run multi-step coordination for a task.
 
@@ -1078,10 +1569,15 @@ async def _handle_resume(args: dict):
     return await _handle_execute(execute_args)
 
 
-async def main():
+async def _async_main():
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
+def main():
+    """Entry point for the cap-orchestrator-server console script."""
+    asyncio.run(_async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

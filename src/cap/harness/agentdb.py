@@ -34,7 +34,8 @@ logger = logging.getLogger("cap.harness.agentdb")
 try:
     from cap.harness.agent_store import PLATFORM_DB_PATH
 except ImportError:
-    PLATFORM_DB_PATH = Path.home() / ".claude-platform" / "data" / "platform.db"
+    from cap.config import get_platform_db_path
+    PLATFORM_DB_PATH = get_platform_db_path()
 
 # DDL for the new reasoning_bank table (patterns DDL lives in hooks.py)
 _REASONING_DDL = """

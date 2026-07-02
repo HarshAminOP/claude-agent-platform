@@ -403,10 +403,15 @@ def _parse_json_output(stdout: str) -> list[dict]:
     return matches
 
 
-async def main():
+async def _async_main():
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
+def main():
+    """Entry point for the cap-ast-server console script."""
+    asyncio.run(_async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

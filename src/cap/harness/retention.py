@@ -22,7 +22,8 @@ logger = logging.getLogger("cap.harness.retention")
 try:
     from cap.harness.agent_store import PLATFORM_DB_PATH
 except ImportError:
-    PLATFORM_DB_PATH = Path.home() / ".claude-platform" / "data" / "platform.db"
+    from cap.config import get_platform_db_path
+    PLATFORM_DB_PATH = get_platform_db_path()
 
 
 def _get_conn(db_path: Optional[Path] = None):

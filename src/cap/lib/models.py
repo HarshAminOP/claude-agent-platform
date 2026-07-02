@@ -6,6 +6,12 @@ from enum import Enum
 from pathlib import Path
 
 
+def _resolve_data_dir() -> Path:
+    """Resolve data directory via cap.config (avoids circular import)."""
+    from cap.config import get_data_dir
+    return get_data_dir()
+
+
 class ModelTier(str, Enum):
     OPUS = "opus"
     SONNET = "sonnet"
@@ -57,7 +63,7 @@ class ConcurrencyConfig:
 class PlatformConfig:
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
-    data_dir: Path = field(default_factory=lambda: Path.home() / ".claude-platform" / "data")
+    data_dir: Path = field(default_factory=lambda: _resolve_data_dir())
 
 
 SCHEMA_VERSION = 1

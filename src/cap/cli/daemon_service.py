@@ -30,7 +30,8 @@ _PYTHON = sys.executable or shutil.which("python3") or "python3"
 
 
 def _cap_home() -> Path:
-    return Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
+    from cap.config import get_cap_home
+    return get_cap_home()
 
 
 # ---------------------------------------------------------------------------

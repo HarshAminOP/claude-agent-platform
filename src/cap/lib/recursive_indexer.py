@@ -209,7 +209,9 @@ def index_directory_tree(
     config = config or {}
 
     # Extract config values with defaults
-    data_dir = Path(config.get("data_dir", Path.home() / ".claude-platform" / "data"))
+    from cap.config import get_data_dir
+    _default_data_dir = get_data_dir()
+    data_dir = Path(config.get("data_dir", _default_data_dir))
     extensions = frozenset(config.get("extensions", DEFAULT_EXTENSIONS))
     exact_filenames = frozenset(config.get("exact_filenames", DEFAULT_EXACT_FILENAMES))
     exclude_dirs = frozenset(config.get("exclude_dirs", DEFAULT_EXCLUDE_DIRS))

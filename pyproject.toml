@@ -24,37 +24,50 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dependencies = [
-    "mcp>=1.0",
-    "lancedb>=0.4",
-    "boto3>=1.34",
-    "pyarrow>=14.0",
-    "pydantic>=2.0",
-    "tomli>=2.0;python_version<'3.11'",
-    "tomli-w>=1.0",
-    "click>=8.0",
-    "rich>=13.0",
-    "tree-sitter>=0.21",
+    "mcp>=1.0,<2",
+    "lancedb>=0.4,<1",
+    "boto3>=1.34,<2",
+    "pyarrow>=14.0,<18",
+    "pydantic>=2.0,<3",
+    "tomli-w>=1.0,<2",
+    "click>=8.0,<9",
+    "rich>=13.0,<14",
+    "tree-sitter>=0.21,<1",
+    "langchain-core>=0.3,<1",
+    "langchain-aws>=0.2,<1",
+    "langgraph>=0.2,<1",
 ]
 
 [project.optional-dependencies]
+providers = [
+    "langchain-anthropic>=0.3,<1",
+    "langchain-ollama>=0.2,<1",
+]
+embeddings = [
+    "sentence-transformers>=2.0,<4",
+]
+all = [
+    "claude-agent-platform[providers,embeddings]",
+]
 dev = [
-    "pytest>=7.0",
-    "pytest-asyncio>=0.23",
-    "pytest-cov>=4.0",
-    "ruff>=0.3",
+    "pytest>=7.0,<9",
+    "pytest-asyncio>=0.23,<1",
+    "pytest-cov>=4.0,<6",
+    "ruff>=0.3,<1",
 ]
 
 [project.scripts]
 cap = "cap.cli.main:cli"
-cap-orchestrator = "cap.servers.orchestrator_server:main"
-cap-code-intel = "cap.servers.code_intel_server:main"
-cap-knowledge = "cap.servers.knowledge_server:main"
-cap-session = "cap.servers.session_server:main"
-cap-backlog = "cap.servers.backlog_server:main"
-cap-fleet = "cap.servers.fleet_server:main"
-cap-diagram = "cap.servers.diagram_server:main"
-cap-workflow = "cap.servers.workflow_server:main"
-cap-ast = "cap.servers.ast_server:main"
+cap-knowledge-server = "cap.servers.knowledge_server:main"
+cap-session-server = "cap.servers.session_server:main"
+cap-fleet-server = "cap.servers.fleet_server:main"
+cap-workflow-server = "cap.servers.workflow_server:main"
+cap-diagram-server = "cap.servers.diagram_server:main"
+cap-backlog-server = "cap.servers.backlog_server:main"
+cap-ast-server = "cap.servers.ast_server:main"
+cap-code-intel-server = "cap.servers.code_intel_server:main"
+cap-orchestrator-server = "cap.servers.orchestrator_server:main"
+cap-harness-server = "cap.servers.harness_server:main"
 
 [project.urls]
 Homepage = "https://github.com/moia-dev/claude-agent-platform"
@@ -64,7 +77,8 @@ Issues = "https://github.com/moia-dev/claude-agent-platform/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/cap"]
 
-[tool.hatch.build.targets.wheel.shared-data]
+[tool.hatch.build.targets.wheel.force-include]
+"src/cap/data" = "cap/data"
 
 [tool.hatch.build.targets.sdist]
 include = [

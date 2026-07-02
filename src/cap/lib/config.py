@@ -10,6 +10,15 @@ except ImportError:
     import tomllib
 
 
+def _get_cap_home_path() -> Path:
+    """Resolve CAP home via cap.config (avoids circular import in dataclass defaults)."""
+    try:
+        from cap.config import get_cap_home
+        return get_cap_home()
+    except ImportError:
+        return Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
+
+
 @dataclass
 class BedrockConfig:
     region: str = "us-east-1"
@@ -118,7 +127,7 @@ class SessionConfig:
 
 @dataclass
 class PlatformConfig:
-    home: Path = field(default_factory=lambda: Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform"))))
+    home: Path = field(default_factory=lambda: _get_cap_home_path())
     log_level: str = "INFO"
     bedrock: BedrockConfig = field(default_factory=BedrockConfig)
     concurrency: ConcurrencyConfig = field(default_factory=ConcurrencyConfig)
@@ -148,7 +157,7 @@ class PlatformConfig:
 
 
 def load_config(config_path: Path | None = None) -> PlatformConfig:
-    cap_home = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
+    cap_home = _get_cap_home_path()
     if config_path is None:
         config_path = cap_home / "config.toml"
 

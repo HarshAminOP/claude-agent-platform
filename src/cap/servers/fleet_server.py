@@ -24,10 +24,9 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from lib.config import load_config
-from lib.db_init import init_fleet_db
-from lib.security import validate_fleet_command
+from cap.lib.config import load_config
+from cap.lib.db_init import init_fleet_db
+from cap.lib.security import validate_fleet_command
 
 logger = logging.getLogger("cap.fleet")
 logging.basicConfig(
@@ -409,7 +408,7 @@ async def _health_monitor_loop():
         await asyncio.sleep(interval)
 
 
-async def main():
+async def _async_main():
     health_task = asyncio.create_task(_health_monitor_loop())
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -418,5 +417,10 @@ async def main():
         health_task.cancel()
 
 
+def main():
+    """Entry point for the cap-fleet-server console script."""
+    asyncio.run(_async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

@@ -37,8 +37,9 @@ logging.basicConfig(
 )
 
 # Database setup
-CAP_HOME = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
-DB_PATH = CAP_HOME / "data" / "platform.db"
+from cap.config import get_cap_home, get_platform_db_path
+CAP_HOME = get_cap_home()
+DB_PATH = get_platform_db_path()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 db = get_db(str(DB_PATH))
@@ -372,10 +373,15 @@ async def _handle_reindex(args: dict):
         }))]
 
 
-async def main():
+async def _async_main():
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
+def main():
+    """Entry point for the cap-code-intel-server console script."""
+    asyncio.run(_async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

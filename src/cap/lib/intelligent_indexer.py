@@ -217,11 +217,14 @@ class IntelligentIndexer:
         # Resolve clone_base_path for remote repos.
         try:
             indexing_cfg = get_indexing_config()
+            from cap.config import get_cap_home
+            _default_clone_path = str(get_cap_home() / "repos")
             self._clone_base_path = Path(
-                indexing_cfg.get("clone_base_path", "~/.claude-platform/repos")
+                indexing_cfg.get("clone_base_path", _default_clone_path)
             ).expanduser()
         except Exception:
-            self._clone_base_path = Path.home() / ".claude-platform" / "repos"
+            from cap.config import get_cap_home
+            self._clone_base_path = get_cap_home() / "repos"
 
         # Open the shared knowledge.db connection for this run.
         self._db: sqlite3.Connection = init_knowledge_db(

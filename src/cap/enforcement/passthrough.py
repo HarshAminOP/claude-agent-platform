@@ -11,9 +11,10 @@ CAP Enforcement Passthrough — Temporary enforcement bypass.
 import os
 import time
 
+from cap.config import get_platform_db_path
 from cap.db import get_db as _get_db, migrate as _migrate
 
-DB_PATH = os.path.expanduser("~/.cap/cap.db")
+DB_PATH = str(get_platform_db_path())
 MAX_TTL = 900  # Hard cap: 15 minutes maximum passthrough duration
 
 _migrated = False

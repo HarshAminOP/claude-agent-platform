@@ -17,7 +17,13 @@ import sqlite3
 import sys
 import time
 
-DB_PATH = os.path.expanduser("~/.cap/cap.db")
+try:
+    from cap.config import get_platform_db_path
+    DB_PATH = str(get_platform_db_path())
+except ImportError:
+    # Fallback if cap package not importable (hook may run outside venv)
+    _cap_home = os.environ.get("CAP_HOME", os.path.join(os.path.expanduser("~"), ".claude-platform"))
+    DB_PATH = os.path.join(_cap_home, "data", "platform.db")
 MAX_STDIN_BYTES = 2_097_152  # 2 MB max input (outputs can be larger than inputs)
 
 

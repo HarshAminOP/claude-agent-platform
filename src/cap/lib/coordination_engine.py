@@ -140,7 +140,7 @@ class CoordinationEngine:
                 in-memory SharedState is created per plan when None is provided.
             max_parallel: Maximum steps to execute concurrently. Protects against
                 budget runaway and connection exhaustion. Default 3.
-            db_path: Override SQLite path for testing. Defaults to ~/.cap/cap.db.
+            db_path: Override SQLite path for testing. Defaults to CAP_HOME/data/platform.db.
         """
         if executor is None:
             raise ValueError("executor must be a ConverseExecutor instance")

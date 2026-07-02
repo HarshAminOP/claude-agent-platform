@@ -13,7 +13,13 @@ import sqlite3
 import sys
 import time
 
-DB_PATH = os.path.expanduser("~/.cap/cap.db")
+try:
+    from cap.config import get_platform_db_path
+    DB_PATH = str(get_platform_db_path())
+except ImportError:
+    # Fallback if cap package not importable (hook may run outside venv)
+    _cap_home = os.environ.get("CAP_HOME", os.path.join(os.path.expanduser("~"), ".claude-platform"))
+    DB_PATH = os.path.join(_cap_home, "data", "platform.db")
 PASSTHROUGH_TTL = 300  # 5 minutes
 MAX_STDIN_BYTES = 1_048_576  # 1 MB max input to prevent memory exhaustion
 
@@ -145,6 +151,14 @@ def main():
     except sqlite3.Error:
         # If DB is unavailable, fail open (don't block user's work)
         sys.exit(0)
+
+    # Routing enforcement — track Agent vs cap_orchestrate usage
+    try:
+        if tool_name in ("Agent", "agent", "cap_orchestrate"):
+            from cap.enforcement.routing_enforcer import check_agent_routing
+            check_agent_routing(tool_name, tool_input)
+    except Exception:
+        pass  # Never break the hook for routing telemetry
 
     # Passthrough check — if active, allow everything
     workspace = os.getcwd()

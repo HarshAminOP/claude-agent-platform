@@ -19,11 +19,9 @@ console = Console(stderr=True)
 
 def _get_db() -> sqlite3.Connection:
     """Get the CAP database connection with witness tables."""
+    from cap.config import get_platform_db_path
     from cap.db import get_db, migrate
-    db_path = os.environ.get(
-        "CAP_ORCHESTRATOR_DB",
-        os.path.expanduser("~/.cap/cap.db"),
-    )
+    db_path = os.environ.get("CAP_ORCHESTRATOR_DB", str(get_platform_db_path()))
     db = get_db(db_path)
     migrate(db)
     return db

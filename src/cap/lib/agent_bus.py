@@ -139,7 +139,7 @@ class AgentBus:
             session_id: Opaque string that scopes all messages and
                         subscriptions for this conversation/workflow.
             db_path:    Path to the SQLite DB.  Defaults to CAP default
-                        (``~/.cap/cap.db``).
+                        (``CAP_HOME/data/platform.db``).
         """
         if not session_id:
             raise ValueError("session_id must be a non-empty string")

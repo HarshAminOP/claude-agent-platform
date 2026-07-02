@@ -26,7 +26,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-_log_dir = Path.home() / ".claude-platform" / "logs"
+from cap.config import get_logs_dir
+_log_dir = get_logs_dir()
 try:
     _log_dir.mkdir(parents=True, exist_ok=True)
     _file_handler = logging.FileHandler(_log_dir / "knowledge-server.log")
@@ -1110,7 +1111,7 @@ async def _process_embedding_queue():
 # Entry point
 # ---------------------------------------------------------------------------
 
-async def main():
+async def _async_main():
     """Start the MCP stdio server and background embedding processor."""
     embedding_task = asyncio.create_task(_process_embedding_queue())
     try:
@@ -1120,5 +1121,10 @@ async def main():
         embedding_task.cancel()
 
 
+def main():
+    """Entry point for the cap-knowledge-server console script."""
+    asyncio.run(_async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

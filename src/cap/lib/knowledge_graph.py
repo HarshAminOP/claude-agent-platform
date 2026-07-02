@@ -39,7 +39,8 @@ logger = logging.getLogger("cap.knowledge_graph")
 # Constants
 # ---------------------------------------------------------------------------
 
-_DEFAULT_DB_PATH = Path.home() / ".claude-platform" / "data" / "knowledge.db"
+from cap.config import get_knowledge_db_path
+_DEFAULT_DB_PATH = get_knowledge_db_path()
 
 
 # ---------------------------------------------------------------------------

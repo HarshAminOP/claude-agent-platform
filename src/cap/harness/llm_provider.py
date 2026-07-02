@@ -59,22 +59,35 @@ def _create_bedrock(config: dict, model_id: str) -> BaseChatModel:
     - sso-profile / static-credentials: pass credentials_profile_name
     - env-vars / instance-role: let boto3 default chain handle it
     """
+    from botocore.config import Config as BotoConfig
     from langchain_aws import ChatBedrockConverse
 
     aws_config = config.get("aws", {})
+    execution_config = config.get("execution", {})
     from cap.lib.harness_config import DEFAULT_AWS_REGION
     region = aws_config.get("region", DEFAULT_AWS_REGION)
     auth_method = aws_config.get("auth_method", "sso-profile")
     profile = aws_config.get("profile", "")
 
+    read_timeout = execution_config.get("read_timeout_s", 600)
+    connect_timeout = execution_config.get("connect_timeout_s", 10)
+
+    boto_config = BotoConfig(
+        read_timeout=read_timeout,
+        connect_timeout=connect_timeout,
+        retries={"max_attempts": execution_config.get("max_retries", 2), "mode": "adaptive"},
+    )
+
     kwargs: dict[str, Any] = {
         "model": model_id,
         "region_name": region,
+        "config": boto_config,
     }
 
-    # Pass credentials_profile_name for profile-based auth
-    if auth_method in ("sso-profile", "static-credentials") and profile:
-        kwargs["credentials_profile_name"] = profile
+    # Pass credentials_profile_name when a profile is available
+    resolved_profile = os.environ.get("AWS_PROFILE") or profile
+    if resolved_profile:
+        kwargs["credentials_profile_name"] = resolved_profile
 
     return ChatBedrockConverse(**kwargs)
 

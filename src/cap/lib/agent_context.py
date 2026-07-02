@@ -78,7 +78,7 @@ class SharedState:
 
         Args:
             session_id: Unique identifier for the agent session.
-            db_path: Override the default SQLite path (~/.cap/cap.db).
+            db_path: Override the default SQLite path (CAP_HOME/data/platform.db).
         """
         if not session_id:
             raise ValueError("session_id must be a non-empty string")

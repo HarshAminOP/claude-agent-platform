@@ -16,8 +16,10 @@ import sqlite3
 import time
 from typing import List
 
+from cap.config import get_witness_key_path
+
 # HMAC key file for witness integrity. Generated on first use.
-_HMAC_KEY_PATH = os.path.expanduser("~/.cap/witness.key")
+_HMAC_KEY_PATH = str(get_witness_key_path())
 _MAX_FILE_SIZE = 100_000_000  # 100 MB - refuse to hash files larger than this
 _MAX_FILES_PER_CALL = 10_000  # Prevent DoS from unbounded file lists
 
@@ -25,7 +27,7 @@ _MAX_FILES_PER_CALL = 10_000  # Prevent DoS from unbounded file lists
 def _get_hmac_key() -> bytes:
     """
     Load or generate the HMAC key for witness stamp integrity.
-    Key is stored in ~/.cap/witness.key with owner-only permissions.
+    Key is stored in CAP_HOME/witness.key with owner-only permissions.
     """
     if os.path.exists(_HMAC_KEY_PATH):
         with open(_HMAC_KEY_PATH, "rb") as f:

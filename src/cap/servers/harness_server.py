@@ -1664,10 +1664,15 @@ async def _handle_coordination_consensus(args: dict):
 # Entry point
 # ---------------------------------------------------------------------------
 
-async def main():
+async def _async_main():
     async with stdio_server() as (read_stream, write_stream):
         await mcp.run(read_stream, write_stream, mcp.create_initialization_options())
 
 
+def main():
+    """Entry point for the cap-harness-server console script."""
+    asyncio.run(_async_main())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

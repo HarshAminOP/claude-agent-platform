@@ -19,13 +19,13 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-from lib.models import (
+from cap.lib.models import (
     ModelTier,
     init_database,
 )
-from lib.api_gateway import APIGateway, ConcurrencyConfig
-from lib.hooks import (
+from cap.lib.api_gateway import APIGateway
+from cap.lib.models import ConcurrencyConfig
+from cap.lib.hooks import (
     HookType,
     HookContext,
     emit_hook,
@@ -39,8 +39,10 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-DATA_DIR = Path(os.environ.get("PLATFORM_DATA_DIR", str(Path.home() / ".claude-platform" / "data")))
-DB_PATH = DATA_DIR / "platform.db"
+from cap.config import get_cap_home, get_data_dir, get_platform_db_path
+CAP_HOME = get_cap_home()
+DATA_DIR = get_data_dir()
+DB_PATH = get_platform_db_path()
 
 db = init_database(DB_PATH)
 gateway = APIGateway(DB_PATH, ConcurrencyConfig())
@@ -663,11 +665,16 @@ async def _handle_report(args: dict):
     return [TextContent(type="text", text=json.dumps(wf))]
 
 
-async def main():
+async def _async_main():
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the cap-workflow-server console script."""
     import asyncio
-    asyncio.run(main())
+    asyncio.run(_async_main())
+
+
+if __name__ == "__main__":
+    main()

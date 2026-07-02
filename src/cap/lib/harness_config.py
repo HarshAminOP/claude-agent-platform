@@ -71,7 +71,8 @@ def load_harness_config() -> dict:
     If the config file exists but lacks a "provider" field, assumes "aws-bedrock"
     for backward compatibility with pre-universal configs.
     """
-    config_path = Path.home() / ".claude-platform" / "harness-config.json"
+    from cap.config import get_harness_config_path
+    config_path = get_harness_config_path()
     if config_path.exists():
         config = json.loads(config_path.read_text())
         # Backward compat: if no provider field, assume aws-bedrock
@@ -164,7 +165,8 @@ def add_indexed_root(root_path: str, config: dict | None = None) -> bool:
 
     Persists the change to harness-config.json. Returns True if added.
     """
-    config_path = Path.home() / ".claude-platform" / "harness-config.json"
+    from cap.config import get_harness_config_path
+    config_path = get_harness_config_path()
     if config is None:
         config = load_harness_config()
 

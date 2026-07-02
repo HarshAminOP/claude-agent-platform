@@ -24,11 +24,13 @@ console = Console(stderr=True)
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _cap_home() -> Path:
-    return Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
+    from cap.config import get_cap_home
+    return get_cap_home()
 
 
 def _data_dir() -> Path:
-    return _cap_home() / "data"
+    from cap.config import get_data_dir
+    return get_data_dir()
 
 
 def _resolve_workspace(workspace: str) -> str:
@@ -147,7 +149,8 @@ def config():
 @config.command("show")
 def config_show():
     """Display current CAP configuration."""
-    config_path = Path.home() / ".claude-platform" / "harness-config.json"
+    from cap.config import get_harness_config_path
+    config_path = get_harness_config_path()
     if not config_path.exists():
         console.print("[yellow]No configuration found. Run `cap init` first.[/yellow]")
         return
@@ -176,7 +179,8 @@ def config_show():
 @click.argument("value")
 def config_set(key: str, value: str):
     """Set a configuration value (dot-notation: aws.profile, budget.daily_limit_usd)."""
-    config_path = Path.home() / ".claude-platform" / "harness-config.json"
+    from cap.config import get_harness_config_path
+    config_path = get_harness_config_path()
     if not config_path.exists():
         console.print("[yellow]No configuration found. Run `cap init` first.[/yellow]")
         raise SystemExit(1)
@@ -376,7 +380,8 @@ def status():
         console.print("[dim]Budget: platform DB not initialized[/dim]")
 
     # ── Trust Levels ──────────────────────────────────────────────────────────
-    cap_db_path = Path(os.path.expanduser("~/.cap/cap.db"))
+    from cap.config import get_platform_db_path
+    cap_db_path = get_platform_db_path()
     if cap_db_path.exists():
         try:
             conn = sqlite3.connect(str(cap_db_path))
@@ -1555,9 +1560,9 @@ def budget_reset(workspace: str | None, confirm: bool):
 @click.argument("amount", type=float)
 def budget_raise(amount: float):
     """Raise the daily budget cap (in USD)."""
-    from cap.db import get_db, migrate as _migrate
+    from cap.db import get_db, migrate as _migrate, DEFAULT_DB_PATH as _default_db_path
 
-    db_path = os.environ.get("CAP_ORCHESTRATOR_DB", os.path.expanduser("~/.cap/cap.db"))
+    db_path = os.environ.get("CAP_ORCHESTRATOR_DB", _default_db_path)
     db = get_db(db_path)
     _migrate(db)
 

@@ -26,11 +26,8 @@ except Exception:  # noqa: BLE001 — optional dep; may be absent in test enviro
 
 def _get_db() -> sqlite3.Connection:
     """Get the CAP database connection."""
-    from cap.db import get_db, migrate
-    db_path = os.environ.get(
-        "CAP_ORCHESTRATOR_DB",
-        os.path.expanduser("~/.cap/cap.db"),
-    )
+    from cap.db import get_db, migrate, DEFAULT_DB_PATH
+    db_path = os.environ.get("CAP_ORCHESTRATOR_DB", DEFAULT_DB_PATH)
     db = get_db(db_path)
     migrate(db)
     return db
@@ -125,7 +122,8 @@ def health(agent_type: str | None):
     console.print(f"\n[bold]DLQ:[/bold] [{dlq_color}]{dlq_count} tasks[/{dlq_color}]")
 
     # Disk usage
-    db_path = os.environ.get("CAP_ORCHESTRATOR_DB", os.path.expanduser("~/.cap/cap.db"))
+    from cap.db import DEFAULT_DB_PATH as _default_db
+    db_path = os.environ.get("CAP_ORCHESTRATOR_DB", _default_db)
     cap_dir = os.path.dirname(db_path)
     disk = _disk_usage(cap_dir)
 
@@ -267,9 +265,10 @@ def doctor():
     warn = click.style("!", fg="yellow", bold=True)
     err = click.style("✘", fg="red", bold=True)
 
-    cap_home = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
-    data_dir = cap_home / "data"
-    cap_db_path = Path(os.path.expanduser("~/.cap/cap.db"))
+    from cap.config import get_cap_home, get_data_dir, get_platform_db_path
+    cap_home = get_cap_home()
+    data_dir = get_data_dir()
+    cap_db_path = get_platform_db_path()
 
     click.echo(click.style("\n=== cap doctor ===", bold=True))
 
@@ -426,7 +425,8 @@ def doctor():
     try:
         import sqlite3 as _sqlite3
         from pathlib import Path as _Path
-        _platform_db = _Path.home() / ".claude-platform" / "data" / "platform.db"
+        from cap.config import get_platform_db_path as _get_pdb
+        _platform_db = _get_pdb()
         _claude_json = _Path.home() / ".claude.json"
 
         # Harness server registered?

@@ -26,8 +26,9 @@ from rich import box
 
 console = Console(stderr=True)
 
-_STATE_FILE = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform"))) / "data" / "indexer_state.json"
-_DAEMON_CONFIG_FILE = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform"))) / "data" / "indexer_daemon.json"
+from cap.config import get_data_dir as _get_data_dir
+_STATE_FILE = _get_data_dir() / "indexer_state.json"
+_DAEMON_CONFIG_FILE = _get_data_dir() / "indexer_daemon.json"
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────

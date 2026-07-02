@@ -4,13 +4,15 @@ CAP Database Manager — SQLite connection, migrations, WAL mode.
 Provides:
 - get_db(path) -> sqlite3.Connection with WAL mode and foreign keys
 - migrate(db) -> runs all CREATE TABLE statements
-- Default DB path: ~/.cap/cap.db
+- Default DB path: CAP_HOME/data/platform.db (via cap.config)
 """
 
 import os
 import sqlite3
 
-DEFAULT_DB_PATH = os.path.expanduser("~/.cap/cap.db")
+from cap.config import get_platform_db_path
+
+DEFAULT_DB_PATH = str(get_platform_db_path())
 
 
 def get_db(path: str = None) -> sqlite3.Connection:
@@ -18,7 +20,7 @@ def get_db(path: str = None) -> sqlite3.Connection:
     Get a SQLite connection with WAL mode and foreign keys enabled.
 
     Args:
-        path: Path to the database file. Defaults to ~/.cap/cap.db
+        path: Path to the database file. Defaults to CAP_HOME/data/platform.db
 
     Returns:
         sqlite3.Connection configured for CAP usage.

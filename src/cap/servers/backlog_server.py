@@ -52,7 +52,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-DATA_DIR = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform"))) / "data"
+from cap.config import get_data_dir
+DATA_DIR = get_data_dir()
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = DATA_DIR / "backlog.db"
 
@@ -765,11 +766,16 @@ _HANDLERS = {
 }
 
 
-async def main():
+async def _async_main():
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the cap-backlog-server console script."""
     import asyncio
-    asyncio.run(main())
+    asyncio.run(_async_main())
+
+
+if __name__ == "__main__":
+    main()

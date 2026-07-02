@@ -17,7 +17,6 @@ check_budget_enforcement(db, agent_type, cost_usd, workspace=None, config=None) 
 record_budget_spend(db, agent_type, cost_usd, workspace=None) -> None
 """
 
-import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -28,15 +27,14 @@ from typing import Optional
 # Constants
 # ---------------------------------------------------------------------------
 
-BUDGET_PAUSED_FLAG = Path(os.environ.get(
-    "CAP_HOME", str(Path.home() / ".claude-platform")
-)) / "data" / "budget_paused"
+from cap.config import get_data_dir
+
+BUDGET_PAUSED_FLAG = get_data_dir() / "budget_paused"
 
 
 def _budget_paused_path() -> Path:
     """Return the budget_paused flag file path (respects CAP_HOME env)."""
-    cap_home = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
-    return cap_home / "data" / "budget_paused"
+    return get_data_dir() / "budget_paused"
 
 
 def _today_str() -> str:

@@ -332,17 +332,28 @@ class ConverseExecutor:
             self._init_boto3_client()
 
     def _init_boto3_client(self) -> None:
-        """Legacy: Create boto3 Bedrock Runtime client."""
+        """Legacy: Create boto3 Bedrock Runtime client with proper timeouts."""
         try:
             import boto3
+            from botocore.config import Config as BotoConfig
             from botocore.exceptions import NoCredentialsError, NoRegionError
 
             session_kwargs: dict = {"region_name": self._region}
             if self._profile:
                 session_kwargs["profile_name"] = self._profile
 
+            execution_cfg = (self._config or {}).get("execution", {})
+            read_timeout = execution_cfg.get("read_timeout_s", 600)
+            connect_timeout = execution_cfg.get("connect_timeout_s", 10)
+
+            boto_config = BotoConfig(
+                read_timeout=read_timeout,
+                connect_timeout=connect_timeout,
+                retries={"max_attempts": execution_cfg.get("max_retries", 2), "mode": "adaptive"},
+            )
+
             session = boto3.Session(**session_kwargs)
-            self._client = session.client("bedrock-runtime")
+            self._client = session.client("bedrock-runtime", config=boto_config)
             self._available = True
         except Exception as exc:
             logger.warning("ConverseExecutor: client init failed: %s", exc)
@@ -391,8 +402,8 @@ class ConverseExecutor:
             agent_caps = harness_cfg.get("budget", {}).get("agent_caps", {})
 
             if agent_type in agent_caps:
-                cap_home = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
-                db_path = cap_home / "data" / "platform.db"
+                from cap.config import get_platform_db_path
+                db_path = get_platform_db_path()
 
                 if db_path.exists():
                     db = sqlite3.connect(str(db_path))
@@ -435,8 +446,8 @@ class ConverseExecutor:
             from cap.lib.budget_manager import record_budget_spend
             import sqlite3
 
-            cap_home = Path(os.environ.get("CAP_HOME", str(Path.home() / ".claude-platform")))
-            db_path = cap_home / "data" / "platform.db"
+            from cap.config import get_platform_db_path
+            db_path = get_platform_db_path()
             db_path.parent.mkdir(parents=True, exist_ok=True)
 
             db = sqlite3.connect(str(db_path))

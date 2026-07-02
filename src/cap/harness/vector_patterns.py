@@ -16,7 +16,8 @@ from pathlib import Path
 
 logger = logging.getLogger("cap.harness.vector_patterns")
 
-VECTORS_DIR = Path.home() / ".claude-platform" / "data" / "vectors"
+from cap.config import get_data_dir
+VECTORS_DIR = get_data_dir() / "vectors"
 TABLE_NAME = "harness_patterns"
 
 
