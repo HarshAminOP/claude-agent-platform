@@ -23,6 +23,9 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
+from cap.lib.security import sanitize_content
+from cap.lib.repo_resolver import reset_session_counter
+
 logger = logging.getLogger("cap.session")
 logging.basicConfig(
     stream=sys.stderr,
@@ -261,6 +264,7 @@ async def list_tools():
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict):
+    _ensure_initialized()
     try:
         if name == "session_start":
             return await _handle_start(arguments)

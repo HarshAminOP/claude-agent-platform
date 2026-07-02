@@ -419,7 +419,10 @@ async def _run_orchestration_bg(workflow_id: str, args: dict) -> None:
             }
             wf["result"] = result_payload
         except (json.JSONDecodeError, IndexError, AttributeError):
-            wf["result"] = json.loads(result_contents[0].text) if result_contents else None
+            try:
+                wf["result"] = json.loads(result_contents[0].text) if result_contents else None
+            except Exception:
+                wf["result"] = {"raw": str(result_contents)} if result_contents else None
 
         wf["steps_completed"] = wf["steps_total"]
         wf["current_step"] = {"phase": "done", "description": "Completed"}
