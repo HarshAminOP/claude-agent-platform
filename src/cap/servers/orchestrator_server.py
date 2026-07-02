@@ -61,6 +61,108 @@ _task_decomposer = None
 # Module-level singleton for knowledge graph (lazy-initialized)
 _knowledge_graph = None
 
+# ── Agent Category Normalization ──────────────────────────────────────────────
+# Maps hyper-specific agent types to their general category.
+# This fixes routing accuracy: the router should pick general categories
+# (security, sre, devops, dev, test) for broad tasks rather than niche sub-agents.
+_AGENT_CATEGORY_MAP: dict[str, str] = {
+    # Security family
+    'iam-policy-review': 'security', 'waf-rules': 'security', 'network-security': 'security',
+    'encryption-review': 'security', 'threat-model': 'security', 'penetration-test': 'security',
+    'least-privilege-audit': 'security', 'secret-rotation': 'security', 'container-scanning': 'security',
+    'zero-trust': 'security', 'compliance-gdpr': 'security', 'compliance-hipaa': 'security',
+    # SRE family
+    'prometheus-metrics': 'sre', 'grafana-dashboards': 'sre', 'alertmanager-rules': 'sre',
+    'synthetic-monitoring': 'sre', 'distributed-tracing': 'sre', 'log-aggregation': 'sre',
+    'incident-response': 'sre', 'chaos-test': 'sre', 'runbook-author': 'sre',
+    'apm-setup': 'sre', 'capacity-planning': 'sre',
+    # DevOps family
+    'helm-charts': 'devops', 'helm-values': 'devops', 'argocd-apps': 'devops', 'argocd-sync': 'devops',
+    'karpenter': 'devops', 'eks-cluster': 'devops', 'eks-addons': 'devops', 'eks-node-groups': 'devops',
+    'terraform-modules': 'devops', 'terraform-state': 'devops', 'terraform-import': 'devops',
+    'github-actions': 'devops', 'cicd': 'devops', 'docker': 'devops',
+    'vpc-network': 'devops', 'subnet-design': 'devops', 'route53-dns': 'devops',
+    'cloudfront-cdn': 'devops', 'alb-ingress': 'devops', 'ecr-registry': 'devops',
+    'ecs-fargate': 'devops', 's3-buckets': 'devops', 'rds-aurora': 'devops',
+    'canary-deploy': 'devops', 'blue-green-deploy': 'devops',
+    # AWS Architect -> devops for general infra
+    'aws-architect': 'devops',
+    # Dev family
+    'python-backend': 'dev', 'typescript-frontend': 'dev', 'react-components': 'dev',
+    'rest-endpoints': 'dev', 'graphql-schema': 'dev', 'grpc-services': 'dev',
+    'algorithm': 'dev', 'database': 'dev', 'sdk-developer': 'dev',
+    'cli-tools': 'dev', 'orm-models': 'dev',
+    # Test family
+    'unit-test-python': 'test', 'unit-test-typescript': 'test', 'integration-test': 'test',
+    'e2e-test': 'test', 'contract-test': 'test', 'load-test': 'test',
+    'fuzz-test': 'test', 'mutation-test': 'test',
+}
+
+
+def _normalize_agent_type(agent_type: str, task: str = "") -> str:
+    """Normalize hyper-specific agent types to general categories.
+
+    Two-phase normalization:
+    1. Map specific agent names to their category via _AGENT_CATEGORY_MAP.
+    2. If a task is provided, detect strong intent signals that override the
+       category-mapped result (e.g., "audit S3 policy" -> security, not devops).
+    """
+    # Phase 1: category mapping
+    normalized = _AGENT_CATEGORY_MAP.get(agent_type, agent_type)
+
+    # Phase 2: intent-based override (only when task text is provided)
+    if task:
+        override = _detect_intent_override(task)
+        if override:
+            return override
+
+    return normalized
+
+
+# Intent signals that force a specific category regardless of keyword/pattern routing.
+# Each entry: (category, list_of_signal_phrases). First matching category wins.
+_INTENT_OVERRIDES: list[tuple[str, list[str]]] = [
+    ('security', [
+        'audit', 'security audit', 'vulnerability', 'public access', 'policy review',
+        'iam policy', 'bucket policy', 'permission audit', 'least privilege',
+        'rbac', 'secret scan', 'cve', 'penetration', 'threat model',
+        'compliance', 'encryption audit', 'access control',
+    ]),
+    ('sre', [
+        'alert rule', 'alerting', 'grafana dashboard', 'monitoring setup',
+        'prometheus', 'grafana', 'dashboard for', 'set up dashboard',
+        'slo', 'sla', 'error budget', 'oncall', 'runbook',
+        'observability', 'tracing setup', 'metrics pipeline',
+        'latency', 'uptime', 'incident',
+    ]),
+    ('test', [
+        'write test', 'add test', 'test coverage', 'unit test',
+        'integration test', 'e2e test', 'test suite', 'test plan',
+    ]),
+]
+
+
+def _detect_intent_override(task: str) -> str | None:
+    """Detect strong intent signals in the task that override category routing.
+
+    Returns the category name if a strong signal is found, None otherwise.
+    A signal is "strong" if at least 2 phrases match OR a single highly specific
+    phrase matches (multi-word).
+    """
+    task_lower = task.lower()
+    for category, signals in _INTENT_OVERRIDES:
+        hits = 0
+        for phrase in signals:
+            if phrase in task_lower:
+                # Multi-word phrases count as strong by themselves
+                if ' ' in phrase:
+                    return category
+                hits += 1
+        if hits >= 2:
+            return category
+    return None
+
+
 # ── Background workflow tracking ──────────────────────────────────────────────
 _running_workflows: dict[str, dict] = {}  # workflow_id -> {task, status, result, error, ...}
 
@@ -262,7 +364,7 @@ async def _run_orchestration_bg(workflow_id: str, args: dict) -> None:
         from cap.harness.hooks import hooks_route
         from cap.harness.agentdb import agentdb_semantic_route
 
-        task = args["task"]
+        task = args.get("task", "")
         context = args.get("context")
         workspace = args.get("workspace")
 
@@ -364,6 +466,9 @@ async def _run_orchestration_bg(workflow_id: str, args: dict) -> None:
             agent_type = agent_routing.get("recommended_agent_type", "dev")
             agent_confidence = agent_routing.get("confidence", 0.3)
             short_model = None
+
+        # Normalize hyper-specific agents to general categories
+        agent_type = _normalize_agent_type(agent_type, task)
 
         # Determine model
         if short_model is None or routing_method != "embedding":
@@ -712,7 +817,9 @@ async def call_tool(name: str, arguments: dict):
 
 async def _handle_route(args: dict):
     """Route a task to the appropriate tier, using EmbeddingRouter first."""
-    task_description = args["task_description"]
+    task_description = args.get("task_description") or args.get("task", "")
+    if not task_description:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: task_description"}))]
     session_id = args.get("session_id", "unknown")
 
     # Try embedding-based routing first for agent_type recommendation
@@ -732,10 +839,23 @@ async def _handle_route(args: dict):
     if embed_recommendation and embed_recommendation.get("confidence", 0) > 0.5:
         routing_method = "embedding"
 
+    # Determine the agent_type — embedding first, keyword fallback
+    from cap.harness.agentdb import agentdb_semantic_route
+
+    if embed_recommendation and routing_method == "embedding":
+        agent_type = embed_recommendation["recommended_agent_type"]
+    else:
+        keyword_routing = agentdb_semantic_route(task_description)
+        agent_type = keyword_routing.get("recommended_agent_type", "dev")
+
+    # Normalize hyper-specific agents to general categories
+    agent_type = _normalize_agent_type(agent_type, task_description)
+
     # Standard tier routing (complexity-based)
     decision = route(task_description, db, session_id)
 
     response = {
+        "agent_type": agent_type,
         "tier": decision.tier.value,
         "reasoning": decision.reasoning,
         "estimated_agents": decision.estimated_agents,
@@ -748,7 +868,7 @@ async def _handle_route(args: dict):
     # If embedding routing succeeded, include its recommendation
     if embed_recommendation and routing_method == "embedding":
         response["embedding_recommendation"] = {
-            "recommended_agent_type": embed_recommendation["recommended_agent_type"],
+            "recommended_agent_type": agent_type,  # normalized
             "confidence": embed_recommendation["confidence"],
             "model": embed_recommendation.get("model", "sonnet"),
             "alternatives": embed_recommendation.get("alternatives", []),
@@ -765,7 +885,9 @@ async def _handle_route(args: dict):
 
 async def _handle_plan(args: dict):
     """Generate a TaskDAG plan using TaskDecomposer (heuristic + LLM fallback)."""
-    task_description = args["task_description"]
+    task_description = args.get("task_description") or args.get("task", "")
+    if not task_description:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: task_description"}))]
     context = args.get("context", {})
     context_str = json.dumps(context) if isinstance(context, dict) else str(context)
 
@@ -893,8 +1015,8 @@ async def _handle_health(args: dict):
     monitor = AgentHealthMonitor(db)
     agent_type_filter = args.get("agent_type")
 
-    # Known agent types
-    agent_types = ["dev", "devops", "security", "sre", "code-review", "test", "docs", "explore"]
+    # General agent categories (normalized from hyper-specific types)
+    agent_types = ["dev", "devops", "security", "sre", "code-review", "test", "docs", "explore", "optimization"]
 
     if agent_type_filter:
         agent_types = [agent_type_filter]
@@ -969,8 +1091,11 @@ async def _handle_execute(args: dict):
     from cap.lib.agent_bus import AgentBus
     import cap.harness.cost_meter as cost_meter
 
-    agent_type = args["agent_type"]
-    task = args["task"]
+    agent_type = args.get("agent_type")
+    task = args.get("task")
+    if not agent_type or not task:
+        missing = [k for k in ("agent_type", "task") if not args.get(k)]
+        return [TextContent(type="text", text=json.dumps({"error": f"Missing required parameter(s): {', '.join(missing)}"}))]
     model_override = args.get("model")
     context = args.get("context")
     max_tokens = int(args.get("max_tokens", 8192))
@@ -1247,7 +1372,9 @@ async def _handle_orchestrate(args: dict):
     4. Record cost + update trust + store pattern embedding
     5. Return result with full routing metadata
     """
-    task = args["task"]
+    task = args.get("task")
+    if not task:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: task"}))]
     blocking_param = args.get("blocking")  # None means auto-detect
 
     # Prune stale workflows on each call (cheap O(n) scan)
@@ -1339,7 +1466,7 @@ async def _handle_orchestrate_blocking(args: dict, complexity: str):
     from cap.harness.hooks import hooks_route
     from cap.harness.agentdb import agentdb_semantic_route
 
-    task = args["task"]
+    task = args.get("task", "")
     context = args.get("context")
     workspace = args.get("workspace")
 
@@ -1384,6 +1511,9 @@ async def _handle_orchestrate_blocking(args: dict, complexity: str):
         agent_type = agent_routing.get("recommended_agent_type", "dev")
         agent_confidence = agent_routing.get("confidence", 0.3)
         short_model = None  # will be determined below
+
+    # Normalize hyper-specific agents to general categories
+    agent_type = _normalize_agent_type(agent_type, task)
 
     # Step 2: Determine model — if embedding already chose one, prefer it;
     # otherwise use agent's configured default, then hooks_route

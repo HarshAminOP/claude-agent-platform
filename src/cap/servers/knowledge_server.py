@@ -415,17 +415,32 @@ async def list_tools():
         ),
         Tool(
             name="knowledge_graph_add",
-            description="Add a relationship to the knowledge graph.",
+            description=(
+                "Add a relationship (triple) to the knowledge graph. "
+                "Format: subject --predicate--> object. "
+                "Examples: ('eks-cluster', 'depends_on', 'vpc'), "
+                "('alerting-service', 'owned_by', 'observability-team'), "
+                "('terraform-module', 'deploys', 'lambda-function'). "
+                "subject_type and object_type classify the node (service, team, resource, concept, repo)."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "subject": {"type": "string"},
-                    "subject_type": {"type": "string", "default": "concept"},
-                    "predicate": {"type": "string"},
-                    "object": {"type": "string"},
-                    "object_type": {"type": "string", "default": "concept"},
-                    "workspace": {"type": "string"},
-                    "metadata": {"type": "object"},
+                    "subject": {"type": "string", "description": "Source entity name (e.g., 'eks-cluster', 'alerting-service')"},
+                    "subject_type": {
+                        "type": "string",
+                        "default": "concept",
+                        "description": "Node type for subject: service, team, resource, concept, repo, component",
+                    },
+                    "predicate": {"type": "string", "description": "Relationship type (e.g., 'depends_on', 'owned_by', 'deploys', 'uses', 'contains')"},
+                    "object": {"type": "string", "description": "Target entity name (e.g., 'vpc', 'observability-team')"},
+                    "object_type": {
+                        "type": "string",
+                        "default": "concept",
+                        "description": "Node type for object: service, team, resource, concept, repo, component",
+                    },
+                    "workspace": {"type": "string", "description": "Workspace scope (defaults to CAP_HOME if omitted)"},
+                    "metadata": {"type": "object", "description": "Optional metadata dict to attach to the edge"},
                 },
                 "required": ["subject", "predicate", "object"],
             },

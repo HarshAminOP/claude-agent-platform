@@ -288,7 +288,9 @@ async def call_tool(name: str, arguments: dict):
 
 
 async def _handle_start(args: dict):
-    workspace = args["workspace"]
+    workspace = args.get("workspace")
+    if not workspace:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: workspace"}))]
     context = args.get("context")
     now = _now()
 
@@ -371,7 +373,9 @@ async def _handle_start(args: dict):
 
 
 async def _handle_checkpoint(args: dict):
-    session_id = args["session_id"]
+    session_id = args.get("session_id")
+    if not session_id:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: session_id"}))]
     decisions = args.get("decisions", [])
     learnings = args.get("learnings", [])
 
@@ -410,8 +414,12 @@ async def _handle_checkpoint(args: dict):
 
 async def _handle_record(args: dict):
     session_id = args.get("session_id")
-    event_type = args["event_type"]
-    content = sanitize_content(args["content"])
+    event_type = args.get("event_type")
+    content_raw = args.get("content")
+    if not event_type or not content_raw:
+        missing = [k for k in ("event_type", "content") if not args.get(k)]
+        return [TextContent(type="text", text=json.dumps({"error": f"Missing required parameter(s): {', '.join(missing)}"}))]
+    content = sanitize_content(content_raw)
     category = args.get("category")
     data = args.get("data")
 
@@ -431,8 +439,11 @@ async def _handle_record(args: dict):
 
 
 async def _handle_recall(args: dict):
-    query = args["query"]
-    workspace = args["workspace"]
+    query = args.get("query")
+    workspace = args.get("workspace")
+    if not query or not workspace:
+        missing = [k for k in ("query", "workspace") if not args.get(k)]
+        return [TextContent(type="text", text=json.dumps({"error": f"Missing required parameter(s): {', '.join(missing)}"}))]
 
     # Sanitize for FTS5 — hyphens between words become spaces, remove special chars,
     # then join with OR for broader recall (implicit AND requires ALL terms present)
@@ -529,7 +540,9 @@ async def _handle_recall(args: dict):
 
 
 async def _handle_end(args: dict):
-    session_id = args["session_id"]
+    session_id = args.get("session_id")
+    if not session_id:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: session_id"}))]
     summary = args.get("summary")
     learnings = args.get("learnings", [])
     now = _now()
@@ -563,8 +576,13 @@ async def _handle_end(args: dict):
 
 async def _handle_feedback(args: dict):
     session_id = args.get("session_id")
-    what_was_wrong = sanitize_content(args["what_was_wrong"])
-    what_is_correct = sanitize_content(args["what_is_correct"])
+    raw_wrong = args.get("what_was_wrong")
+    raw_correct = args.get("what_is_correct")
+    if not raw_wrong or not raw_correct:
+        missing = [k for k in ("what_was_wrong", "what_is_correct") if not args.get(k)]
+        return [TextContent(type="text", text=json.dumps({"error": f"Missing required parameter(s): {', '.join(missing)}"}))]
+    what_was_wrong = sanitize_content(raw_wrong)
+    what_is_correct = sanitize_content(raw_correct)
     category = args.get("category")
     workspace = args.get("workspace")
 
