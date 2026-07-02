@@ -70,12 +70,20 @@ HARD_FULL_MIN_FLOOR = 0.40
 
 # Complexity signals and their weights
 COMPLEXITY_SIGNALS: dict[str, dict] = {
+    "architecture_keywords": {
+        "keywords": ["architecture", "active-active", "multi-region", "design a", "distributed system", "high availability", "fault tolerant", "disaster recovery", "system design"],
+        "weight": 0.55,
+    },
     "multi_file_keywords": {
         "keywords": ["across", "all files", "every", "migrate"],
         "weight": 0.3,
     },
     "infra_keywords": {
         "keywords": ["terraform", "kubernetes", "helm", "argocd", "deploy"],
+        "weight": 0.25,
+    },
+    "implementation_keywords": {
+        "keywords": ["write a", "implement", "create a", "build a", "dockerfile", "generate", "develop"],
         "weight": 0.25,
     },
     "refactor_keywords": {
@@ -89,6 +97,10 @@ COMPLEXITY_SIGNALS: dict[str, dict] = {
     "simple_keywords": {
         "keywords": ["fix typo", "rename", "update comment", "add log"],
         "weight": -0.3,
+    },
+    "trivial_question_keywords": {
+        "keywords": ["what is", "what are", "explain", "describe", "tell me about", "how does"],
+        "weight": -0.2,
     },
 }
 

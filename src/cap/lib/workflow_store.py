@@ -84,11 +84,29 @@ def list_active_workflows():
 
 
 def mark_failed_stale(timeout_seconds=120):
-    """Mark running workflows as failed_stale if heartbeat exceeded timeout."""
+    """Mark running workflows as failed_stale if heartbeat exceeded timeout.
+
+    Returns the number of workflows marked as stale.
+    Handles both epoch float and ISO datetime string heartbeat formats.
+    """
     conn = _get_conn()
     cutoff = time.time() - timeout_seconds
-    conn.execute(
-        f"UPDATE {TABLE} SET status='failed_stale', error='heartbeat timeout' WHERE status='running' AND heartbeat_at < ?",
-        (cutoff,))
+    # Also compute an ISO-format cutoff for rows where heartbeat_at was stored as datetime string
+    import datetime as _dt
+    iso_cutoff = _dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+    # For string-based heartbeats, subtract timeout_seconds from now
+    iso_cutoff_dt = _dt.datetime.utcnow() - _dt.timedelta(seconds=timeout_seconds)
+    iso_cutoff = iso_cutoff_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    cursor = conn.execute(
+        f"""UPDATE {TABLE} SET status='failed_stale', error='heartbeat timeout'
+        WHERE status='running' AND (
+            (typeof(heartbeat_at) = 'real' AND heartbeat_at < ?) OR
+            (typeof(heartbeat_at) = 'integer' AND heartbeat_at < ?) OR
+            (typeof(heartbeat_at) = 'text' AND heartbeat_at < ?)
+        )""",
+        (cutoff, cutoff, iso_cutoff))
+    count = cursor.rowcount
     conn.commit()
     conn.close()
+    return count

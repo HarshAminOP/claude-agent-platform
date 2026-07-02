@@ -54,6 +54,27 @@ logger = logging.getLogger("cap.cli.lifecycle")
 
 # ── Path helpers ──────────────────────────────────────────────────────────────
 
+
+def _detect_aws_region(profile: str = "") -> str:
+    """Detect region from: env var > AWS profile config > eu-central-1 default."""
+    env_region = os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION")
+    if env_region:
+        return env_region
+    if profile:
+        try:
+            import configparser
+            aws_config = configparser.ConfigParser()
+            aws_config.read(Path.home() / ".aws" / "config")
+            section = f"profile {profile}" if not profile.startswith("profile ") else profile
+            if aws_config.has_option(section, "region"):
+                return aws_config.get(section, "region")
+            if aws_config.has_option(section, "sso_region"):
+                return aws_config.get(section, "sso_region")
+        except Exception:
+            pass
+    return "eu-central-1"
+
+
 def _cap_home() -> Path:
     from cap.config import get_cap_home
     return get_cap_home()
@@ -1405,11 +1426,33 @@ _MODEL_TIERS = {
 }
 
 
+def _make_stdin_prompter(stdin_lines: list[str]):
+    """Create a helper that pops answers from a pre-read stdin line list.
+
+    Returns a function with signature: prompter(prompt_text, default=None) -> str
+    When the list is exhausted, returns the default value.
+    """
+    def _prompter(prompt_text: str, default=None, **kwargs):  # noqa: ARG001
+        if stdin_lines:
+            answer = stdin_lines.pop(0).strip()
+            if answer:
+                return answer
+        # Exhausted or empty line — use default
+        if default is not None:
+            return default
+        return ""
+    return _prompter
+
+
 def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dict:
     """Interactive setup wizard for first-time CAP configuration.
 
     Supports multiple LLM providers and AWS authentication methods.
     Returns the complete harness config dict.
+
+    Piped stdin support: if stdin is not a TTY and has data available,
+    lines are read upfront and used as answers to prompts in order.
+    When piped answers are exhausted, defaults are used for remaining prompts.
     """
     from cap.config import get_harness_config_path
     config_path = get_harness_config_path()
@@ -1417,9 +1460,34 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
     if config_path.exists() and not force:
         return json.loads(config_path.read_text())
 
-    # Auto-detect non-interactive mode when stdin is not a TTY (e.g. CI, tests)
+    # ── Piped stdin detection ────────────────────────────────────────────────
+    # If stdin is not a TTY but has data, read all lines upfront and use them
+    # as sequential answers. This enables: printf 'answers\n' | cap init
+    _stdin_answers: list[str] = []
+    _piped_mode = False
     if not non_interactive and not sys.stdin.isatty():
+        import select
+        # Check if stdin has data available (non-blocking)
+        if select.select([sys.stdin], [], [], 0.0)[0]:
+            _stdin_answers = sys.stdin.read().splitlines()
+        if _stdin_answers:
+            _piped_mode = True
+            click.echo('Reading configuration from stdin...')
+        else:
+            # No data on stdin pipe — fall back to non-interactive defaults
+            non_interactive = True
+
+    if not non_interactive and not sys.stdin.isatty() and not _piped_mode:
         non_interactive = True
+
+    # Helper: use piped answer if available, otherwise call click.prompt
+    _piped_prompt = _make_stdin_prompter(_stdin_answers)
+
+    def _prompt(text: str, default=None, **kwargs):
+        """Prompt that reads from piped stdin when available, else click.prompt."""
+        if _piped_mode:
+            return _piped_prompt(text, default=default)
+        return click.prompt(text, default=default, **kwargs)
 
     console.print("\n[bold cyan]Setup Wizard[/bold cyan] — Configuring CAP for your environment\n")
 
@@ -1434,7 +1502,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         console.print(f"  [cyan]2[/cyan]. anthropic-api — Direct Anthropic API")
         console.print(f"  [cyan]3[/cyan]. local — Local model (Ollama, vLLM, etc.)")
         console.print()
-        choice = click.prompt(
+        choice = _prompt(
             "Select LLM provider (number or name)",
             default="1",
             type=str,
@@ -1458,7 +1526,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         if non_interactive:
             auth_method = AUTH_ENV_VARS
             aws_profile = ""
-            aws_region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+            aws_region = _detect_aws_region()
         else:
             console.print("\n[bold]AWS Authentication Method:[/bold]")
             console.print(f"  [cyan]1[/cyan]. sso-profile — AWS SSO profile from ~/.aws/config")
@@ -1466,7 +1534,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
             console.print(f"  [cyan]3[/cyan]. static-credentials — Profile from ~/.aws/credentials")
             console.print(f"  [cyan]4[/cyan]. instance-role — EC2/ECS instance role (no config needed)")
             console.print()
-            auth_choice = click.prompt(
+            auth_choice = _prompt(
                 "Select auth method (number or name)",
                 default="1",
                 type=str,
@@ -1486,7 +1554,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
                     for i, p in enumerate(profiles, 1):
                         console.print(f"  [cyan]{i}[/cyan]. {p}")
                     console.print()
-                    choice = click.prompt(
+                    choice = _prompt(
                         "Select AWS profile (number or name)",
                         default="1",
                         type=str,
@@ -1499,7 +1567,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
                         aws_profile = choice
                 else:
                     console.print("[yellow]No AWS profiles found in ~/.aws/config[/yellow]")
-                    aws_profile = click.prompt("AWS profile name", default="")
+                    aws_profile = _prompt("AWS profile name", default="")
             elif auth_method == AUTH_STATIC_CREDENTIALS:
                 cred_profiles = _detect_aws_credential_profiles()
                 if cred_profiles:
@@ -1507,7 +1575,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
                     for i, p in enumerate(cred_profiles, 1):
                         console.print(f"  [cyan]{i}[/cyan]. {p}")
                     console.print()
-                    choice = click.prompt(
+                    choice = _prompt(
                         "Select credential profile (number or name)",
                         default="1",
                         type=str,
@@ -1520,7 +1588,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
                         aws_profile = choice
                 else:
                     console.print("[yellow]No profiles found in ~/.aws/credentials[/yellow]")
-                    aws_profile = click.prompt("Credential profile name", default="default")
+                    aws_profile = _prompt("Credential profile name", default="default")
             elif auth_method == AUTH_ENV_VARS:
                 aws_profile = ""
                 console.print("\n  [dim]Note: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and optionally")
@@ -1531,7 +1599,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
             else:
                 aws_profile = ""
 
-            aws_region = click.prompt("AWS region", default=os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+            aws_region = _prompt("AWS region", default=_detect_aws_region(aws_profile))
 
         aws_config = {
             "profile": aws_profile,
@@ -1597,7 +1665,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
             console.print("\n[bold]Anthropic API Configuration:[/bold]")
             console.print("  [dim]The API key is NOT stored in config. Instead, we store the name")
             console.print("  of the environment variable that contains it (default: ANTHROPIC_API_KEY).[/dim]\n")
-            api_key_env = click.prompt(
+            api_key_env = _prompt(
                 "Environment variable name for API key",
                 default="ANTHROPIC_API_KEY",
             )
@@ -1618,11 +1686,11 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
             }
         else:
             console.print("\n[bold]Local Model Configuration:[/bold]")
-            base_url = click.prompt("Base URL", default="http://localhost:11434")
+            base_url = _prompt("Base URL", default="http://localhost:11434")
             console.print("\n  [dim]Enter model names for each tier:[/dim]")
-            model_haiku = click.prompt("  Haiku-equivalent model", default="llama3")
-            model_sonnet = click.prompt("  Sonnet-equivalent model", default="codestral")
-            model_opus = click.prompt("  Opus-equivalent model", default="llama3:70b")
+            model_haiku = _prompt("  Haiku-equivalent model", default="llama3")
+            model_sonnet = _prompt("  Sonnet-equivalent model", default="codestral")
+            model_opus = _prompt("  Opus-equivalent model", default="llama3:70b")
             local_config = {
                 "base_url": base_url,
                 "models": {"haiku": model_haiku, "sonnet": model_sonnet, "opus": model_opus},
@@ -1632,14 +1700,24 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
     # Already handled in the bedrock path above
 
     # ── Step 4: Budget ───────────────────────────────────────────────────────
-    daily_budget = 5.0 if non_interactive else click.prompt("Daily budget limit (USD)", default=5.0, type=float)
+    if non_interactive:
+        daily_budget = 5.0
+    else:
+        budget_answer = _prompt("Daily budget limit (USD)", default="5.0")
+        try:
+            daily_budget = float(budget_answer)
+        except (ValueError, TypeError):
+            daily_budget = 5.0
 
     # ── Step 5: Model tier ───────────────────────────────────────────────────
-    tier = "balanced" if non_interactive else click.prompt(
-        "Model tier (economy=cheapest, balanced=default, quality=best)",
-        type=click.Choice(["economy", "balanced", "quality"]),
-        default="balanced",
-    )
+    if non_interactive:
+        tier = "balanced"
+    else:
+        tier_answer = _prompt(
+            "Model tier (economy=cheapest, balanced=default, quality=best)",
+            default="balanced",
+        )
+        tier = tier_answer if tier_answer in ("economy", "balanced", "quality") else "balanced"
 
     # ── Step 6: Indexing paths ───────────────────────────────────────────────
     if non_interactive:
@@ -1648,7 +1726,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         console.print("\n[bold]Workspace Indexing Paths:[/bold]")
         console.print("  [dim]Paths to scan for repos (comma-separated, or empty for CWD only).[/dim]")
         console.print("  [dim]Example: /Users/you/projects, /Users/you/work/infra[/dim]\n")
-        paths_input = click.prompt(
+        paths_input = _prompt(
             "Paths to index (comma-separated, empty=CWD only)",
             default="",
             type=str,
@@ -1674,7 +1752,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         console.print()
 
         while True:
-            remote_choice = click.prompt(
+            remote_choice = _prompt(
                 "Add remote endpoint (1-4, or 'done' to finish)",
                 default="4",
                 type=str,
@@ -1696,11 +1774,12 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
                 continue
 
             org_label = "group" if remote_type == "gitlab" else "org"
-            org_name = click.prompt(f"  {remote_type} {org_label} name", type=str)
-            ssh_endpoint = click.prompt(
-                f"  SSH endpoint", default=default_ssh, type=str
+            org_name = _prompt(f"  {remote_type} {org_label} name", default="")
+            ssh_endpoint = _prompt(
+                f"  SSH endpoint", default=default_ssh,
             )
-            auto_clone = click.confirm("  Auto-clone new repos?", default=True)
+            auto_clone_answer = _prompt("  Auto-clone new repos? [Y/n]", default="y")
+            auto_clone = auto_clone_answer.lower() in ("y", "yes", "true", "1", "")
 
             remote_entry: dict = {
                 "type": remote_type,
@@ -1730,7 +1809,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         console.print("  [cyan]3[/cyan]. sentence-transformers — Local all-MiniLM-L6-v2 (384 dims, free)")
         console.print("  [cyan]4[/cyan]. auto — Probe Bedrock, fall back to local if unavailable")
         console.print()
-        emb_choice = click.prompt(
+        emb_choice = _prompt(
             "Select embedding model (1-4)",
             default="4",
             type=str,
@@ -1819,7 +1898,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
 
     # Backward compat: always include aws section (may be empty for non-bedrock)
     if "aws" not in config:
-        config["aws"] = {"profile": "", "region": os.environ.get("AWS_DEFAULT_REGION", "us-east-1"), "auth_method": ""}
+        config["aws"] = {"profile": "", "region": _detect_aws_region(), "auth_method": ""}
 
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps(config, indent=2) + "\n")
@@ -1831,7 +1910,7 @@ def _run_setup_wizard(force: bool = False, non_interactive: bool = False) -> dic
         console.print(f"  Auth Method:  [cyan]{aws_config.get('auth_method', '')}[/cyan]")
         if aws_config.get("profile"):
             console.print(f"  AWS Profile:  [cyan]{aws_config['profile']}[/cyan]")
-        console.print(f"  Region:       [cyan]{aws_config.get('region', 'us-east-1')}[/cyan]")
+        console.print(f"  Region:       [cyan]{aws_config.get('region', 'eu-central-1')}[/cyan]")
     elif provider == PROVIDER_ANTHROPIC_API:
         console.print(f"  API Key Env:  [cyan]${anthropic_config.get('api_key_env', 'ANTHROPIC_API_KEY')}[/cyan]")
     elif provider == PROVIDER_LOCAL:

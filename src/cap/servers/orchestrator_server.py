@@ -854,9 +854,22 @@ async def _handle_route(args: dict):
     # Standard tier routing (complexity-based)
     decision = route(task_description, db, session_id)
 
+    # Map tier to human-readable model alias
+    _TIER_TO_MODEL = {
+        'inline': 'haiku',
+        'simple': 'haiku',
+        'lightweight': 'sonnet',
+        'moderate': 'sonnet',
+        'full': 'opus',
+        'complex': 'opus',
+    }
+    tier_value = decision.tier.value
+    model_alias = _TIER_TO_MODEL.get(tier_value, 'sonnet')
+
     response = {
         "agent_type": agent_type,
-        "tier": decision.tier.value,
+        "tier": tier_value,
+        "model_alias": model_alias,
         "reasoning": decision.reasoning,
         "estimated_agents": decision.estimated_agents,
         "estimated_cost": decision.estimated_cost,
@@ -925,6 +938,16 @@ async def _handle_status(args: dict):
     """Get active agent and execution status."""
     from cap.harness.agent_store import list_agents
     import cap.harness.cost_meter as cost_meter
+    from cap.enforcement.routing_enforcer import get_routing_stats
+
+    # Hot-reload budget limit from harness-config.json (Scenario 35)
+    config_path = os.path.expanduser('~/.claude-platform/harness-config.json')
+    try:
+        with open(config_path) as f:
+            _status_config = json.load(f)
+        daily_limit = float(_status_config.get('budget', {}).get('daily_limit_usd', 25.0))
+    except Exception:
+        daily_limit = 25.0
 
     try:
         active = list_agents(status="active")
@@ -940,6 +963,18 @@ async def _handle_status(args: dict):
         spenders = cost_meter.top_spenders(n=5)
     except Exception:
         spenders = []
+
+    # Compute spent_today from daily_limit and remaining
+    if remaining is not None:
+        spent_today = round(daily_limit - remaining, 6)
+    else:
+        spent_today = 0.0
+
+    # Routing enforcement stats (Scenario 26)
+    try:
+        enforcement_stats = get_routing_stats()
+    except Exception:
+        enforcement_stats = {"cap_routes": 0, "native_routes": 0, "total": 0, "enforcement_rate": 0.0}
 
     # Check embedding router availability
     embedding_router_available = False
@@ -982,12 +1017,18 @@ async def _handle_status(args: dict):
         ],
         "active_count": len(active),
         "budget_remaining_usd": remaining,
+        "budget": {
+            "daily_limit_usd": daily_limit,
+            "spent_today_usd": spent_today,
+            "remaining_usd": remaining,
+        },
         "top_spenders": [dataclasses.asdict(s) if dataclasses.is_dataclass(s) else s for s in spenders[:5]] if spenders else [],
         "routing": {
             "primary": "embedding" if embedding_router_available else "keyword",
             "fallback": "keyword",
             "embedding_router_available": embedding_router_available,
         },
+        "routing_enforcement": enforcement_stats,
         "background_workflows": {
             "total": len(running_wfs),
             "running": sum(1 for w in running_wfs if w["status"] == "running"),
@@ -1031,7 +1072,7 @@ async def _handle_health(args: dict):
         entry = {
             "agent_type": agent_type,
             "health": health_state.value,
-            "circuit_breaker": cb_state,
+            "circuit_breaker": cb_state.lower() if isinstance(cb_state, str) else cb_state,
             "can_dispatch": can_dispatch,
         }
         if reason:
