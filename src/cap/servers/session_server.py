@@ -486,6 +486,28 @@ async def _handle_recall(args: dict):
         (workspace, like_pattern, like_pattern)
     ).fetchall()
 
+    # Search session_events table (where session_record writes)
+    # Split query into terms and match any term against content or event_type
+    query_terms = [t for t in query.split() if t]
+    if query_terms:
+        term_clauses = " OR ".join(
+            ["(content LIKE '%' || ? || '%' OR event_type LIKE '%' || ? || '%')"] * len(query_terms)
+        )
+        term_params = []
+        for t in query_terms:
+            term_params.extend([t, t])
+        event_results = db.execute(
+            f"""SELECT * FROM session_events
+               WHERE {term_clauses}
+               ORDER BY created_at DESC LIMIT 10""",
+            term_params
+        ).fetchall()
+    else:
+        event_results = []
+
+    # Get column names for session_events to build dicts
+    event_columns = [desc[0] for desc in db.execute("SELECT * FROM session_events LIMIT 0").description]
+
     return [TextContent(type="text", text=json.dumps({
         "decisions": [
             {"id": r[0], "domain": r[1], "decision": r[2], "rationale": r[3], "created_at": r[4]}
@@ -498,6 +520,10 @@ async def _handle_recall(args: dict):
         "corrections": [
             {"what_was_wrong": r[0], "what_is_correct": r[1], "category": r[2]}
             for r in correction_results
+        ],
+        "events": [
+            dict(zip(event_columns, r))
+            for r in event_results
         ],
     }))]
 

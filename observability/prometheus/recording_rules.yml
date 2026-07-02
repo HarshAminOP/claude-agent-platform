@@ -1,0 +1,141 @@
+---
+# =============================================================================
+# CAP Platform — Prometheus Recording Rules
+# Purpose : Pre-compute high-cardinality ratios so alert rules stay fast.
+# Reload  : kill -HUP <prometheus_pid>  OR  POST /-/reload
+# =============================================================================
+
+groups:
+
+  # ---------------------------------------------------------------------------
+  # Agent error-rate windows (aligned to SLO measurement windows)
+  # ---------------------------------------------------------------------------
+  - name: cap_agent_error_rate_windows
+    interval: 30s
+    rules:
+
+      # ---- 5-minute windows (burn-rate / fast alerts) ----------------------
+
+      - record: cap:agent_error_rate:5m
+        expr: |
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total{outcome="failed"}[5m])
+          )
+          /
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total[5m])
+          )
+
+      - record: cap:agent_success_rate:5m
+        expr: |
+          1 - cap:agent_error_rate:5m
+
+      # ---- 30-minute windows (ticket / medium-burn) ------------------------
+
+      - record: cap:agent_error_rate:30m
+        expr: |
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total{outcome="failed"}[30m])
+          )
+          /
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total[30m])
+          )
+
+      # ---- 1-hour windows (SLO compliance) --------------------------------
+
+      - record: cap:agent_error_rate:1h
+        expr: |
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total{outcome="failed"}[1h])
+          )
+          /
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total[1h])
+          )
+
+      # ---- 6-hour windows (error budget burn) -----------------------------
+
+      - record: cap:agent_error_rate:6h
+        expr: |
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total{outcome="failed"}[6h])
+          )
+          /
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total[6h])
+          )
+
+      # ---- 24-hour windows (daily SLO report) -----------------------------
+
+      - record: cap:agent_error_rate:24h
+        expr: |
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total{outcome="failed"}[24h])
+          )
+          /
+          sum by (agent_type) (
+            rate(cap_agent_dispatch_total[24h])
+          )
+
+  # ---------------------------------------------------------------------------
+  # Platform-wide (all agent types combined) error rate
+  # ---------------------------------------------------------------------------
+  - name: cap_platform_error_rate_windows
+    interval: 30s
+    rules:
+
+      - record: cap:platform_error_rate:5m
+        expr: |
+          sum(rate(cap_agent_dispatch_total{outcome="failed"}[5m]))
+          /
+          sum(rate(cap_agent_dispatch_total[5m]))
+
+      - record: cap:platform_error_rate:1h
+        expr: |
+          sum(rate(cap_agent_dispatch_total{outcome="failed"}[1h]))
+          /
+          sum(rate(cap_agent_dispatch_total[1h]))
+
+      - record: cap:platform_error_rate:6h
+        expr: |
+          sum(rate(cap_agent_dispatch_total{outcome="failed"}[6h]))
+          /
+          sum(rate(cap_agent_dispatch_total[6h]))
+
+  # ---------------------------------------------------------------------------
+  # Circuit-breaker trip rate
+  # ---------------------------------------------------------------------------
+  - name: cap_circuit_breaker_windows
+    interval: 30s
+    rules:
+
+      - record: cap:circuit_breaker_open_ratio:5m
+        expr: |
+          sum by (agent_type) (
+            cap_circuit_breaker_state{state="OPEN"}
+          )
+
+      - record: cap:circuit_breaker_trips:1h
+        expr: |
+          sum by (agent_type) (
+            increase(cap_circuit_breaker_trips_total[1h])
+          )
+
+  # ---------------------------------------------------------------------------
+  # Error-budget burn rate (30-day SLO window, 99.5% target)
+  #   Budget fraction consumed per hour = error_rate / (1 - SLO_target)
+  #   Burn rate > 1 means burning budget faster than it accrues.
+  # ---------------------------------------------------------------------------
+  - name: cap_error_budget
+    interval: 60s
+    rules:
+
+      # SLO target: 99.5% success  → allowed error rate = 0.005
+      - record: cap:error_budget_burn_rate:1h
+        expr: |
+          cap:platform_error_rate:1h / 0.005
+
+      - record: cap:error_budget_burn_rate:6h
+        expr: |
+          cap:platform_error_rate:6h / 0.005

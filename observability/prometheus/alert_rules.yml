@@ -1,0 +1,325 @@
+---
+# =============================================================================
+# CAP Platform — Prometheus Alerting Rules
+# SLO        : 99.5% dispatch success rate (30-day rolling window)
+# Error budget: 0.5% of requests allowed to fail
+#
+# Alert tiers:
+#   P1 — page immediately (fast burn, action within 15 min)
+#   P2 — ticket + notify (medium burn, action within 1 h)
+#   P3 — informational / trend (action within 24 h)
+#
+# Runbooks   : observability/runbooks/
+# =============================================================================
+
+groups:
+
+  # ===========================================================================
+  # GROUP 1 — Agent Dispatch Error Rate (per agent_type)
+  # ===========================================================================
+  - name: cap_agent_error_rate
+    rules:
+
+      # -------------------------------------------------------------------------
+      # ALERT: HighAgentErrorRate_P1
+      # Tier   : P1 — page
+      # Trigger: error rate > 20% for 2 min (fast catastrophic burn)
+      # Why 20%: At 20% errors the 30-day error budget is consumed in < 1 hour
+      #          (burn rate = 20% / 0.5% = 40×). Needs immediate action.
+      # -------------------------------------------------------------------------
+      - alert: HighAgentErrorRate_P1
+        expr: |
+          cap:agent_error_rate:5m > 0.20
+          and
+          sum by (agent_type) (rate(cap_agent_dispatch_total[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: critical
+          tier: P1
+          team: platform
+        annotations:
+          summary: "CRITICAL: {{ $labels.agent_type }} error rate {{ $value | humanizePercentage }} (>20%)"
+          description: |
+            Agent type '{{ $labels.agent_type }}' has a dispatch error rate of
+            {{ $value | humanizePercentage }} over the last 5 minutes.
+            At this rate the 30-day SLO error budget is exhausted in < 1 hour.
+            This rate has persisted for at least 2 minutes.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/high-agent-error-rate.md"
+          dashboard_url: "https://grafana.your-org.internal/d/cap-overview"
+
+      # -------------------------------------------------------------------------
+      # ALERT: HighAgentErrorRate_P2
+      # Tier   : P2 — ticket
+      # Trigger: error rate > 5% for 10 min (medium burn)
+      # Why 5%: Burn rate = 5% / 0.5% = 10×. Budget exhausted in ~3 hours.
+      #         Not immediately critical but requires same-hour investigation.
+      # -------------------------------------------------------------------------
+      - alert: HighAgentErrorRate_P2
+        expr: |
+          cap:agent_error_rate:5m > 0.05
+          and
+          cap:agent_error_rate:5m <= 0.20
+          and
+          sum by (agent_type) (rate(cap_agent_dispatch_total[5m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+          tier: P2
+          team: platform
+        annotations:
+          summary: "WARNING: {{ $labels.agent_type }} error rate {{ $value | humanizePercentage }} (>5%)"
+          description: |
+            Agent type '{{ $labels.agent_type }}' error rate {{ $value | humanizePercentage }}
+            has been elevated for > 10 minutes. Burn rate ≈ {{ printf "%.1f" (divf $value 0.005) }}×.
+            Budget will exhaust in ≈ {{ printf "%.0f" (divf 720 (divf $value 0.005)) }} hours at this rate.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/high-agent-error-rate.md"
+          dashboard_url: "https://grafana.your-org.internal/d/cap-overview"
+
+      # -------------------------------------------------------------------------
+      # ALERT: SustainedAgentErrorRate_P3
+      # Tier   : P3 — informational / trend
+      # Trigger: 1-hour error rate > 2% (slow budget drain)
+      # Why 2%: Burn rate = 2% / 0.5% = 4×. Not urgent but warrants review
+      #         before end of business.
+      # -------------------------------------------------------------------------
+      - alert: SustainedAgentErrorRate_P3
+        expr: |
+          cap:agent_error_rate:1h > 0.02
+          and
+          sum by (agent_type) (rate(cap_agent_dispatch_total[1h])) > 0.05
+        for: 30m
+        labels:
+          severity: info
+          tier: P3
+          team: platform
+        annotations:
+          summary: "INFO: {{ $labels.agent_type }} sustained error rate {{ $value | humanizePercentage }} over 1h"
+          description: |
+            Agent type '{{ $labels.agent_type }}' has maintained an error rate of
+            {{ $value | humanizePercentage }} over the last hour.
+            Review before end of business to protect the monthly error budget.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/high-agent-error-rate.md"
+
+  # ===========================================================================
+  # GROUP 2 — Platform-Wide Error Rate (aggregate across all agent types)
+  # ===========================================================================
+  - name: cap_platform_error_rate
+    rules:
+
+      # -------------------------------------------------------------------------
+      # ALERT: PlatformWideCriticalErrorRate
+      # Tier   : P1 — page
+      # Trigger: Platform-wide error rate > 15% for 2 min
+      # Why 15%: Suggests a systemic issue (API outage, DB failure, cascade).
+      #          All users affected simultaneously.
+      # -------------------------------------------------------------------------
+      - alert: PlatformWideCriticalErrorRate
+        expr: |
+          cap:platform_error_rate:5m > 0.15
+          and
+          sum(rate(cap_agent_dispatch_total[5m])) > 0.2
+        for: 2m
+        labels:
+          severity: critical
+          tier: P1
+          team: platform
+        annotations:
+          summary: "CRITICAL: Platform-wide error rate {{ $value | humanizePercentage }} (>15%)"
+          description: |
+            ALL agent types are experiencing elevated failure rates.
+            Current platform-wide error rate: {{ $value | humanizePercentage }} (5m window).
+            Likely causes: API provider outage, database unavailable, cascade failure.
+            Check cap_cascade_events metric and circuit breaker states immediately.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/platform-wide-error-rate.md"
+
+      # -------------------------------------------------------------------------
+      # ALERT: ErrorBudgetFastBurn
+      # Tier   : P1 — page
+      # Trigger: Error budget burn rate > 14× over 1h
+      # Why 14×: Google SRE multi-window rule — 14× burn on 1h window and
+      #          5× on 6h window = budget exhausted in < 2 days. Page immediately.
+      # -------------------------------------------------------------------------
+      - alert: ErrorBudgetFastBurn
+        expr: |
+          cap:error_budget_burn_rate:1h > 14
+          and
+          cap:error_budget_burn_rate:6h > 5
+        for: 2m
+        labels:
+          severity: critical
+          tier: P1
+          team: platform
+        annotations:
+          summary: "CRITICAL: Error budget fast-burn — {{ $value | humanize }}× burn rate"
+          description: |
+            The 30-day error budget is burning at {{ $value | humanize }}× the sustainable rate
+            on the 1-hour window AND >5× on the 6-hour window.
+            At this rate the entire monthly error budget will be exhausted in < 2 days.
+            SLO target: 99.5% | Allowed error rate: 0.5%
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/error-budget-burn.md"
+
+      # -------------------------------------------------------------------------
+      # ALERT: ErrorBudgetSlowBurn
+      # Tier   : P2 — ticket
+      # Trigger: Error budget burn rate > 5× for 6h
+      # Why 5×: 5× sustained burn = budget exhausted in ~6 days. Warrants a
+      #         planned remediation before end of week.
+      # -------------------------------------------------------------------------
+      - alert: ErrorBudgetSlowBurn
+        expr: |
+          cap:error_budget_burn_rate:6h > 5
+          and
+          cap:error_budget_burn_rate:1h <= 14
+        for: 60m
+        labels:
+          severity: warning
+          tier: P2
+          team: platform
+        annotations:
+          summary: "WARNING: Error budget slow-burn — {{ $value | humanize }}× burn rate over 6h"
+          description: |
+            Error budget is being consumed at {{ $value | humanize }}× the sustainable rate.
+            Budget will exhaust in approximately {{ printf "%.0f" (divf 144 $value) }} hours.
+            Plan remediation this sprint to restore error budget.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/error-budget-burn.md"
+
+  # ===========================================================================
+  # GROUP 3 — Circuit Breaker State Alerts
+  # ===========================================================================
+  - name: cap_circuit_breaker
+    rules:
+
+      # -------------------------------------------------------------------------
+      # ALERT: CircuitBreakerOpen
+      # Tier   : P2 — ticket
+      # Trigger: Any agent_type circuit breaker is in OPEN state for > 5 min
+      # Why 5min: Circuit breakers open for 2-min cooldown by design (config.py).
+      #           >5 min open means the probe dispatch continues failing and the
+      #           breaker cannot close — the agent type is systemically broken.
+      # -------------------------------------------------------------------------
+      - alert: CircuitBreakerOpen
+        expr: |
+          cap_circuit_breaker_state{state="OPEN"} == 1
+        for: 5m
+        labels:
+          severity: warning
+          tier: P2
+          team: platform
+        annotations:
+          summary: "Circuit breaker OPEN for agent_type {{ $labels.agent_type }} (>5 min)"
+          description: |
+            The circuit breaker for agent type '{{ $labels.agent_type }}' has been
+            in OPEN state for more than 5 minutes. This means the agent type is not
+            recovering after the 2-minute cooldown (HALF_OPEN probe is also failing).
+            All dispatches to this agent type are currently blocked.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/circuit-breaker-open.md"
+
+      # -------------------------------------------------------------------------
+      # ALERT: CircuitBreakerFlapping
+      # Tier   : P2 — ticket
+      # Trigger: > 3 circuit breaker trips in 30 min for the same agent_type
+      # Why 3 trips: Repeated OPEN→HALF_OPEN→OPEN cycles indicate an underlying
+      #              instability; not a transient burst. Needs root-cause analysis.
+      # -------------------------------------------------------------------------
+      - alert: CircuitBreakerFlapping
+        expr: |
+          cap:circuit_breaker_trips:1h > 3
+        for: 5m
+        labels:
+          severity: warning
+          tier: P2
+          team: platform
+        annotations:
+          summary: "Circuit breaker flapping for {{ $labels.agent_type }} ({{ $value }} trips/hour)"
+          description: |
+            Agent type '{{ $labels.agent_type }}' circuit breaker has tripped
+            {{ $value }} times in the last hour. Repeated trips indicate the root
+            cause has not been resolved and the agent is oscillating between
+            healthy and failed states.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/circuit-breaker-open.md"
+
+  # ===========================================================================
+  # GROUP 4 — Cascade Detection
+  # ===========================================================================
+  - name: cap_cascade
+    rules:
+
+      # -------------------------------------------------------------------------
+      # ALERT: CascadeFailureDetected
+      # Tier   : P1 — page
+      # Trigger: A cascade event is recorded (3+ distinct agents fail in 10s)
+      # Why immediate: Cascade = systemic outage. All orchestration is halted by
+      #                the platform itself (cascade.py). Operator must diagnose
+      #                root cause (API rate limit / provider outage).
+      # -------------------------------------------------------------------------
+      - alert: CascadeFailureDetected
+        expr: |
+          increase(cap_cascade_events_total[5m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          tier: P1
+          team: platform
+        annotations:
+          summary: "CRITICAL: Cascade failure detected — {{ $value }} cascade(s) in 5 min"
+          description: |
+            The CAP platform detected a cascade failure: 3+ distinct agents failed
+            within a 10-second window. The affected workflow has been automatically
+            paused. Likely cause: API provider rate-limit or service outage.
+            Run `cap dlq` to review queued failures and `cap resume` when resolved.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/cascade-failure.md"
+
+  # ===========================================================================
+  # GROUP 5 — Dispatch Throughput / Saturation
+  # ===========================================================================
+  - name: cap_throughput
+    rules:
+
+      # -------------------------------------------------------------------------
+      # ALERT: AgentDispatchQueueSaturation
+      # Tier   : P2 — ticket
+      # Trigger: Queue depth > 50 for > 5 min
+      # Why 50: Based on default agent timeouts (180–300 s). At 50 queued tasks
+      #         with a single agent worker, tail latency exceeds 15 000 s.
+      #         Signals need to scale out or investigate blockage.
+      # -------------------------------------------------------------------------
+      - alert: AgentDispatchQueueSaturation
+        expr: |
+          cap_agent_dispatch_queue_depth > 50
+        for: 5m
+        labels:
+          severity: warning
+          tier: P2
+          team: platform
+        annotations:
+          summary: "Dispatch queue depth {{ $value }} exceeds saturation threshold (50)"
+          description: |
+            The agent dispatch queue has {{ $value }} pending tasks and has been
+            saturated for > 5 minutes. This may indicate a blocked agent, circuit
+            breaker preventing dispatch, or the system is under-provisioned.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/dispatch-queue-saturation.md"
+
+      # -------------------------------------------------------------------------
+      # ALERT: AgentDispatchStall
+      # Tier   : P1 — page
+      # Trigger: Zero successful dispatches for 10 min while queue is non-empty
+      # Why 10min: Agent timeouts range 120–300 s. Zero success after 10 min
+      #            with pending work = complete stall, not just slowness.
+      # -------------------------------------------------------------------------
+      - alert: AgentDispatchStall
+        expr: |
+          cap_agent_dispatch_queue_depth > 0
+          and
+          sum(rate(cap_agent_dispatch_total{outcome="completed"}[10m])) == 0
+        for: 10m
+        labels:
+          severity: critical
+          tier: P1
+          team: platform
+        annotations:
+          summary: "CRITICAL: Agent dispatch stall — no completions in 10 min with {{ $value }} queued"
+          description: |
+            There are tasks in the dispatch queue but zero completions in the last
+            10 minutes. The orchestration engine may be deadlocked or all agent
+            circuit breakers are open. Immediate investigation required.
+          runbook_url: "https://github.com/your-org/claude-agent-platform/blob/main/observability/runbooks/dispatch-stall.md"

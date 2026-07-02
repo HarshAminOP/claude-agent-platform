@@ -25,7 +25,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from cap.orchestration.dag import StepState, TaskDAG, TaskStep
 from cap.lib.agent_context import SharedState
@@ -157,7 +157,12 @@ class CoordinationEngine:
     # Public API
     # ------------------------------------------------------------------
 
-    async def execute_plan(self, plan: TaskPlan, workspace: str = "") -> CoordinationResult:
+    async def execute_plan(
+        self,
+        plan: TaskPlan,
+        workspace: str = "",
+        on_step_complete: Optional[Callable[[int, int, str], None]] = None,
+    ) -> CoordinationResult:
         """Execute a TaskPlan with proper coordination.
 
         Algorithm:
@@ -176,6 +181,10 @@ class CoordinationEngine:
         Args:
             plan: TaskDAG with steps, descriptions, agent_types, and depends_on lists.
             workspace: Working directory passed to each agent step. Defaults to "".
+            on_step_complete: Optional callback invoked after each step finishes
+                (completed, failed, or skipped). Signature:
+                ``on_step_complete(steps_done: int, total_steps: int, step_description: str)``
+                where steps_done is the cumulative count of finished steps.
 
         Returns:
             CoordinationResult with per-step outcomes, aggregated cost, and
@@ -288,6 +297,18 @@ class CoordinationEngine:
                     # Check whether the failure was a budget error.
                     if _is_budget_error(sr.error):
                         budget_exhausted = True
+
+                # Notify caller of progress after each step finishes.
+                if on_step_complete is not None:
+                    try:
+                        steps_done = sum(
+                            1 for s in plan.steps.values()
+                            if s.state in (StepState.COMPLETED, StepState.FAILED, StepState.SKIPPED)
+                        )
+                        step_desc = plan.steps[sr.step_id].description if sr.step_id in plan.steps else sr.step_id
+                        on_step_complete(steps_done, len(plan.steps), step_desc)
+                    except Exception as _cb_exc:
+                        logger.debug("coordination_engine: on_step_complete callback error: %s", _cb_exc)
 
         # Determine overall status.
         total_cost = sum(sr.cost_usd for sr in all_step_results)

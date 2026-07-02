@@ -13,6 +13,7 @@ CRITICAL: stdout is reserved for MCP JSON-RPC. All logging goes to stderr.
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -286,7 +287,30 @@ async def _run_orchestration_bg(workflow_id: str, args: dict) -> None:
                 )
                 wf["steps_total"] = 4  # route -> decompose -> execute steps -> synthesize
                 wf["current_step"] = {"phase": "coordination", "description": "Running multi-step coordination"}
-                result_contents = await _run_coordination(task, context or "", workspace or "")
+
+                # Progress callback: updates the parent workflow's progress as
+                # the coordination engine completes each internal step.
+                def _on_coord_step_complete(steps_done: int, total_steps: int, step_desc: str) -> None:
+                    # +1 offset because routing was step 0 (already counted)
+                    wf["steps_completed"] = steps_done + 1
+                    # +2 for routing (before) and finalization (after)
+                    wf["steps_total"] = total_steps + 2
+                    wf["current_step"] = {"phase": "coordination", "description": step_desc}
+                    try:
+                        save_workflow(
+                            workflow_id,
+                            status="running",
+                            steps_completed=wf["steps_completed"],
+                            steps_total=wf["steps_total"],
+                            current_step=wf["current_step"],
+                        )
+                    except Exception:
+                        pass
+
+                result_contents = await _run_coordination(
+                    task, context or "", workspace or "",
+                    on_step_complete=_on_coord_step_complete,
+                )
                 wf["steps_completed"] = wf["steps_total"]
                 wf["current_step"] = {"phase": "done", "description": "Completed"}
                 wf["status"] = "completed"
@@ -836,7 +860,7 @@ async def _handle_status(args: dict):
         ],
         "active_count": len(active),
         "budget_remaining_usd": remaining,
-        "top_spenders": spenders[:5] if spenders else [],
+        "top_spenders": [dataclasses.asdict(s) if dataclasses.is_dataclass(s) else s for s in spenders[:5]] if spenders else [],
         "routing": {
             "primary": "embedding" if embedding_router_available else "keyword",
             "fallback": "keyword",
@@ -1113,7 +1137,7 @@ def _build_dag_from_decomposer_plan(plan) -> "TaskDAG":
     return dag
 
 
-async def _run_coordination(task: str, context: str, workspace: str) -> list:
+async def _run_coordination(task: str, context: str, workspace: str, on_step_complete=None) -> list:
     """Decompose *task* and execute via CoordinationEngine.
 
     Used by both ``_handle_orchestrate`` (for moderate/complex tasks) and
@@ -1123,6 +1147,8 @@ async def _run_coordination(task: str, context: str, workspace: str) -> list:
         task: Natural-language task description.
         context: Optional context string.
         workspace: Working directory for agent tool calls.
+        on_step_complete: Optional callback invoked after each coordination step
+            finishes. Signature: ``(steps_done: int, total_steps: int, step_desc: str) -> None``.
 
     Returns:
         A list containing a single ``TextContent`` with the coordination result JSON.
@@ -1172,7 +1198,7 @@ async def _run_coordination(task: str, context: str, workspace: str) -> list:
     bus = AgentBus(session_id=session_id)
     engine = CoordinationEngine(executor=executor, bus=bus, shared=shared)
 
-    result = await engine.execute_plan(dag, workspace=workspace or "")
+    result = await engine.execute_plan(dag, workspace=workspace or "", on_step_complete=on_step_complete)
 
     payload = {
         "workflow_id": plan.workflow_id,

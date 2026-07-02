@@ -210,6 +210,31 @@ def _content_hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()
 
 
+_EXTENSION_TO_CONTENT_TYPE: dict[str, str] = {
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".tf": "terraform",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".json": "json",
+    ".md": "markdown",
+    ".go": "go",
+    ".rs": "rust",
+    ".java": "java",
+    ".sh": "shell",
+    ".bash": "shell",
+}
+
+
+def _detect_content_type(source_path: str) -> str:
+    """Auto-detect content type from file extension."""
+    ext = Path(source_path).suffix.lower()
+    return _EXTENSION_TO_CONTENT_TYPE.get(ext, "text")
+
+
 def _cache_key(query: str, workspace: str | None, scope: str, strategy: str, top_k: int) -> str:
     raw = json.dumps([query, workspace, scope, strategy, top_k], sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -341,7 +366,7 @@ async def list_tools():
                     },
                     "metadata": {"type": "object", "description": "Optional metadata"},
                 },
-                "required": ["source", "workspace", "content_type"],
+                "required": ["source", "workspace"],
             },
         ),
         Tool(
@@ -402,7 +427,7 @@ async def list_tools():
                     "workspace": {"type": "string"},
                     "metadata": {"type": "object"},
                 },
-                "required": ["subject", "predicate", "object", "workspace"],
+                "required": ["subject", "predicate", "object"],
             },
         ),
         Tool(
@@ -541,7 +566,9 @@ async def _handle_search(args: dict):
 
     from lib.retrieval import hybrid_search
 
-    query = args["query"]
+    query = args.get("query")
+    if not query:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: query"}))]
     workspace = args.get("workspace")
     if workspace == "all":
         workspace = None
@@ -612,10 +639,13 @@ async def _handle_ingest(args: dict):
 
     from lib.security import sanitize_content, validate_path
 
-    workspace = args["workspace"]
-    source = args["source"]
-    content_type = args["content_type"]
+    workspace = args.get("workspace")
+    source = args.get("source")
+    if not workspace or not source:
+        missing = [k for k in ("workspace", "source") if not args.get(k)]
+        return [TextContent(type="text", text=json.dumps({"error": f"Missing required parameter(s): {', '.join(missing)}"}))]
     source_type = args.get("source_type", "file")
+    content_type = args.get("content_type") or _detect_content_type(source)
     title = args.get("title")
     metadata = args.get("metadata", {})
 
@@ -682,10 +712,14 @@ async def _handle_record(args: dict):
     from lib.security import sanitize_content
     from lib.graph import add_edge
 
-    workspace = args["workspace"]
-    category = args["category"]
-    key = args["key"]
-    value = sanitize_content(args["value"])
+    workspace = args.get("workspace")
+    category = args.get("category")
+    key = args.get("key")
+    value_raw = args.get("value")
+    if not workspace or not category or not key or not value_raw:
+        missing = [k for k in ("workspace", "category", "key", "value") if not args.get(k)]
+        return [TextContent(type="text", text=json.dumps({"error": f"Missing required parameter(s): {', '.join(missing)}"}))]
+    value = sanitize_content(value_raw)
     relations = args.get("relations", [])
 
     bk_id = str(uuid.uuid4())
@@ -719,7 +753,9 @@ async def _handle_graph_query(args: dict):
 
     from lib.graph import find_entities, bfs_traverse, get_node_context
 
-    entity = args["entity"]
+    entity = args.get("entity")
+    if not entity:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: entity"}))]
     workspace = args.get("workspace")
     if workspace == "all":
         workspace = None
@@ -746,15 +782,27 @@ async def _handle_graph_add(args: dict):
         return err
 
     from lib.graph import add_edge
+    from cap.config import get_cap_home
 
-    workspace = args["workspace"]
+    subject = args.get("subject")
+    predicate = args.get("predicate")
+    obj = args.get("object")
+
+    if not subject or not predicate or not obj:
+        missing = [k for k in ("subject", "predicate", "object") if not args.get(k)]
+        return [TextContent(type="text", text=json.dumps({
+            "error": f"Missing required parameter(s) for knowledge_graph_add: {', '.join(missing)}",
+        }))]
+
+    workspace = args.get("workspace") or str(get_cap_home())
+
     add_edge(
         db,
-        source_name=args["subject"],
+        source_name=subject,
         source_type=args.get("subject_type", "concept"),
-        target_name=args["object"],
+        target_name=obj,
         target_type=args.get("object_type", "concept"),
-        predicate=args["predicate"],
+        predicate=predicate,
         workspace=workspace,
         metadata=args.get("metadata"),
     )
@@ -762,7 +810,7 @@ async def _handle_graph_add(args: dict):
 
     return [TextContent(type="text", text=json.dumps({
         "status": "added",
-        "edge": f"{args['subject']} --{args['predicate']}--> {args['object']}",
+        "edge": f"{subject} --{predicate}--> {obj}",
     }))]
 
 
@@ -774,7 +822,9 @@ async def _handle_sync(args: dict):
 
     from lib.sync_engine import sync_workspace
 
-    workspace = args["workspace"]
+    workspace = args.get("workspace")
+    if not workspace:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: workspace"}))]
     trigger = args.get("trigger", "manual")
     full = args.get("full", False)
 
@@ -920,7 +970,9 @@ async def _handle_resolve_repo(args: dict):
 
     from lib.repo_resolver import resolve_repo
 
-    repo_name = args["repo_name"]
+    repo_name = args.get("repo_name")
+    if not repo_name:
+        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: repo_name"}))]
     domain_hint = args.get("domain_hint")
 
     result = resolve_repo(
