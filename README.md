@@ -1,8 +1,6 @@
-<div align="center" style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%); padding: 40px; border-radius: 12px; margin-bottom: 24px;">
-  <h1 style="color: #ffffff; font-size: 48px; font-weight: bold; letter-spacing: 4px; margin: 0;">CAP</h1>
-  <p style="color: #a0aec0; font-size: 18px; margin: 8px 0 0 0;">Claude Agent Platform</p>
-  <p style="color: #718096; font-size: 14px; font-style: italic; margin: 8px 0 0 0;">Production-grade multi-agent orchestration for Claude Code</p>
-</div>
+<p align="center">
+  <img src="docs/assets/banner.svg" alt="CAP - Claude Agent Platform" width="100%">
+</p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.11%2B-3776ab?logo=python&logoColor=white" alt="Python 3.11+">
@@ -10,6 +8,7 @@
   <img src="https://img.shields.io/badge/MCP-1.x-8b5cf6?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiBmaWxsPSIjOGI1Y2Y2Ii8+PC9zdmc+" alt="MCP 1.x">
   <img src="https://img.shields.io/badge/agents-8%2B_specialists-f59e0b" alt="Agents 8+">
   <img src="https://img.shields.io/badge/uv-compatible-de5fe9?logo=uv&logoColor=white" alt="uv compatible">
+  <img src="https://img.shields.io/badge/tools-80%2B-10b981" alt="80+ tools">
 </p>
 
 <p align="center"><strong>Route tasks to specialist AI agents. Track costs. Never block your chat.</strong></p>
@@ -36,34 +35,43 @@
 
 ## Terminal Demo
 
+<p align="center">
+  <img src="docs/assets/terminal-demo.svg" alt="CAP terminal demo showing cap init and cap health commands" width="680">
+</p>
+
+<details>
+<summary>Text version (for accessibility)</summary>
+
 ```
 $ uv tool install cap
 Installed cap v0.4.0
 
 $ cap init
-✓ AWS SSO session valid (pe-infra-engineer-224874703410)
-✓ Config → ~/.claude-platform/harness-config.json
-✓ Knowledge DB initialized (FTS5 + semantic indexing)
-✓ 10 MCP servers registered in ~/.claude.json
-✓ Bedrock connectivity verified (eu-central-1)
+ AWS SSO session valid (pe-infra-engineer-224874703410)
+ Config -> ~/.claude-platform/harness-config.json
+ Knowledge DB initialized (FTS5 + semantic indexing)
+ 10 MCP servers registered in ~/.claude.json
+ Bedrock connectivity verified (eu-central-1)
 Ready. CAP is active in your next Claude Code session.
 
 $ cap health
-┌──────────────────┬────────┬─────────┬───────────┐
-│ Server           │ Status │ Latency │ Tools     │
-├──────────────────┼────────┼─────────┼───────────┤
-│ orchestrator     │ ✓ OK   │ 12ms    │ 10 tools  │
-│ knowledge        │ ✓ OK   │ 8ms     │ 8 tools   │
-│ session          │ ✓ OK   │ 5ms     │ 7 tools   │
-│ harness          │ ✓ OK   │ 15ms    │ 18 tools  │
-│ fleet            │ ✓ OK   │ 6ms     │ 6 tools   │
-│ backlog          │ ✓ OK   │ 4ms     │ 15 tools  │
-│ ast              │ ✓ OK   │ 7ms     │ 3 tools   │
-│ code-intel       │ ✓ OK   │ 9ms     │ 5 tools   │
-│ diagram          │ ✓ OK   │ 3ms     │ 3 tools   │
-│ workflow-engine  │ ✓ OK   │ 11ms    │ 5 tools   │
-└──────────────────┴────────┴─────────┴───────────┘
++------------------+--------+---------+-----------+
+| Server           | Status | Latency | Tools     |
++------------------+--------+---------+-----------+
+| orchestrator     |  OK    | 12ms    | 10 tools  |
+| knowledge        |  OK    | 8ms     | 8 tools   |
+| session          |  OK    | 5ms     | 7 tools   |
+| harness          |  OK    | 15ms    | 18 tools  |
+| fleet            |  OK    | 6ms     | 6 tools   |
+| backlog          |  OK    | 4ms     | 15 tools  |
+| ast              |  OK    | 7ms     | 3 tools   |
+| code-intel       |  OK    | 9ms     | 5 tools   |
+| diagram          |  OK    | 3ms     | 3 tools   |
+| workflow-engine  |  OK    | 11ms    | 5 tools   |
++------------------+--------+---------+-----------+
 ```
+
+</details>
 
 ---
 
@@ -71,17 +79,32 @@ $ cap health
 
 <table>
 <tr>
-<td width="33%" align="center" style="padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
-<h3>🎯 Intelligent Routing</h3>
-<p>Automatically selects the best specialist (dev, devops, security, sre) based on task semantics. 95%+ routing accuracy.</p>
+<td width="33%" align="center" valign="top">
+<br>
+<img src="docs/assets/icon-routing.svg" width="48" height="48" alt="Routing icon">
+<br><br>
+<strong>Intelligent Routing</strong>
+<br><br>
+Automatically selects the best specialist (dev, devops, security, sre) based on task semantics. 95%+ routing accuracy with confidence scoring and fallback chains.
+<br><br>
 </td>
-<td width="33%" align="center" style="padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
-<h3>⚡ Non-Blocking</h3>
-<p>Fire <code>cap_orchestrate</code>, keep chatting. Poll <code>cap_result</code> when ready. Complex tasks never freeze your session.</p>
+<td width="33%" align="center" valign="top">
+<br>
+<img src="docs/assets/icon-nonblocking.svg" width="48" height="48" alt="Non-blocking icon">
+<br><br>
+<strong>Non-Blocking Execution</strong>
+<br><br>
+Fire <code>cap_orchestrate</code>, keep chatting. Poll <code>cap_result</code> when ready. Complex tasks never freeze your session. Parallel agent execution with DAG scheduling.
+<br><br>
 </td>
-<td width="33%" align="center" style="padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
-<h3>💰 Cost-Aware</h3>
-<p>Per-call token tracking, budget enforcement, model tier auto-selection. Know exactly what you spend.</p>
+<td width="33%" align="center" valign="top">
+<br>
+<img src="docs/assets/icon-cost.svg" width="48" height="48" alt="Cost tracking icon">
+<br><br>
+<strong>Cost-Aware Operations</strong>
+<br><br>
+Per-call token tracking, budget enforcement, model tier auto-selection. Know exactly what you spend. Auto-kill at budget threshold.
+<br><br>
 </td>
 </tr>
 </table>
@@ -89,6 +112,13 @@ $ cap health
 ---
 
 ## Architecture
+
+<p align="center">
+  <img src="docs/assets/architecture.svg" alt="CAP Architecture Diagram" width="100%">
+</p>
+
+<details>
+<summary>Mermaid source (for rendering in other tools)</summary>
 
 ```mermaid
 graph TD
@@ -147,6 +177,10 @@ graph TD
     Session --> SQLite
 ```
 
+</details>
+
+**Data flow:** Engineer interacts with Claude Code, which connects to CAP via MCP stdio transport. The orchestrator decomposes tasks, routes to specialist agents, tracks costs, and persists knowledge and session state in SQLite with FTS5 indexing.
+
 ---
 
 ## Install
@@ -154,10 +188,10 @@ graph TD
 ### Recommended (uv)
 
 ```bash
-# As a CLI tool (isolated, no virtualenv needed)
+# As a CLI tool (isolated environment, no virtualenv management needed)
 uv tool install cap
 
-# Inside a virtualenv
+# Or inside an existing virtualenv
 uv pip install cap
 ```
 
@@ -169,7 +203,19 @@ cd claude-agent-platform
 uv pip install -e ".[all,dev]"
 ```
 
-<sub><code>pip install cap</code> also works but uv is recommended for speed and reliability.</sub>
+<details>
+<summary><sub>pip fallback (if uv is not available)</sub></summary>
+
+```bash
+pip install cap
+
+# Or for development
+pip install -e ".[all,dev]"
+```
+
+Note: `uv` is strongly recommended over `pip` for speed (10-100x faster resolution) and deterministic builds. Install uv via `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+
+</details>
 
 ---
 
@@ -181,7 +227,7 @@ uv pip install -e ".[all,dev]"
 uv tool install cap
 ```
 
-Installs the `cap` CLI globally. No virtualenv management needed.
+Installs the `cap` CLI globally in an isolated environment. No virtualenv management needed.
 
 ### Step 2: Initialize
 
@@ -276,7 +322,7 @@ cap knowledge ingest --path /path/to/repo
 # Search across all indexed content
 cap knowledge search "EKS cluster autoscaling configuration"
 
-# Graph traversal — find all services that depend on auth-service
+# Graph traversal - find all services that depend on auth-service
 cap knowledge graph --entity auth-service --relation depends_on --depth 2
 ```
 
@@ -407,7 +453,7 @@ Budget enforcement:
 </details>
 
 <details>
-<summary><strong>Routing Enforcement</strong></summary>
+<summary><strong>Routing Intelligence</strong></summary>
 
 CAP tracks whether tasks are handled natively by Claude Code or dispatched through CAP's specialist routing.
 
@@ -474,6 +520,46 @@ Resilience features:
 
 </details>
 
+<details>
+<summary><strong>Fleet Management</strong></summary>
+
+Discover, register, and manage agent instances across the platform.
+
+```bash
+# Check fleet status
+cap fleet status
+
+# Discover available agents
+cap fleet discover
+
+# Health check all registered agents
+cap fleet health
+```
+
+```json
+// Programmatic fleet health check
+{
+  "tool": "fleet_health_check",
+  "input": {}
+}
+
+// Response
+{
+  "agents": [
+    { "id": "dev-01", "type": "dev", "status": "idle", "uptime_s": 3600 },
+    { "id": "security-01", "type": "security", "status": "busy", "current_task": "wf-a1b2c3d4" },
+    { "id": "devops-01", "type": "devops", "status": "idle", "uptime_s": 7200 }
+  ],
+  "total": 3,
+  "healthy": 3,
+  "busy": 1
+}
+```
+
+Fleet tools: `fleet_discover`, `fleet_register`, `fleet_unregister`, `fleet_status`, `fleet_health_check`, `fleet_restart`
+
+</details>
+
 ---
 
 ## MCP Servers
@@ -492,6 +578,8 @@ Resilience features:
 | **workflow-engine** | 5 | DAG workflows, parallel execution, checkpoints, signal handling |
 
 **Total: 80 tools** exposed via MCP stdio transport.
+
+All servers communicate over stdio (no network ports, no HTTP). Each server is a standalone Python process managed by Claude Code's MCP runtime. Servers auto-start on first tool invocation and persist for the session lifetime.
 
 ---
 
@@ -547,23 +635,50 @@ CAP stores configuration in `~/.claude-platform/harness-config.json`:
 }
 ```
 
+### Environment Variables
+
+| Variable | Default | Description |
+|:---------|:--------|:------------|
+| `CAP_CONFIG_PATH` | `~/.claude-platform/harness-config.json` | Override config file location |
+| `CAP_LOG_LEVEL` | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARN`, `ERROR`) |
+| `CAP_BUDGET_OVERRIDE` | - | Temporary budget override (useful for expensive one-off tasks) |
+| `AWS_PROFILE` | from config | AWS profile override |
+| `AWS_REGION` | from config | AWS region override |
+
 ---
 
 ## Comparison
 
 | Feature | CAP | CrewAI | LangGraph | AutoGen | PydanticAI |
 |:--------|:---:|:------:|:---------:|:-------:|:----------:|
-| **Install command** | `uv tool install cap` | `pip install crewai` | `pip install langgraph` | `pip install autogen` | `pip install pydantic-ai` |
-| **Async/non-blocking** | ✓ | ✗ | Partial | Partial | ✗ |
-| **MCP native** | ✓ (10 servers) | ✗ | ✗ | ✗ | ✗ |
-| **Cost tracking** | ✓ Built-in | ✗ | ✗ | ✗ | ✗ |
-| **Claude-optimized** | ✓ | ✗ | ✗ | ✗ | Partial |
-| **Agent count** | 8+ specialists | User-defined | User-defined | User-defined | User-defined |
-| **Self-healing** | ✓ Auto-restart | ✗ | ✗ | ✗ | ✗ |
-| **Knowledge base** | ✓ FTS5 + graph | ✗ | ✗ | ✗ | ✗ |
-| **Session memory** | ✓ Cross-session | ✗ | Checkpointer | ✗ | ✗ |
-| **Workflow DAGs** | ✓ | Sequential | ✓ | Group chat | ✗ |
-| **Budget enforcement** | ✓ Auto-kill | ✗ | ✗ | ✗ | ✗ |
+| **Install** | `uv tool install cap` | `pip install crewai` | `pip install langgraph` | `pip install autogen` | `pip install pydantic-ai` |
+| **Async/non-blocking** | Yes | No | Partial | Partial | No |
+| **MCP native** | Yes (10 servers) | No | No | No | No |
+| **Cost tracking** | Built-in | No | No | No | No |
+| **Claude-optimized** | Yes | No | No | No | Partial |
+| **Agent specialization** | 8+ built-in specialists | User-defined | User-defined | User-defined | User-defined |
+| **Self-healing** | Auto-restart + heartbeat | No | No | No | No |
+| **Knowledge base** | FTS5 + semantic + graph | No | No | No | No |
+| **Session memory** | Cross-session persistent | No | Checkpointer | No | No |
+| **Workflow DAGs** | Parallel with checkpoints | Sequential only | Yes | Group chat | No |
+| **Budget enforcement** | Auto-kill at threshold | No | No | No | No |
+| **Transport** | stdio (zero-config) | HTTP | HTTP | HTTP/WS | HTTP |
+| **Lines to first agent** | 1 (`cap init`) | ~50 | ~100 | ~80 | ~40 |
+
+### When to choose CAP
+
+- You use **Claude Code** as your primary development interface
+- You want **zero-config** agent orchestration (no framework boilerplate)
+- You need **cost visibility** and budget enforcement for LLM spending
+- You work with **AWS Bedrock** as your model provider
+- You want agents that **learn** from session to session
+
+### When to choose something else
+
+- You need multi-provider LLM support (OpenAI, Gemini, etc.) -- use LangGraph
+- You want visual workflow builders -- use CrewAI
+- You need human-in-the-loop chat patterns -- use AutoGen
+- You want typed, validated agent outputs -- use PydanticAI
 
 ---
 
@@ -575,6 +690,9 @@ Initializes the CAP environment. Safe to re-run (idempotent).
 
 ```bash
 cap init
+cap init --profile my-aws-profile    # specify AWS profile
+cap init --region us-west-2          # override region
+cap init --skip-bedrock-check        # skip connectivity test
 ```
 
 **What it does:**
@@ -590,6 +708,8 @@ Reports the status of all MCP servers.
 
 ```bash
 cap health
+cap health --json                    # machine-readable output
+cap health --server orchestrator     # check single server
 ```
 
 **Output includes:**
@@ -604,6 +724,7 @@ Diagnoses common configuration and environment issues.
 
 ```bash
 cap doctor
+cap doctor --fix                     # attempt automatic fixes
 ```
 
 **Checks performed:**
@@ -614,6 +735,28 @@ cap doctor
 - MCP server process status
 - Bedrock model access permissions
 - Disk space for knowledge database
+
+### `cap knowledge`
+
+Manage the knowledge base.
+
+```bash
+cap knowledge ingest --path /path/to/repo    # index a repository
+cap knowledge search "query string"          # full-text search
+cap knowledge status                         # show index stats
+cap knowledge sync                           # re-sync all indexed repos
+```
+
+### `cap fleet`
+
+Manage agent fleet.
+
+```bash
+cap fleet status                     # show all registered agents
+cap fleet discover                   # find available agents
+cap fleet health                     # health check all agents
+cap fleet restart --agent dev-01     # restart a specific agent
+```
 
 ---
 
@@ -657,7 +800,7 @@ cap health  # verify connectivity restored
 
 ### MCP server not responding
 
-**Symptom:** `cap health` shows a server as `✗ FAIL` with connection refused.
+**Symptom:** `cap health` shows a server as `FAIL` with connection refused.
 
 **Fix:** Kill stale server processes and let CAP restart them:
 ```bash
@@ -672,6 +815,32 @@ cap health  # servers auto-restart on next health check
 **Fix:** Reinstall with all optional dependencies:
 ```bash
 uv pip install -e ".[all]"
+```
+
+### Knowledge DB locked
+
+**Symptom:** `sqlite3.OperationalError: database is locked`
+
+**Fix:** Another CAP process has an open write transaction. Check for and kill stale processes:
+```bash
+# Find processes holding the DB
+lsof ~/.claude-platform/knowledge.db
+
+# Kill stale MCP server if needed
+pkill -f "cap-knowledge-server"
+
+# Verify DB integrity
+cap doctor --fix
+```
+
+### High memory usage
+
+**Symptom:** MCP server process consuming excessive memory after long sessions.
+
+**Fix:** Restart the specific server:
+```bash
+cap fleet restart --agent knowledge
+cap health
 ```
 
 ---
@@ -691,8 +860,11 @@ All contributions must include tests for new functionality and pass the existing
 ### Development Commands
 
 ```bash
-# Run tests
+# Run full test suite
 pytest tests/ -v
+
+# Run specific test module
+pytest tests/test_orchestrator.py -v
 
 # Type checking
 mypy src/cap/
@@ -703,6 +875,46 @@ ruff format src/
 
 # Run a single MCP server locally (for debugging)
 python -m cap.servers.knowledge_server
+
+# Run with debug logging
+CAP_LOG_LEVEL=DEBUG python -m cap.servers.orchestrator_server
+```
+
+### Project Structure
+
+```
+claude-agent-platform/
+  src/cap/
+    __init__.py
+    cli.py                  # CLI entry point (cap command)
+    config.py               # Configuration management
+    servers/
+      orchestrator_server.py
+      knowledge_server.py
+      session_server.py
+      harness_server.py
+      fleet_server.py
+      backlog_server.py
+      ast_server.py
+      code_intel_server.py
+      diagram_server.py
+      workflow_engine_server.py
+    agents/
+      router.py             # Agent routing logic
+      dev.py
+      devops.py
+      security.py
+      sre.py
+      architect.py
+    core/
+      budget.py             # Cost tracking and enforcement
+      workflow.py           # DAG execution engine
+      knowledge.py          # FTS5 + semantic search
+      session.py            # Session memory management
+  tests/
+  docs/
+    assets/                 # Visual assets (SVGs)
+  pyproject.toml
 ```
 
 ---
@@ -714,5 +926,5 @@ MIT License. See [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <sub>Built for engineers who ship. Not a framework &mdash; a platform.</sub>
+  <sub>Built for engineers who ship. Not a framework -- a platform.</sub>
 </p>

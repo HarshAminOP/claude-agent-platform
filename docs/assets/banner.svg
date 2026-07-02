@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="200" viewBox="0 0 900 200">
+  <defs>
+    <linearGradient id="bg-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f0f23"/>
+      <stop offset="50%" stop-color="#1a1a3e"/>
+      <stop offset="100%" stop-color="#0f3460"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="200" rx="16" ry="16" fill="url(#bg-gradient)"/>
+
+  <!-- Dot pattern (nodes/agents) at 5% opacity -->
+  <g opacity="0.05" fill="#ffffff">
+    <circle cx="50" cy="30" r="3"/>
+    <circle cx="120" cy="55" r="2"/>
+    <circle cx="80" cy="80" r="2.5"/>
+    <circle cx="200" cy="25" r="2"/>
+    <circle cx="250" cy="70" r="3"/>
+    <circle cx="310" cy="40" r="2"/>
+    <circle cx="370" cy="85" r="2.5"/>
+    <circle cx="440" cy="30" r="2"/>
+    <circle cx="500" cy="60" r="3"/>
+    <circle cx="560" cy="35" r="2"/>
+    <circle cx="620" cy="75" r="2.5"/>
+    <circle cx="680" cy="45" r="2"/>
+    <circle cx="740" cy="80" r="3"/>
+    <circle cx="800" cy="30" r="2"/>
+    <circle cx="850" cy="65" r="2.5"/>
+    <circle cx="70" cy="140" r="2"/>
+    <circle cx="140" cy="170" r="3"/>
+    <circle cx="210" cy="150" r="2.5"/>
+    <circle cx="280" cy="175" r="2"/>
+    <circle cx="350" cy="145" r="3"/>
+    <circle cx="420" cy="170" r="2"/>
+    <circle cx="490" cy="155" r="2.5"/>
+    <circle cx="560" cy="180" r="2"/>
+    <circle cx="630" cy="150" r="3"/>
+    <circle cx="700" cy="175" r="2.5"/>
+    <circle cx="770" cy="145" r="2"/>
+    <circle cx="840" cy="170" r="3"/>
+    <circle cx="160" cy="110" r="2"/>
+    <circle cx="330" cy="115" r="2.5"/>
+    <circle cx="510" cy="120" r="2"/>
+    <circle cx="670" cy="110" r="3"/>
+    <circle cx="830" cy="115" r="2"/>
+  </g>
+
+  <!-- Network/graph icon (agent coordination) -->
+  <g transform="translate(330, 72)">
+    <!-- Connection lines -->
+    <line x1="0" y1="0" x2="30" y2="-20" stroke="#6366f1" stroke-width="1.5" opacity="0.6"/>
+    <line x1="0" y1="0" x2="35" y2="15" stroke="#6366f1" stroke-width="1.5" opacity="0.6"/>
+    <line x1="30" y1="-20" x2="55" y2="-5" stroke="#6366f1" stroke-width="1.5" opacity="0.6"/>
+    <line x1="35" y1="15" x2="55" y2="-5" stroke="#6366f1" stroke-width="1.5" opacity="0.6"/>
+    <!-- Nodes -->
+    <circle cx="0" cy="0" r="5" fill="#818cf8" opacity="0.8"/>
+    <circle cx="30" cy="-20" r="4" fill="#a78bfa" opacity="0.8"/>
+    <circle cx="35" cy="15" r="4.5" fill="#a78bfa" opacity="0.8"/>
+    <circle cx="55" cy="-5" r="3.5" fill="#c4b5fd" opacity="0.8"/>
+  </g>
+
+  <!-- "CAP" text -->
+  <text x="450" y="95" font-family="system-ui, -apple-system, sans-serif" font-size="72" font-weight="bold" fill="#ffffff" text-anchor="middle" letter-spacing="8">CAP</text>
+
+  <!-- "Claude Agent Platform" subtitle -->
+  <text x="450" y="135" font-family="system-ui, -apple-system, sans-serif" font-size="20" fill="#a0aec0" text-anchor="middle" letter-spacing="2">Claude Agent Platform</text>
+</svg>

@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="500" viewBox="0 0 900 500">
+  <!-- Background -->
+  <rect width="900" height="500" fill="#0f172a"/>
+
+  <!-- Arrowhead marker -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/>
+    </marker>
+    <marker id="arrowhead-accent" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#818cf8"/>
+    </marker>
+    <!-- Glow filter for orchestrator -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+  </defs>
+
+  <!-- ==================== TOP ROW (y=40) ==================== -->
+
+  <!-- User Box -->
+  <rect x="80" y="30" width="120" height="50" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <!-- Person icon -->
+  <circle cx="110" cy="48" r="7" fill="none" stroke="#f8fafc" stroke-width="1.5"/>
+  <path d="M100 65 Q110 58 120 65" fill="none" stroke="#f8fafc" stroke-width="1.5"/>
+  <text x="130" y="60" font-family="Inter, -apple-system, sans-serif" font-size="13" fill="#f8fafc" font-weight="500">User</text>
+
+  <!-- Arrow: User → Claude Code -->
+  <path d="M200 55 C230 55 250 55 280 55" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <!-- Claude Code Box -->
+  <rect x="290" y="30" width="150" height="50" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <text x="365" y="60" font-family="Inter, -apple-system, sans-serif" font-size="13" fill="#f8fafc" font-weight="500" text-anchor="middle">Claude Code</text>
+
+  <!-- Arrow: Claude Code → MCP Protocol -->
+  <path d="M440 55 C470 55 500 55 530 55" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <!-- MCP Protocol Box -->
+  <rect x="540" y="30" width="150" height="50" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <text x="615" y="60" font-family="Inter, -apple-system, sans-serif" font-size="13" fill="#f8fafc" font-weight="500" text-anchor="middle">MCP Protocol</text>
+
+  <!-- ==================== MIDDLE ROW (y=180) ==================== -->
+
+  <!-- Arrow: MCP Protocol → Orchestrator -->
+  <path d="M615 80 C615 110 450 130 450 155" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <!-- CAP Orchestrator (central, highlighted) -->
+  <rect x="340" y="155" width="220" height="65" rx="10" ry="10" fill="#1e293b" stroke="#818cf8" stroke-width="2" filter="url(#glow)"/>
+  <rect x="340" y="155" width="4" height="65" rx="2" ry="2" fill="#818cf8"/>
+  <text x="450" y="185" font-family="Inter, -apple-system, sans-serif" font-size="14" fill="#f8fafc" font-weight="600" text-anchor="middle">CAP Orchestrator</text>
+  <text x="450" y="205" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#94a3b8" text-anchor="middle">coordination layer</text>
+
+  <!-- Arrow: Orchestrator → Knowledge Base (left) -->
+  <path d="M340 188 C280 188 240 188 190 188" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <!-- Knowledge Base Box -->
+  <rect x="60" y="163" width="130" height="50" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <!-- DB icon -->
+  <ellipse cx="88" cy="180" rx="8" ry="4" fill="none" stroke="#34d399" stroke-width="1.3"/>
+  <path d="M80 180 L80 192 Q88 196 96 192 L96 180" fill="none" stroke="#34d399" stroke-width="1.3"/>
+  <text x="105" y="195" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#f8fafc" font-weight="500">Knowledge</text>
+  <text x="105" y="207" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#f8fafc" font-weight="500">Base</text>
+
+  <!-- Arrow: Orchestrator → Session Memory (right) -->
+  <path d="M560 188 C620 188 650 188 700 188" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <!-- Session Memory Box -->
+  <rect x="710" y="163" width="130" height="50" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <!-- Brain icon (simplified) -->
+  <path d="M735 182 C735 175 740 172 745 172 C750 172 753 175 753 178 C756 176 760 177 761 180 C763 180 765 182 765 185 C765 188 763 190 761 190 C760 193 756 194 753 192 C750 195 745 195 742 192 C739 193 735 191 735 188 Z" fill="none" stroke="#a78bfa" stroke-width="1.3"/>
+  <text x="770" y="192" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#f8fafc" font-weight="500">Session</text>
+  <text x="770" y="204" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#f8fafc" font-weight="500">Memory</text>
+
+  <!-- Arrow: Orchestrator → Cost Tracker (below-left) -->
+  <path d="M390 220 C370 240 310 260 270 270" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <!-- Cost Tracker Box -->
+  <rect x="150" y="255" width="120" height="50" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <!-- $ icon -->
+  <text x="172" y="286" font-family="Inter, -apple-system, sans-serif" font-size="16" fill="#fbbf24" font-weight="700">$</text>
+  <text x="188" y="284" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#f8fafc" font-weight="500">Cost Tracker</text>
+
+  <!-- Arrow: Orchestrator → Workflow Engine (below-right) -->
+  <path d="M510 220 C530 240 580 260 620 270" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <!-- Workflow Engine Box -->
+  <rect x="620" y="255" width="140" height="50" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <!-- Gear icon -->
+  <circle cx="648" cy="280" r="8" fill="none" stroke="#38bdf8" stroke-width="1.3"/>
+  <circle cx="648" cy="280" r="3" fill="none" stroke="#38bdf8" stroke-width="1.3"/>
+  <text x="662" y="284" font-family="Inter, -apple-system, sans-serif" font-size="11" fill="#f8fafc" font-weight="500">Workflow Engine</text>
+
+  <!-- ==================== BOTTOM ROW (y=360) ==================== -->
+
+  <!-- Arrow: Orchestrator → Agent Router -->
+  <path d="M450 220 C450 290 450 310 450 340" fill="none" stroke="#818cf8" stroke-width="1.5" marker-end="url(#arrowhead-accent)"/>
+
+  <!-- Agent Router Box -->
+  <rect x="370" y="345" width="160" height="45" rx="8" ry="8" fill="#1e293b" stroke="#475569" stroke-width="1.5"/>
+  <rect x="370" y="345" width="4" height="45" rx="2" ry="2" fill="#475569"/>
+  <text x="450" y="373" font-family="Inter, -apple-system, sans-serif" font-size="13" fill="#f8fafc" font-weight="500" text-anchor="middle">Agent Router</text>
+
+  <!-- Fan-out arrows from Agent Router to specialists -->
+  <!-- → Dev -->
+  <path d="M390 390 C360 410 280 420 220 430" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <!-- → DevOps -->
+  <path d="M420 390 C410 410 380 420 360 430" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <!-- → Security -->
+  <path d="M480 390 C490 410 520 420 540 430" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+  <!-- → SRE -->
+  <path d="M510 390 C540 410 620 420 680 430" fill="none" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+
+  <!-- Dev Box (blue accent) -->
+  <rect x="160" y="435" width="110" height="42" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <rect x="160" y="435" width="4" height="42" rx="2" ry="2" fill="#3b82f6"/>
+  <text x="215" y="461" font-family="Inter, -apple-system, sans-serif" font-size="13" fill="#f8fafc" font-weight="500" text-anchor="middle">Dev</text>
+
+  <!-- DevOps Box (purple accent) -->
+  <rect x="300" y="435" width="110" height="42" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <rect x="300" y="435" width="4" height="42" rx="2" ry="2" fill="#a855f7"/>
+  <text x="355" y="461" font-family="Inter, -apple-system, sans-serif" font-size="13" fill="#f8fafc" font-weight="500" text-anchor="middle">DevOps</text>
+
+  <!-- Security Box (red accent) -->
+  <rect x="490" y="435" width="110" height="42" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <rect x="490" y="435" width="4" height="42" rx="2" ry="2" fill="#ef4444"/>
+  <text x="545" y="461" font-family="Inter, -apple-system, sans-serif" font-size="13" fill="#f8fafc" font-weight="500" text-anchor="middle">Security</text>
+
+  <!-- SRE Box (orange accent) -->
+  <rect x="630" y="435" width="110" height="42" rx="8" ry="8" fill="#1e293b" stroke="#334155" stroke-width="1.5"/>
+  <rect x="630" y="435" width="4" height="42" rx="2" ry="2" fill="#f97316"/>
+  <text x="685" y="461" font-family="Inter, -apple-system, sans-serif" font-size="13" fill="#f8fafc" font-weight="500" text-anchor="middle">SRE</text>
+
+</svg>

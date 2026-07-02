@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Forward solid arrow -->
+  <path d="M8,22 L40,22" stroke="#f59e0b" stroke-width="3" stroke-linecap="round" fill="none"/>
+  <polygon points="40,16 52,22 40,28" fill="#f59e0b"/>
+  <!-- Return dashed arrow -->
+  <path d="M56,42 L24,42" stroke="#475569" stroke-width="2" stroke-linecap="round" stroke-dasharray="4,3" fill="none"/>
+  <polygon points="24,37 12,42 24,47" fill="#475569"/>
+  <!-- Lightning bolt accent -->
+  <polygon points="30,4 26,18 33,18 28,32 36,14 29,14 33,4" fill="#f59e0b" opacity="0.6"/>
+</svg>
