@@ -108,7 +108,7 @@ def _status_color(status: str) -> str:
 # ── Root group ─────────────────────────────────────────────────────────────────
 
 @click.group()
-@click.version_option(version="2.0.0")
+@click.version_option(version="2.2.0")
 def cli():
     """CAP — Claude Agent Platform"""
     pass
