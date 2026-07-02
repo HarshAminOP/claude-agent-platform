@@ -341,6 +341,20 @@ async def _handle_start(args: dict):
         (workspace, config.session.max_decisions_loaded)
     ).fetchall()
 
+    # Auto-register new workspaces in the workspace registry so the daemon
+    # picks them up for periodic sync.  This is non-blocking and fails silently.
+    if is_new:
+        try:
+            from cap.lib.workspace_registry import add_workspace, get_workspace
+            if get_workspace(workspace) is None:
+                add_workspace(workspace, auto_added=True)
+                logger.info("session_start: auto-registered workspace %s", workspace)
+        except Exception as _reg_exc:
+            logger.warning(
+                "session_start: workspace auto-registration failed (non-fatal): %s",
+                _reg_exc,
+            )
+
     # Trigger sync on session start so agents never work with stale data.
     # Only run for new sessions to avoid duplicate work on session reuse.
     sync_result = {}

@@ -71,6 +71,25 @@ def main():
 
     now = time.time()
 
+    # ── Knowledge search: set flag so grep/find is allowed ─────────────────────
+    if tool_name == "mcp__cap-knowledge__knowledge_search":
+        try:
+            db.execute("""
+                CREATE TABLE IF NOT EXISTS kb_search_flags (
+                    session_id TEXT NOT NULL,
+                    timestamp REAL NOT NULL
+                )
+            """)
+            db.execute(
+                "INSERT INTO kb_search_flags (session_id, timestamp) VALUES (?, ?)",
+                (session_id, now)
+            )
+            # Prune old flags (> 1 hour)
+            db.execute("DELETE FROM kb_search_flags WHERE timestamp < ?", (now - 3600,))
+            db.commit()
+        except Exception:
+            pass  # Must never crash
+
     # ── Agent() completion: mark context complete, reset edit counter ──────────
     if tool_name == "Agent":
         try:

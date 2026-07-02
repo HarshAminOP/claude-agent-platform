@@ -174,6 +174,161 @@ def config_show():
     console.print(f"\n[dim]Config file: {config_path}[/dim]")
 
 
+@config.group("workspaces")
+def config_workspaces():
+    """Manage registered workspaces for background sync."""
+    pass
+
+
+@config_workspaces.command("list")
+def config_workspaces_list():
+    """List all configured workspaces."""
+    from cap.lib.workspace_registry import list_workspaces
+
+    workspaces = list_workspaces()
+    if not workspaces:
+        console.print("[dim]No workspaces configured. Use 'cap config workspaces add <path>'.[/dim]")
+        return
+
+    t = Table(title=f"Workspaces ({len(workspaces)})", box=box.SIMPLE_HEAD, show_edge=False)
+    t.add_column("Path", style="bold")
+    t.add_column("Freq.", width=8)
+    t.add_column("Last Synced")
+    t.add_column("Auto", justify="center", width=5)
+
+    for ws in workspaces:
+        last = (ws.get("last_synced") or "never")[:16]
+        auto = "[dim]yes[/dim]" if ws.get("auto_added") else "[cyan]no[/cyan]"
+        t.add_row(ws["path"], ws.get("sync_frequency", "5m"), last, auto)
+
+    console.print(t)
+
+
+@config_workspaces.command("add")
+@click.argument("path")
+@click.option("--freq", "-f", "sync_frequency", default="5m", show_default=True,
+              help="Sync frequency (e.g. 5m, 1h, 30s)")
+def config_workspaces_add(path: str, sync_frequency: str):
+    """Add a workspace to the managed list."""
+    from cap.lib.workspace_registry import add_workspace
+
+    resolved = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isdir(resolved):
+        console.print(f"[red]Path does not exist or is not a directory: {resolved}[/red]")
+        raise SystemExit(1)
+
+    entry = add_workspace(resolved, auto_added=False, sync_frequency=sync_frequency)
+    console.print(f"[green]✓[/green] Workspace added: {entry['path']}  (freq={entry['sync_frequency']})")
+
+
+@config_workspaces.command("remove")
+@click.argument("path")
+def config_workspaces_remove(path: str):
+    """Remove a workspace from the managed list."""
+    from cap.lib.workspace_registry import remove_workspace
+
+    resolved = os.path.abspath(os.path.expanduser(path))
+    removed = remove_workspace(resolved)
+    if removed:
+        console.print(f"[green]✓[/green] Workspace removed: {resolved}")
+    else:
+        console.print(f"[yellow]Not found:[/yellow] {resolved}")
+
+
+@config.group("endpoints")
+def config_endpoints():
+    """Manage remote endpoints for auto-clone."""
+    pass
+
+
+@config_endpoints.command("list")
+def config_endpoints_list():
+    """List all configured remote endpoints."""
+    from cap.lib.workspace_registry import list_endpoints
+
+    endpoints = list_endpoints()
+    if not endpoints:
+        console.print("[dim]No endpoints configured. Use 'cap config endpoints add'.[/dim]")
+        return
+
+    t = Table(title=f"Endpoints ({len(endpoints)})", box=box.SIMPLE_HEAD, show_edge=False)
+    t.add_column("Type", width=10)
+    t.add_column("Org", style="bold")
+    t.add_column("SSH Endpoint")
+    t.add_column("Clone Path")
+    t.add_column("Auto-clone", justify="center", width=10)
+    t.add_column("Discovery Freq.", width=14)
+
+    for ep in endpoints:
+        auto = "[green]yes[/green]" if ep.get("auto_clone") else "[dim]no[/dim]"
+        t.add_row(
+            ep.get("type", "—"),
+            ep.get("org", "—"),
+            ep.get("ssh_endpoint", "—"),
+            ep.get("clone_base_path", "—"),
+            auto,
+            ep.get("discovery_frequency", "—"),
+        )
+
+    console.print(t)
+
+
+@config_endpoints.command("add")
+@click.option("--type", "endpoint_type", default="github",
+              type=click.Choice(["github", "gitlab"]), show_default=True)
+@click.option("--org", "-o", required=True, help="Organisation name (e.g. moia-oss)")
+@click.option("--ssh-endpoint", default=None,
+              help="SSH endpoint base (default: git@github.com)")
+@click.option("--clone-path", "-p", "clone_base_path", default=None,
+              help="Base directory for cloned repos")
+@click.option("--auto-clone/--no-auto-clone", "auto_clone", default=True, show_default=True)
+@click.option("--discovery-freq", "discovery_frequency", default="1h", show_default=True)
+def config_endpoints_add(
+    endpoint_type: str,
+    org: str,
+    ssh_endpoint: str | None,
+    clone_base_path: str | None,
+    auto_clone: bool,
+    discovery_frequency: str,
+):
+    """Add a remote endpoint (GitHub/GitLab org) for auto-clone."""
+    from cap.lib.workspace_registry import add_endpoint
+
+    if ssh_endpoint is None:
+        if endpoint_type == "github":
+            ssh_endpoint = "git@github.com"
+        else:
+            ssh_endpoint = "git@gitlab.com"
+
+    resolved_clone_path = (
+        os.path.abspath(os.path.expanduser(clone_base_path))
+        if clone_base_path else str(Path.home())
+    )
+
+    entry = add_endpoint(
+        endpoint_type=endpoint_type,
+        org=org,
+        ssh_endpoint=ssh_endpoint,
+        auto_clone=auto_clone,
+        clone_base_path=resolved_clone_path,
+        discovery_frequency=discovery_frequency,
+    )
+    console.print(f"[green]✓[/green] Endpoint added: [{entry['type']}] {entry['org']}")
+
+
+@config_endpoints.command("remove")
+@click.argument("org")
+def config_endpoints_remove(org: str):
+    """Remove a remote endpoint by org name."""
+    from cap.lib.workspace_registry import remove_endpoint
+
+    removed = remove_endpoint(org)
+    if removed:
+        console.print(f"[green]✓[/green] Endpoint removed: {org}")
+    else:
+        console.print(f"[yellow]Not found:[/yellow] {org}")
+
+
 @config.command("set")
 @click.argument("key")
 @click.argument("value")
@@ -1593,57 +1748,33 @@ def budget_raise(amount: float):
 
 # ── cap sync ───────────────────────────────────────────────────────────────────
 
-@cli.command()
-@click.option("--workspace", "-w", default=".", help="Workspace to sync")
-@click.option(
-    "--trigger",
-    type=click.Choice(["session_start", "git_post_pull", "manual"]),
-    default="manual",
-    show_default=True,
-)
-@click.option("--full", is_flag=True, help="Force full re-sync (ignore change detection)")
-def sync(workspace: str, trigger: str, full: bool):
-    """Index workspace files into the knowledge base."""
-    from cap.lib.config import load_config
-    from cap.lib.db_init import init_knowledge_db
+def _sync_single_workspace(db, workspace: str, trigger: str, full: bool) -> None:
+    """Sync one workspace and print a result table to the console."""
     from cap.lib.repo_extractor import extract_and_index_repos
     from cap.lib.sync_engine import sync_workspace
 
-    workspace = _resolve_workspace(workspace)
-    config = load_config()
-    data_dir = config.data_dir
+    console.print(f"\n[bold]Syncing:[/bold] {workspace}")
+    console.print(f"[dim]Mode: {'full re-index' if full else 'incremental'}  Trigger: {trigger}[/dim]")
 
-    console.print(f"[bold]Syncing:[/bold] {workspace}")
-    console.print(f"[dim]Mode: {'full re-index' if full else 'incremental'}  Trigger: {trigger}[/dim]\n")
-
-    try:
-        db = init_knowledge_db(data_dir)
-    except Exception as exc:
-        console.print(f"[red]Database init failed: {exc}[/red]")
-        raise SystemExit(1)
-
-    # Phase 1: Repo-level summaries (high-quality structured entries)
-    console.print("[bold]Phase 1: Repo summaries[/bold]")
+    # Phase 1: Repo-level summaries
     with console.status("[cyan]Extracting repo summaries…[/cyan]"):
         repo_stats = extract_and_index_repos(db, workspace)
 
-    console.print(f"  [green]✓[/green] {repo_stats.repos_found} repos found, "
-                  f"{repo_stats.repos_indexed} indexed, "
-                  f"{repo_stats.repos_updated} updated, "
-                  f"{repo_stats.graph_edges_created} graph edges")
-    if repo_stats.errors:
-        for err in repo_stats.errors[:3]:
-            console.print(f"  [yellow]![/yellow] {err}")
+    console.print(
+        f"  Repos: {repo_stats.repos_found} found, "
+        f"{repo_stats.repos_indexed} indexed, "
+        f"{repo_stats.repos_updated} updated"
+    )
+    for err in repo_stats.errors[:2]:
+        console.print(f"  [yellow]![/yellow] {err}")
 
-    # Phase 2: File-level indexing (for grep-like precision queries)
-    console.print("\n[bold]Phase 2: File indexing[/bold]")
+    # Phase 2: File-level indexing
     with console.status("[cyan]Scanning and indexing files…[/cyan]"):
         stats = sync_workspace(db, workspace, full=full)
 
     table = Table(box=box.SIMPLE)
     table.add_column("Metric", style="bold")
     table.add_column("Count", justify="right")
-
     table.add_row("Files scanned", str(stats.files_scanned))
     table.add_row("Files indexed (new)", str(stats.files_indexed))
     table.add_row("Files updated", str(stats.files_updated))
@@ -1654,7 +1785,7 @@ def sync(workspace: str, trigger: str, full: bool):
     console.print(table)
 
     if stats.errors:
-        console.print(f"\n[yellow]Warnings ({len(stats.errors)}):[/yellow]")
+        console.print(f"[yellow]Warnings ({len(stats.errors)}):[/yellow]")
         for err in stats.errors[:5]:
             console.print(f"  [dim]• {err}[/dim]")
         if len(stats.errors) > 5:
@@ -1662,11 +1793,76 @@ def sync(workspace: str, trigger: str, full: bool):
 
     total = stats.files_indexed + stats.files_updated + repo_stats.repos_indexed
     if total > 0:
-        console.print(f"\n[green]✓[/green] Knowledge base updated ({total} entries)")
+        console.print(f"[green]✓[/green] Knowledge base updated ({total} entries)")
     elif stats.files_unchanged > 0:
-        console.print(f"\n[green]✓[/green] Already up to date")
+        console.print("[green]✓[/green] Already up to date")
     else:
-        console.print("\n[yellow]No indexable content found in workspace[/yellow]")
+        console.print("[yellow]No indexable content found in workspace[/yellow]")
+
+
+@cli.command()
+@click.option("--workspace", "-w", default=None,
+              help="Workspace to sync. When omitted, syncs ALL configured workspaces.")
+@click.option(
+    "--trigger",
+    type=click.Choice(["session_start", "git_post_pull", "manual"]),
+    default="manual",
+    show_default=True,
+)
+@click.option("--full", is_flag=True, help="Force full re-sync (ignore change detection)")
+def sync(workspace: str | None, trigger: str, full: bool):
+    """Index workspace files into the knowledge base.
+
+    When called without -w, syncs all workspaces registered via
+    'cap config workspaces add' (or auto-registered by session_start).
+    """
+    from cap.lib.config import load_config
+    from cap.lib.db_init import init_knowledge_db
+
+    config = load_config()
+    data_dir = config.data_dir
+
+    try:
+        db = init_knowledge_db(data_dir)
+    except Exception as exc:
+        console.print(f"[red]Database init failed: {exc}[/red]")
+        raise SystemExit(1)
+
+    if workspace is not None:
+        # Single-workspace mode (original behaviour).
+        resolved = _resolve_workspace(workspace)
+        _sync_single_workspace(db, resolved, trigger, full)
+        return
+
+    # All-workspaces mode: read from registry.
+    from cap.lib.workspace_registry import list_workspaces
+
+    workspaces = list_workspaces()
+    if not workspaces:
+        console.print(
+            "[yellow]No workspaces configured.[/yellow] "
+            "Add one with: cap config workspaces add <path>"
+        )
+        return
+
+    console.print(f"[bold]Syncing {len(workspaces)} workspace(s)…[/bold]")
+    failed = 0
+    for ws in workspaces:
+        ws_path = ws.get("path", "")
+        if not ws_path or not os.path.isdir(ws_path):
+            console.print(f"[yellow]Skipping missing path:[/yellow] {ws_path}")
+            failed += 1
+            continue
+        try:
+            _sync_single_workspace(db, ws_path, trigger, full)
+        except Exception as exc:
+            console.print(f"[red]Sync failed for {ws_path}: {exc}[/red]")
+            failed += 1
+
+    if failed:
+        console.print(f"\n[yellow]{failed} workspace(s) failed[/yellow]")
+    else:
+        console.print(f"\n[green]All {len(workspaces)} workspace(s) synced[/green]")
 
 
 # ── cap github ─────────────────────────────────────────────────────────────────

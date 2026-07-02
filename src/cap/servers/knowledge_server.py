@@ -447,11 +447,21 @@ async def list_tools():
         ),
         Tool(
             name="knowledge_sync",
-            description="Trigger workspace knowledge sync (incremental by default).",
+            description=(
+                "Trigger workspace knowledge sync (incremental by default). "
+                "When workspace is omitted or set to 'all', syncs every workspace "
+                "registered in the workspace registry."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "workspace": {"type": "string", "description": "Workspace path to sync"},
+                    "workspace": {
+                        "type": "string",
+                        "description": (
+                            "Workspace path to sync. "
+                            "Omit (or set to 'all') to sync all configured workspaces."
+                        ),
+                    },
                     "trigger": {
                         "type": "string",
                         "enum": ["session_start", "git_post_pull", "workspace_change", "scheduled", "manual"],
@@ -459,7 +469,6 @@ async def list_tools():
                     },
                     "full": {"type": "boolean", "default": False, "description": "Force full re-sync"},
                 },
-                "required": ["workspace"],
             },
         ),
         Tool(
@@ -829,22 +838,14 @@ async def _handle_graph_add(args: dict):
     }))]
 
 
-async def _handle_sync(args: dict):
-    """Trigger a workspace knowledge sync."""
-    err = _db_required("knowledge_sync")
-    if err:
-        return err
+async def _sync_one_workspace(workspace: str, full: bool) -> dict:
+    """Sync a single workspace and post-process the embedding queue.
 
+    Returns a summary dict suitable for inclusion in a JSON response.
+    """
     from lib.sync_engine import sync_workspace
 
-    workspace = args.get("workspace")
-    if not workspace:
-        return [TextContent(type="text", text=json.dumps({"error": "Missing required parameter: workspace"}))]
-    trigger = args.get("trigger", "manual")
-    full = args.get("full", False)
-
     stats = sync_workspace(db, workspace, full=full)
-
     _cache_clear()
 
     embeddings_processed = 0
@@ -891,22 +892,23 @@ async def _handle_sync(args: dict):
                         embeddings_processed += 1
                     else:
                         new_attempts = attempts + 1
-                        status = "failed" if new_attempts >= 3 else "pending"
+                        new_status = "failed" if new_attempts >= 3 else "pending"
                         db.execute(
                             "UPDATE embedding_queue SET attempts = ?, status = ? WHERE id = ?",
-                            (new_attempts, status, eq_id)
+                            (new_attempts, new_status, eq_id)
                         )
 
                 db.commit()
-                logger.info("Post-sync embedding: processed %d/%d items", embeddings_processed, len(pending))
+                logger.info(
+                    "Post-sync embedding for %s: processed %d/%d items",
+                    workspace, embeddings_processed, len(pending),
+                )
         except Exception as e:
             logger.warning("Post-sync embedding failed (non-fatal, queue retained): %s", e)
 
-    return [TextContent(type="text", text=json.dumps({
+    return {
         "status": "complete" if not stats.errors else "complete_with_errors",
         "workspace": workspace,
-        "trigger": trigger,
-        "full": full,
         "files_scanned": stats.files_scanned,
         "files_indexed": stats.files_indexed,
         "files_updated": stats.files_updated,
@@ -915,6 +917,75 @@ async def _handle_sync(args: dict):
         "embeddings_queued": stats.embeddings_queued,
         "embeddings_processed": embeddings_processed,
         "errors": stats.errors[:5] if stats.errors else [],
+    }
+
+
+async def _handle_sync(args: dict):
+    """Trigger a workspace knowledge sync.
+
+    When workspace is absent or ``'all'``, syncs every workspace registered
+    in the workspace registry (``harness-config.json``).  Otherwise syncs
+    just the requested workspace (original behaviour).
+    """
+    err = _db_required("knowledge_sync")
+    if err:
+        return err
+
+    workspace = args.get("workspace")
+    trigger = args.get("trigger", "manual")
+    full = args.get("full", False)
+
+    # Normalise sentinel values to None so the all-workspaces path triggers.
+    if workspace in (None, "", "all"):
+        workspace = None
+
+    if workspace is not None:
+        # Single-workspace sync (original behaviour).
+        summary = await _sync_one_workspace(workspace, full)
+        summary["trigger"] = trigger
+        summary["full"] = full
+        return [TextContent(type="text", text=json.dumps(summary))]
+
+    # All-workspaces sync: read from registry.
+    try:
+        from lib.workspace_registry import list_workspaces, mark_workspace_synced
+    except ImportError:
+        # Fallback: registry module not available — nothing to sync.
+        return [TextContent(type="text", text=json.dumps({
+            "status": "error",
+            "error": "workspace_registry module not available",
+        }))]
+
+    workspaces = list_workspaces()
+    if not workspaces:
+        return [TextContent(type="text", text=json.dumps({
+            "status": "ok",
+            "message": "No workspaces configured in registry.",
+            "synced": 0,
+        }))]
+
+    results = []
+    errors: list[str] = []
+    for ws in workspaces:
+        ws_path = ws.get("path", "")
+        if not ws_path:
+            continue
+        try:
+            summary = await _sync_one_workspace(ws_path, full)
+            summary["trigger"] = trigger
+            summary["full"] = full
+            results.append(summary)
+            mark_workspace_synced(ws_path)
+        except Exception as exc:
+            err_msg = f"{ws_path}: {exc}"
+            errors.append(err_msg)
+            logger.warning("knowledge_sync all-workspaces: failed for %s: %s", ws_path, exc)
+
+    return [TextContent(type="text", text=json.dumps({
+        "status": "complete" if not errors else "complete_with_errors",
+        "synced_count": len(results),
+        "results": results,
+        "errors": errors,
     }))]
 
 

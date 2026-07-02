@@ -61,6 +61,10 @@ def get_db():
             reason TEXT,
             enabled_by TEXT DEFAULT 'user'
         );
+        CREATE TABLE IF NOT EXISTS kb_search_flags (
+            session_id TEXT NOT NULL,
+            timestamp REAL NOT NULL
+        );
     """)
     return conn
 
@@ -163,6 +167,40 @@ def main():
     # Passthrough check — if active, allow everything
     workspace = os.getcwd()
     if check_passthrough(db, workspace):
+        sys.exit(0)
+
+    # ── Bash grep/find enforcement: knowledge_search must be called first ────
+    if tool_name == "Bash":
+        command = tool_input.get("command", "") if isinstance(tool_input, dict) else ""
+        # Only enforce when the command IS a search tool, not when "find" appears in args
+        cmd_stripped = command.lstrip()
+        first_word = cmd_stripped.split()[0] if cmd_stripped.split() else ""
+        search_commands = {"grep", "find", "rg", "ag", "ack"}
+        is_code_search = first_word in search_commands
+        # Also catch piped patterns like "cat | grep" or "... | grep"
+        if not is_code_search and "| grep " in command:
+            is_code_search = True
+        # Exclude git commands entirely — git grep, git log, etc.
+        is_exempt = cmd_stripped.startswith("git ") or first_word in {"npm", "pip", "uv", "docker", "kubectl"}
+
+        if is_code_search and not is_exempt:
+            try:
+                row = db.execute(
+                    """SELECT 1 FROM kb_search_flags
+                       WHERE session_id = ? AND timestamp > ?""",
+                    (session_id, time.time() - 600)  # Flag valid for 10 minutes
+                ).fetchone()
+                if row is None:
+                    reason = (
+                        "BLOCKED: You must call mcp__cap-knowledge__knowledge_search BEFORE "
+                        "using grep/find/rg. The knowledge base is faster and more complete. "
+                        "Call knowledge_search first, then use grep only if KB results are insufficient."
+                    )
+                    record_violation(db, session_id, tool_name, command[:100], reason)
+                    print(reason, file=sys.stderr)
+                    sys.exit(2)
+            except sqlite3.OperationalError:
+                pass  # Table doesn't exist yet — fail open
         sys.exit(0)
 
     # Only enforce on file-writing tools

@@ -63,6 +63,35 @@ INTERVAL_REEMBED = 1800
 INTERVAL_CLEANUP_STALE = 3600
 INTERVAL_COMPACT_VECTORS = 21600
 INTERVAL_WORKSPACE_DETECT = 60
+INTERVAL_WORKSPACE_SYNC = 300        # 5 min — respects per-workspace sync_frequency
+INTERVAL_DB_COMPACTION = 21600       # 6 hr  — VACUUM + dedup + prune stale entries
+
+
+def _parse_frequency_seconds(freq: str) -> int:
+    """Convert a human-readable frequency string to seconds.
+
+    Supported suffixes: s (seconds), m (minutes), h (hours), d (days).
+    Defaults to 300 seconds on any parse error.
+
+    Args:
+        freq: Frequency string such as ``"5m"``, ``"1h"``, ``"30s"``.
+
+    Returns:
+        Integer number of seconds.
+    """
+    freq = freq.strip().lower()
+    try:
+        if freq.endswith("d"):
+            return int(freq[:-1]) * 86400
+        if freq.endswith("h"):
+            return int(freq[:-1]) * 3600
+        if freq.endswith("m"):
+            return int(freq[:-1]) * 60
+        if freq.endswith("s"):
+            return int(freq[:-1])
+        return int(freq)
+    except (ValueError, IndexError):
+        return 300
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +460,199 @@ class CapDaemon:
             return {"error": str(exc)}
 
     # ------------------------------------------------------------------
+    # Task 7: Workspace Sync (every 5 min, per-workspace frequency honoured)
+    # ------------------------------------------------------------------
+
+    def workspace_sync(self) -> dict:
+        """Sync all registered workspaces whose sync_frequency has elapsed.
+
+        Reads the workspace list from workspace_registry, compares each
+        entry's ``last_synced`` timestamp against its ``sync_frequency``,
+        and syncs those that are due.  Uses the existing sync_workspace
+        logic so the result is identical to running ``cap sync``.
+
+        Returns:
+            dict with keys ``synced`` (count), ``skipped`` (count), and
+            ``errors`` (list of error strings).
+        """
+        results: dict = {"synced": 0, "skipped": 0, "errors": []}
+
+        try:
+            from cap.lib.workspace_registry import list_workspaces, mark_workspace_synced
+        except Exception as exc:
+            logger.warning("workspace_sync: workspace_registry unavailable: %s", exc)
+            results["errors"].append(str(exc))
+            return results
+
+        workspaces = list_workspaces()
+        if not workspaces:
+            logger.debug("workspace_sync: no workspaces registered")
+            return results
+
+        try:
+            from cap.lib.config import load_config
+            from cap.lib.db_init import init_knowledge_db
+            from cap.lib.sync_engine import sync_workspace
+
+            config = load_config()
+            data_dir = config.data_dir
+            db = init_knowledge_db(data_dir)
+        except Exception as exc:
+            logger.warning("workspace_sync: failed to open knowledge DB: %s", exc)
+            results["errors"].append(str(exc))
+            return results
+
+        now = time.time()
+
+        for ws in workspaces:
+            ws_path = ws.get("path", "")
+            if not ws_path or not os.path.isdir(ws_path):
+                results["skipped"] += 1
+                continue
+
+            # Determine whether this workspace is due for a sync.
+            freq_str = ws.get("sync_frequency", "5m")
+            freq_secs = _parse_frequency_seconds(freq_str)
+
+            last_synced_str = ws.get("last_synced")
+            if last_synced_str:
+                try:
+                    dt = datetime.fromisoformat(last_synced_str.replace("Z", "+00:00"))
+                    last_synced_ts = dt.timestamp()
+                except (ValueError, TypeError):
+                    last_synced_ts = 0.0
+            else:
+                last_synced_ts = 0.0
+
+            elapsed = now - last_synced_ts
+            if elapsed < freq_secs:
+                results["skipped"] += 1
+                logger.debug(
+                    "workspace_sync: skipping %s (%.0fs < %.0fs freq)",
+                    ws_path, elapsed, freq_secs,
+                )
+                continue
+
+            try:
+                sync_workspace(db, ws_path, full=False)
+                mark_workspace_synced(ws_path)
+                results["synced"] += 1
+                logger.info("workspace_sync: synced %s", ws_path)
+            except Exception as exc:
+                results["errors"].append(f"{ws_path}: {exc}")
+                logger.warning("workspace_sync: failed for %s: %s", ws_path, exc)
+
+        return results
+
+    # ------------------------------------------------------------------
+    # Task 8: DB Compaction (every 6 hr)
+    # ------------------------------------------------------------------
+
+    def db_compaction(self) -> dict:
+        """Run VACUUM on knowledge.db, deduplicate entries, prune stale files.
+
+        Performs three operations:
+        1. SQLite VACUUM to reclaim freed space and defragment the file.
+        2. Deduplication: removes knowledge_entries whose source_path no
+           longer exists on disk (stale file entries).
+        3. Deduplication of content_hash duplicates keeping the newest row.
+
+        Returns:
+            dict with keys ``vacuumed``, ``stale_pruned``, ``deduped``,
+            and ``errors``.
+        """
+        results: dict = {"vacuumed": False, "stale_pruned": 0, "deduped": 0, "errors": []}
+
+        try:
+            from cap.lib.config import load_config
+            from cap.lib.db_init import init_knowledge_db
+
+            config = load_config()
+            data_dir = config.data_dir
+            db = init_knowledge_db(data_dir)
+        except Exception as exc:
+            logger.warning("db_compaction: failed to open knowledge DB: %s", exc)
+            results["errors"].append(str(exc))
+            return results
+
+        # Step 1: Prune stale entries (source_path no longer exists)
+        try:
+            rows = db.execute(
+                "SELECT id, source_path FROM knowledge_entries "
+                "WHERE source_path IS NOT NULL AND source_type = 'file'"
+            ).fetchall()
+
+            stale_ids: list[int] = []
+            for row_id, source_path in rows:
+                if source_path and not os.path.exists(source_path):
+                    stale_ids.append(row_id)
+
+            if stale_ids:
+                placeholders = ",".join("?" * len(stale_ids))
+                db.execute(
+                    f"DELETE FROM knowledge_entries WHERE id IN ({placeholders})",
+                    stale_ids,
+                )
+                # Also clean up the embedding queue for deleted entries.
+                db.execute(
+                    f"DELETE FROM embedding_queue WHERE entry_id IN ({placeholders})",
+                    stale_ids,
+                )
+                db.commit()
+                results["stale_pruned"] = len(stale_ids)
+                logger.info("db_compaction: pruned %d stale file entries", len(stale_ids))
+        except Exception as exc:
+            logger.warning("db_compaction: stale prune failed: %s", exc)
+            results["errors"].append(f"stale_prune: {exc}")
+
+        # Step 2: Deduplicate content_hash — keep newest, remove older duplicates
+        try:
+            dupes = db.execute(
+                """SELECT content_hash, COUNT(*) AS cnt
+                   FROM knowledge_entries
+                   WHERE content_hash IS NOT NULL
+                   GROUP BY content_hash
+                   HAVING cnt > 1"""
+            ).fetchall()
+
+            deduped = 0
+            for content_hash, _ in dupes:
+                # Keep the row with the highest id (most recently inserted)
+                keep_id = db.execute(
+                    "SELECT MAX(id) FROM knowledge_entries WHERE content_hash = ?",
+                    (content_hash,),
+                ).fetchone()[0]
+
+                deleted = db.execute(
+                    "DELETE FROM knowledge_entries WHERE content_hash = ? AND id != ?",
+                    (content_hash, keep_id),
+                ).rowcount
+                deduped += deleted
+
+            if deduped:
+                db.commit()
+            results["deduped"] = deduped
+            logger.info("db_compaction: deduplicated %d entries", deduped)
+        except Exception as exc:
+            logger.warning("db_compaction: dedup failed: %s", exc)
+            results["errors"].append(f"dedup: {exc}")
+
+        # Step 3: VACUUM — must run outside a transaction
+        try:
+            db_path = str(data_dir / "knowledge.db")
+            import sqlite3 as _sqlite3
+            vacuum_conn = _sqlite3.connect(db_path, isolation_level=None)
+            vacuum_conn.execute("VACUUM")
+            vacuum_conn.close()
+            results["vacuumed"] = True
+            logger.info("db_compaction: VACUUM complete on %s", db_path)
+        except Exception as exc:
+            logger.warning("db_compaction: VACUUM failed: %s", exc)
+            results["errors"].append(f"vacuum: {exc}")
+
+        return results
+
+    # ------------------------------------------------------------------
     # Legacy: run_once (backward compat)
     # ------------------------------------------------------------------
 
@@ -549,6 +771,12 @@ class CapDaemon:
             ),
             asyncio.create_task(
                 self._periodic_task("workspace_detect", self.workspace_detect, INTERVAL_WORKSPACE_DETECT)
+            ),
+            asyncio.create_task(
+                self._periodic_task("workspace_sync", self.workspace_sync, INTERVAL_WORKSPACE_SYNC)
+            ),
+            asyncio.create_task(
+                self._periodic_task("db_compaction", self.db_compaction, INTERVAL_DB_COMPACTION)
             ),
         ]
 

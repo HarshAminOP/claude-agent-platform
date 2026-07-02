@@ -31,6 +31,12 @@
 - [Contributing](#contributing)
 - [License](#license)
 
+**Documentation Links:**
+- [Workspace & Endpoint Configuration](docs/WORKSPACE-ENDPOINTS.md) — Register workspaces, configure remote endpoints, manage sync
+- [Configuration Reference](docs/CONFIGURATION.md) — Platform settings, provider config, advanced tuning
+- [CLI Reference](docs/cli-reference.md) — Complete command documentation
+- [Architecture Deep-Dive](docs/ARCHITECTURE.md) — System design, data flow, MCP servers
+
 ---
 
 ## Terminal Demo
@@ -379,6 +385,184 @@ Session memory supports: `session_start`, `session_end`, `session_record`, `sess
 </details>
 
 <details>
+<summary><strong>Workspace and Endpoint Configuration</strong></summary>
+
+CAP manages multiple local workspaces and remote Git endpoints. Workspaces are auto-registered, synced on a schedule, and indexed into the knowledge base. Endpoints define where to auto-clone dependencies.
+
+### Workspace Registry
+
+When `session_start` is called with a workspace path not yet registered, CAP auto-adds it. All registered workspaces are synced in the background according to their configured frequency.
+
+```json
+// Example workspace entry in harness-config.json
+{
+  "path": "/Users/dev/projects/my-service",
+  "sync_frequency": "5m",
+  "include_patterns": ["*.py", "*.ts", "*.tf", "*.yaml", "*.json", "*.md"],
+  "exclude_patterns": [".git", "node_modules", "__pycache__", ".terraform", "dist", "build"],
+  "depth": null,
+  "last_synced": "2026-07-02T16:19:00Z",
+  "auto_added": true
+}
+```
+
+**Fields:**
+- `path` (string) — Absolute path to workspace directory
+- `sync_frequency` (string) — Sync interval (e.g., "5m", "1h", "never")
+- `include_patterns` (array[string]) — File patterns to index (glob-style)
+- `exclude_patterns` (array[string]) — Patterns to skip (regex)
+- `depth` (int | null) — Directory traversal depth (null = unlimited)
+- `last_synced` (string) — ISO 8601 timestamp of last index sync
+- `auto_added` (bool) — Whether this workspace was auto-registered
+
+### Endpoint Configuration
+
+Endpoints define remote Git organizations for auto-clone and dependency resolution. When a Terraform remote_state or ArgoCD repo URL references an unknown repository, CAP clones it via the matching endpoint.
+
+```json
+// Example endpoint entry in harness-config.json
+{
+  "type": "github",
+  "org": "moia-dev",
+  "ssh_endpoint": "git@github.com",
+  "auto_clone": true,
+  "clone_base_path": "/Users/dev/Projects",
+  "discovery_frequency": "1h"
+}
+```
+
+**Fields:**
+- `type` (string) — "github", "gitlab", or "gitea"
+- `org` (string) — Organization/group name
+- `ssh_endpoint` (string) — SSH endpoint (e.g., "git@github.com", "git@gitlab.com")
+- `auto_clone` (bool) — Enable auto-clone on missing dependencies
+- `clone_base_path` (string) — Where to clone repos (absolute path)
+- `discovery_frequency` (string) — How often to scan for new repos (e.g., "1h", "never")
+
+### CLI Commands
+
+**Workspace Management**
+
+```bash
+# List all registered workspaces
+cap config workspaces list
+
+# Add a workspace
+cap config workspaces add /path/to/project
+
+# Remove a workspace
+cap config workspaces remove /path/to/project
+```
+
+**Endpoint Management**
+
+```bash
+# List all configured endpoints
+cap config endpoints list
+
+# Add a GitHub endpoint
+cap config endpoints add --type github --org moia-dev --ssh-endpoint git@github.com --auto-clone
+
+# Add a GitLab endpoint
+cap config endpoints add --type gitlab --org my-group --ssh-endpoint git@gitlab.com --auto-clone
+
+# Remove an endpoint
+cap config endpoints remove --org moia-dev
+```
+
+**Synchronization**
+
+```bash
+# Sync all registered workspaces (respects configured frequencies)
+cap sync
+
+# Sync a specific workspace
+cap sync -w /path/to/project
+
+# Force re-sync (ignores frequency limits)
+cap sync --force
+```
+
+### Automatic Behavior
+
+1. **Auto-registration** — When `session_start` is called with a workspace not in the registry, it's automatically added with default settings (5m sync, standard patterns).
+
+2. **Daemon sync** — The knowledge server runs a background daemon that periodically syncs each registered workspace according to its `sync_frequency`. Syncing indexes all matching files into the knowledge base.
+
+3. **Dependency resolution** — When a service references an unknown repo (via Terraform `remote_state` or ArgoCD `repoURL`), CAP attempts to clone it from the matching endpoint. The cloned repo is automatically indexed.
+
+4. **Compaction** — Every 6 hours, the knowledge database runs VACUUM and prunes stale entries for files that no longer exist in the workspace.
+
+### Configuration Example
+
+```bash
+# Add workspace for a monorepo with multiple services
+cap config workspaces add /Users/dev/moia-platform
+
+# Configure a GitHub endpoint for auto-clone
+cap config endpoints add \
+  --type github \
+  --org moia-dev \
+  --ssh-endpoint git@github.com \
+  --auto-clone
+
+# Sync everything now
+cap sync
+
+# Later, query the knowledge base for services in this workspace
+cap knowledge search "payment service API"  # searches across indexed workspaces
+```
+
+### Editing Configuration Directly
+
+To manually configure workspaces and endpoints, edit the `workspaces` and `endpoints` arrays in `~/.claude-platform/harness-config.json`:
+
+```json
+{
+  "workspaces": [
+    {
+      "path": "/Users/dev/projects/service-a",
+      "sync_frequency": "5m",
+      "include_patterns": ["*.py", "*.tf", "*.md"],
+      "exclude_patterns": [".git", "node_modules", "__pycache__"],
+      "depth": null,
+      "last_synced": "2026-07-02T16:19:00Z",
+      "auto_added": false
+    },
+    {
+      "path": "/Users/dev/projects/service-b",
+      "sync_frequency": "1h",
+      "include_patterns": ["*.go", "*.yaml"],
+      "exclude_patterns": [".git", "vendor"],
+      "depth": 2,
+      "last_synced": "2026-07-02T15:00:00Z",
+      "auto_added": true
+    }
+  ],
+  "endpoints": [
+    {
+      "type": "github",
+      "org": "moia-dev",
+      "ssh_endpoint": "git@github.com",
+      "auto_clone": true,
+      "clone_base_path": "/Users/dev/Projects",
+      "discovery_frequency": "1h"
+    },
+    {
+      "type": "gitlab",
+      "org": "moia-internal",
+      "ssh_endpoint": "git@gitlab.moia.de",
+      "auto_clone": false,
+      "clone_base_path": "/Users/dev/Projects",
+      "discovery_frequency": "never"
+    }
+  ]
+}
+```
+
+</details>
+
+<details>
 <summary><strong>Workflow Engine</strong></summary>
 
 DAG-based multi-step execution with parallel branches, checkpoints, and automatic resumability.
@@ -585,7 +769,11 @@ All servers communicate over stdio (no network ports, no HTTP). Each server is a
 
 ## Configuration
 
-CAP stores configuration in `~/.claude-platform/harness-config.json`:
+CAP stores configuration in multiple files under `~/.claude-platform/`. For comprehensive configuration details, see [Configuration Reference](docs/CONFIGURATION.md).
+
+**Workspace and Endpoint Management:** See [Workspace & Endpoint Configuration](docs/WORKSPACE-ENDPOINTS.md) for detailed guidance on registering workspaces, configuring remote endpoints, and managing synchronization.
+
+CAP stores core LLM provider and model configuration in `~/.claude-platform/harness-config.json`:
 
 ```jsonc
 {
