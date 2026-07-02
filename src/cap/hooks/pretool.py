@@ -177,11 +177,8 @@ def main():
         first_word = cmd_stripped.split()[0] if cmd_stripped.split() else ""
         search_commands = {"grep", "find", "rg", "ag", "ack"}
         is_code_search = first_word in search_commands
-        # Also catch piped patterns like "cat | grep" or "... | grep"
-        if not is_code_search and "| grep " in command:
-            is_code_search = True
-        # Exclude git commands entirely — git grep, git log, etc.
-        is_exempt = cmd_stripped.startswith("git ") or first_word in {"npm", "pip", "uv", "docker", "kubectl"}
+        # Exclude git commands, package managers, and common non-search tools
+        is_exempt = cmd_stripped.startswith("git ") or first_word in {"npm", "pip", "uv", "docker", "kubectl", "python3", "python", "echo", "cat", "ls"}
 
         if is_code_search and not is_exempt:
             try:
